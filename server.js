@@ -15,13 +15,7 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ===================== DATABASE CONNECT =====================
-var dbUrl = process.env.TURSO_DATABASE_URL || 'file:local.db';
-var dbToken = process.env.TURSO_AUTH_TOKEN || undefined;
-
-var db = createClient({
-  url: dbUrl,
-  authToken: dbToken
-});
+var db = null;
 
 // ===================== DATABASE HELPERS =====================
 async function dbRun(sql, params) {

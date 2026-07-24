@@ -672,7 +672,13 @@ app.get('*', function(req, res) {
 // ===================== START SERVER =====================
 async function startServer() {
   console.log('Connecting to Turso Cloud Database...');
-  await dbExec(TABLES_SQL);
+  var statements = TABLES_SQL.split(';');
+  for (var i = 0; i < statements.length; i++) {
+    var s = statements[i].trim();
+    if (s.length > 5) {
+      await db.execute(s);
+    }
+  }
   console.log('Tables ready.');
 
   var adminExists = await dbGet("SELECT id FROM users WHERE username = 'admin'");

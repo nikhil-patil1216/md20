@@ -254,25 +254,80 @@ const App = {
   },
 
   // ===================== DASHBOARD =====================
-  async pageDashboard() {
+    async pageDashboard() {
     var stats = await this.api('GET', '/api/dashboard/stats');
     if (!stats) return;
-    document.getElementById('pageContent').innerHTML =
-      '<div class="stats-grid">' +
-        '<div class="stat-card"><div class="stat-icon"><i class="fas fa-truck"></i></div><div class="stat-value">' + stats.pendingVehicles + '</div><div class="stat-label">Pending Vehicles</div></div>' +
-        '<div class="stat-card warning"><div class="stat-icon"><i class="fas fa-dolly"></i></div><div class="stat-value">' + stats.unloadingVehicles + '</div><div class="stat-label">Unloading Now</div></div>' +
-        '<div class="stat-card success"><div class="stat-icon"><i class="fas fa-file-invoice"></i></div><div class="stat-value">' + stats.totalGRN + '</div><div class="stat-label">Total GRN</div></div>' +
-        '<div class="stat-card"><div class="stat-icon"><i class="fas fa-location-dot"></i></div><div class="stat-value">' + stats.totalPutaway + '</div><div class="stat-label">Putaway Done</div></div>' +
-        '<div class="stat-card" style="--accent:#a855f7"><div class="stat-icon" style="color:#a855f7"><i class="fas fa-barcode"></i></div><div class="stat-value">' + stats.totalPIV + '</div><div class="stat-label">PIV Done</div></div>' +
-        '<div class="stat-card success"><div class="stat-icon"><i class="fas fa-database"></i></div><div class="stat-value">' + stats.totalMaterials + '</div><div class="stat-label">Materials</div></div>' +
-        '<div class="stat-card"><div class="stat-icon"><i class="fas fa-th"></i></div><div class="stat-value">' + stats.totalBins + '</div><div class="stat-label">Total Bins</div></div>' +
-        '<div class="stat-card success"><div class="stat-icon"><i class="fas fa-check-double"></i></div><div class="stat-value">' + stats.activeLocations + '</div><div class="stat-label">Active Locations</div></div>' +
-      '</div>' +
-      '<div class="card-3d"><div class="card-title"><i class="fas fa-warehouse"></i> VIP Industry MD20 - Warehouse Dashboard</div>' +
-        '<p style="color:var(--text-secondary)">Welcome to the Warehouse Management System. Use the sidebar to navigate between modules.</p>' +
-      '</div>';
-  },
+    var actions = await this.api('GET', '/api/live-actions');
+    var recentActions = actions ? actions.slice(0, 6) : [];
 
+    var totalBinPercent = stats.totalBins > 0 ? Math.round((stats.filledBins / stats.totalBins) * 100) : 0;
+
+    var feedHtml = '';
+    for (var f = 0; f < recentActions.length; f++) {
+      var a = recentActions[f];
+      var iconCls = a.module || 'admin';
+      var iconMap = { inbound: 'fa-truck', putaway: 'fa-location-dot', piv: 'fa-barcode', location: 'fa-map-marker-alt', admin: 'fa-user-shield', material: 'fa-database', bin: 'fa-th', auth: 'fa-sign-in-alt' };
+      var colorMap = { inbound: 'var(--accent)', putaway: 'var(--success)', piv: '#a855f7', location: 'var(--danger)', admin: 'var(--warning)', material: 'var(--accent)', bin: 'var(--success)', auth: 'var(--accent)' };
+      feedHtml += '<div class="feed-item">' +
+        '<div class="feed-dot" style="background:' + (colorMap[iconCls] || 'var(--accent)') + '"></div>' +
+        '<div class="feed-text"><span class="feed-action">' + a.action + '</span> <span class="feed-detail">' + (a.details || '') + '</span>' +
+        '<div class="feed-time"><i class="fas fa-clock"></i> ' + a.created_at + (a.user ? ' · <strong>' + a.user + '</strong>' : '') + '</div></div></div>';
+    }
+
+    document.getElementById('pageContent').innerHTML =
+      '<div class="dash-grid">' +
+        // Row 1: Quick Actions
+        '<div class="dash-card dash-quick">' +
+          '<div class="dash-card-head"><i class="fas fa-bolt"></i> Quick Actions</div>' +
+          '<div class="quick-grid">' +
+            '<div class="quick-btn" onclick="App.navigate(\'inbound-entry\')"><i class="fas fa-truck"></i><span>New Vehicle</span></div>' +
+            '<div class="quick-btn" onclick="App.navigate(\'inbound-unload\')"><i class="fas fa-dolly"></i><span>Unload</span></div>' +
+            '<div class="quick-btn" onclick="App.navigate(\'putaway\')"><i class="fas fa-location-dot"></i><span>Putaway</span></div>' +
+            '<div class="quick-btn" onclick="App.navigate(\'piv\')"><i class="fas fa-barcode"></i><span>PIV</span></div>' +
+            '<div class="quick-btn" onclick="App.navigate(\'location\')"><i class="fas fa-map-marker-alt"></i><span>Location</span></div>' +
+            '<div class="quick-btn" onclick="App.navigate(\'material-master\')"><i class="fas fa-database"></i><span>Materials</span></div>' +
+          '</div>' +
+        '</div>' +
+        // Row 1: Bin Usage
+        '<div class="dash-card dash-bin">' +
+          '<div class="dash-card-head"><i class="fas fa-th"></i> Bin Usage</div>' +
+          '<div class="bin-ring-wrap">' +
+            '<div class="bin-ring"><svg viewBox="0 0 120 120"><circle cx="60" cy="60" r="52" class="ring-bg"/><circle cx="60" cy="60" r="52" class="ring-fill" style="stroke-dasharray:' + (3.27 * totalBinPercent) + ' 327"/>' +
+            '</svg><div class="ring-text"><span class="ring-pct">' + totalBinPercent + '%</span><span class="ring-label">Used</span></div></div>' +
+            '<div class="bin-stats"><div class="bin-stat"><span class="bin-stat-val">' + stats.filledBins + '</span><span class="bin-stat-lbl">Filled</span></div>' +
+            '<div class="bin-stat"><span class="bin-stat-val">' + (stats.totalBins - stats.filledBins) + '</span><span class="bin-stat-lbl">Empty</span></div>' +
+            '<div class="bin-stat"><span class="bin-stat-val">' + stats.totalBins + '</span><span class="bin-stat-lbl">Total</span></div></div>' +
+          '</div>' +
+        '</div>' +
+        // Row 2: Stats
+        '<div class="dash-card dash-stats">' +
+          '<div class="dash-card-head"><i class="fas fa-chart-bar"></i> Warehouse Overview</div>' +
+          '<div class="mini-stats-grid">' +
+            '<div class="mini-stat"><div class="mini-stat-icon" style="background:rgba(0,143,211,0.12);color:var(--accent)"><i class="fas fa-truck"></i></div><div class="mini-stat-info"><span class="mini-stat-val">' + stats.pendingVehicles + '</span><span class="mini-stat-lbl">Pending</span></div></div>' +
+            '<div class="mini-stat"><div class="mini-stat-icon" style="background:rgba(240,171,0,0.12);color:var(--warning)"><i class="fas fa-dolly"></i></div><div class="mini-stat-info"><span class="mini-stat-val">' + stats.unloadingVehicles + '</span><span class="mini-stat-lbl">Unloading</span></div></div>' +
+            '<div class="mini-stat"><div class="mini-stat-icon" style="background:rgba(76,175,80,0.12);color:var(--success)"><i class="fas fa-file-invoice"></i></div><div class="mini-stat-info"><span class="mini-stat-val">' + stats.totalGRN + '</span><span class="mini-stat-lbl">GRN</span></div></div>' +
+            '<div class="mini-stat"><div class="mini-stat-icon" style="background:rgba(0,143,211,0.12);color:var(--accent)"><i class="fas fa-location-dot"></i></div><div class="mini-stat-info"><span class="mini-stat-val">' + stats.totalPutaway + '</span><span class="mini-stat-lbl">Putaway</span></div></div>' +
+            '<div class="mini-stat"><div class="mini-stat-icon" style="background:rgba(168,85,247,0.12);color:#a855f7"><i class="fas fa-barcode"></i></div><div class="mini-stat-info"><span class="mini-stat-val">' + stats.totalPIV + '</span><span class="mini-stat-lbl">PIV</span></div></div>' +
+            '<div class="mini-stat"><div class="mini-stat-icon" style="background:rgba(76,175,80,0.12);color:var(--success)"><i class="fas fa-database"></i></div><div class="mini-stat-info"><span class="mini-stat-val">' + stats.totalMaterials + '</span><span class="mini-stat-lbl">Materials</span></div></div>' +
+            '<div class="mini-stat"><div class="mini-stat-icon" style="background:rgba(0,143,211,0.12);color:var(--accent)"><i class="fas fa-th"></i></div><div class="mini-stat-info"><span class="mini-stat-val">' + stats.totalBins + '</span><span class="mini-stat-lbl">Bins</span></div></div>' +
+            '<div class="mini-stat"><div class="mini-stat-icon" style="background:rgba(76,175,80,0.12);color:var(--success)"><i class="fas fa-check-double"></i></div><div class="mini-stat-info"><span class="mini-stat-val">' + stats.activeLocations + '</span><span class="mini-stat-lbl">Locations</span></div></div>' +
+          '</div>' +
+        '</div>' +
+        // Row 2: Live Feed
+        '<div class="dash-card dash-feed">' +
+          '<div class="dash-card-head"><i class="fas fa-bolt"></i> Live Activity <span class="live-dot"></span></div>' +
+          (feedHtml || '<div class="feed-empty"><i class="fas fa-pause-circle"></i><p>No activities yet</p></div>') +
+        '</div>' +
+      '</div>';
+
+    // Auto refresh live feed
+    if (this._dashInterval) clearInterval(this._dashInterval);
+    var self = this;
+    this._dashInterval = setInterval(function() {
+      if (self.currentPage === 'dashboard') self.pageDashboard();
+    }, 15000);
+  },
+  
   // ===================== INBOUND ENTRY =====================
   pageInboundEntry() {
     var invoices = [];

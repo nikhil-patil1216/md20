@@ -517,6 +517,27 @@ app.get('/api/location/report/:ho_no', authMiddleware, function(req, res) {
   res.json(report);
 });
 
+app.post('/api/location/bulk', authMiddleware, function(req, res) {
+  if (!hasAccess(req.user, 'location')) return res.status(403).json({ error: 'No access' });
+  var items = req.body.items;
+  if (!items || !items.length) return res.status(400).json({ error: 'Items array required' });
+  var today = new Date().toISOString().split('T')[0];
+  var count = 0;
+  for (var i = 0; i < items.length; i++) {
+    var it = items[i];
+    if (!it.rack || !it.material) continue;
+    var qty = parseFloat(it.qty) || 0;
+    if (qty <= 0) continue;
+    var existing = dbGet('SELECT id FROM location_data WHERE date=? AND rack=? AND material=? AND qty=? AND active=1', [it.date || today, it.rack, it.material, qty]);
+    if (!existing) {
+      dbRun('INSERT INTO location_data (source, date, rack, ean, material, description, qty, packing, box_no) VALUES ("manual", ?, ?, ?, ?, ?, ?, ?, ?)', [it.date || today, it.rack, it.ean || '', it.material, it.description || '', qty, it.packing || '', it.box_no || '']);
+      count++;
+    }
+  }
+  logActivity('location', 'bulk_add', 'Bulk added ' + count + ' location items', req.user.name);
+  res.json({ message: count + ' location items added' });
+});
+
 app.put('/api/location/report/:ho_no/item/:item_id', authMiddleware, function(req, res) {
   if (!hasAccess(req.user, 'location')) return res.status(403).json({ error: 'No access' });
   var action = req.body.action, qty = req.body.qty;

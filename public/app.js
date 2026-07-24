@@ -833,9 +833,16 @@ const App = {
             '<input type="text" id="locSearch" placeholder="Search materials (comma separated for multiple)">' +
             '<button class="btn btn-primary btn-sm" onclick="App._locSearch()"><i class="fas fa-search"></i> Search</button>' +
           '</div>' +
-          '<div style="display:flex;gap:8px;">' +
+                    '<div style="display:flex;gap:8px;flex-wrap:wrap;">' +
+            '<button class="btn btn-outline btn-sm" onclick="App._locAddSingle()"><i class="fas fa-plus"></i> Add Single</button>' +
             '<button class="btn btn-outline btn-sm" onclick="App._locCreateReport()"><i class="fas fa-file-alt"></i> Create HO Report</button>' +
             '<button class="btn btn-warning btn-sm" onclick="App._locEditReport()"><i class="fas fa-edit"></i> Edit HO Report</button>' +
+          '</div>' +
+          '<div class="file-upload-zone mb-2" onclick="document.getElementById(\'locFileInput\').click()">' +
+            '<i class="fas fa-file-excel"></i>' +
+            '<p>Click to upload Excel for bulk location add</p>' +
+            '<p style="font-size:11px;color:var(--text-muted);">Format: Date, Rack, EAN, Material, Description, Qty, Packing, Box No</p>' +
+            '<input type="file" id="locFileInput" accept=".xlsx,.xls,.csv" style="display:none" onchange="App._locBulkUpload(this)">' +
           '</div>' +
         '</div>' +
         (data.length === 0 ? '<div class="empty-state"><i class="fas fa-inbox"></i><p>No location data yet.</p></div>' :
@@ -843,7 +850,88 @@ const App = {
         '<tbody>' + rows + '</tbody></table></div>') +
       '</div>';
   },
+  _locBulkUpload: function(input) {
+    var self = this;
+    var file = input.files[0];
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      try {
+        var wb = XLSX.read(e.target.result, { type: 'array' });
+        var ws = wb.Sheets[wb.SheetNames[0]];
+        var json = XLSX.utils.sheet_to_json(ws);
+        if (json.length === 0) return self.toast('No data found in file', 'warning');
+        var items = [];
+        for (var i = 0; i < json.length; i++) {
+          var row = json[i];
+          var rack = row['Rack'] || row['rack'] || row['RACK'] || '';
+          var ean = row['EAN'] || row['ean'] || row['EAN No'] || row['ean no'] || '';
+          var material = row['Material'] || row['material'] || row['MATERIAL'] || '';
+          var description = row['Description'] || row['description'] || row['DESCRIPTION'] || row['Material Description'] || '';
+          var qty = row['Qty'] || row['qty'] || row['QTY'] || row['Quantity'] || 0;
+          var packing = row['Packing'] || row['packing'] || row['PACKING'] || '';
+          var box_no = row['Box No'] || row['box no'] || row['BOX NO'] || row['BoxNo'] || '';
+          var date = row['Date'] || row['date'] || row['DATE'] || '';
+          if (rack && material) {
+            items.push({ rack: String(rack), ean: String(ean), material: String(material), description: String(description), qty: parseFloat(qty) || 0, packing: String(packing), box_no: String(box_no), date: String(date) });
+          }
+        }
+        if (items.length === 0) return self.toast('No valid data found', 'warning');
+        self.api('POST', '/api/location/bulk', { items: items }).then(function(res) {
+          if (res && !res.error) {
+            self.toast(res.message, 'success');
+            self.pageLocation();
+          } else {
+            self.toast((res && res.error) || 'Error', 'error');
+          }
+        });
+      } catch (err) {
+        self.toast('Error reading file: ' + err.message, 'error');
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  },
 
+  _locAddSingle: function() {
+    this.openModal('<i class="fas fa-plus"></i> Add Single Location',
+      '<div class="form-grid">' +
+        '<div class="form-group"><label>Rack</label><input type="text" id="lsRack" placeholder="e.g. R1"></div>' +
+        '<div class="form-group"><label>EAN</label><input type="text" id="lsEan" placeholder="EAN number"></div>' +
+        '<div class="form-group"><label>Material</label><input type="text" id="lsMaterial" placeholder="Material code"></div>' +
+        '<div class="form-group"><label>Description</label><input type="text" id="lsDesc" placeholder="Description"></div>' +
+        '<div class="form-group"><label>Qty</label><input type="number" id="lsQty" placeholder="0"></div>' +
+        '<div class="form-group"><label>Packing</label><input type="text" id="lsPacking" placeholder="Packing"></div>' +
+        '<div class="form-group"><label>Box No</label><input type="text" id="lsBox" placeholder="Box number"></div>' +
+        '<div class="form-group"><label>Date</label><input type="date" id="lsDate" value="' + new Date().toISOString().split('T')[0] + '"></div>' +
+      '</div>' +
+      '<div class="mt-2"><button class="btn btn-success" onclick="App._locSaveSingle()"><i class="fas fa-check"></i> Save</button></div>');
+  },
+
+  _locSaveSingle: async function() {
+    var rack = document.getElementById('lsRack').value.trim();
+    var material = document.getElementById('lsMaterial').value.trim();
+    var qty = parseFloat(document.getElementById('lsQty').value) || 0;
+    if (!rack || !material || qty <= 0) return this.toast('Rack, Material and Qty required', 'warning');
+    var items = [{
+      rack: rack,
+      ean: document.getElementById('lsEan').value.trim(),
+      material: material,
+      description: document.getElementById('lsDesc').value.trim(),
+      qty: qty,
+      packing: document.getElementById('lsPacking').value.trim(),
+      box_no: document.getElementById('lsBox').value.trim(),
+      date: document.getElementById('lsDate').value
+    }];
+    var res = await this.api('POST', '/api/location/bulk', { items: items });
+    if (res && !res.error) {
+      this.toast('Location added!', 'success');
+      this.closeModal();
+      this.pageLocation();
+    } else {
+      this.toast((res && res.error) || 'Error', 'error');
+    }
+  },
+  
   async _locSearch() {
     var materials = document.getElementById('locSearch').value.trim();
     if (!materials) return this.toast('Enter material(s) to search', 'warning');

@@ -695,19 +695,18 @@ app.get('*', function(req, res) {
 
 // ===================== START SERVER =====================
 async function startServer() {
-  console.log('Connecting to Turso Cloud Database...');
+  console.log('Connecting to Database...');
   try {
     var statements = TABLES_SQL.split(';');
     for (var i = 0; i < statements.length; i++) {
       var s = statements[i].trim();
       if (s.length > 10) {
-        try { await db.execute(s); } catch(e) { console.log('Table skip:', e.message); }
+        try { await db.execute(s); } catch(e) {}
       }
     }
-    console.log('Tables ready.');
+    console.log('Cloud Database connected!');
   } catch (err) {
-    console.error('DB Connection Error:', err.message);
-    console.log('Starting with fallback local DB...');
+    console.log('Cloud DB failed, using local fallback...');
     db = createClient({ url: 'file:local.db' });
     var statements2 = TABLES_SQL.split(';');
     for (var j = 0; j < statements2.length; j++) {
@@ -716,39 +715,27 @@ async function startServer() {
         try { await db.execute(s2); } catch(e2) {}
       }
     }
+    console.log('Local Database ready.');
   }
-    }
-  
-  console.log('Tables ready.');
 
- async function createAdmin() {
-    const adminExists = await dbGet(
-        "SELECT id FROM users WHERE username='admin'"
-    );
-
-    if (!adminExists) {
-        // create admin
-    }
-}
-
-createAdmin();
+  var adminExists = await dbGet("SELECT id FROM users WHERE username = 'admin'");
+  if (!adminExists) {
     await dbRun("INSERT INTO users (username, password, name, role, access) VALUES (?, ?, ?, ?, ?)", [
       'admin', bcrypt.hashSync('admin123', 10), 'Admin', 'admin', JSON.stringify(['admin','inbound','putaway','piv','location','material','bin'])
     ]);
     console.log('Default admin created: username=admin, password=admin123');
-  
+  }
 
   app.listen(PORT, function() {
     console.log('');
     console.log('======================================================');
     console.log('   VIP Industry (MD20) - WMS Server');
-    console.log('   Database: Turso Cloud (Permanent Storage)');
     console.log('   Running on: http://localhost:' + PORT);
     console.log('   Developed by: Nikhil Patil');
     console.log('======================================================');
     console.log('');
   });
-
+}
 
 startServer().catch(function(err) {
   console.error('Failed to start:', err);

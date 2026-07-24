@@ -1,11 +1,10 @@
 const express = require('express');
-const initSqlJs = require('sql.js');
+const { createClient } = require('@libsql/client');
 const multer = require('multer');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const cors = require('cors');
 const path = require('path');
-const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -15,72 +14,50 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-let _db = null;
+// ===================== DATABASE CONNECT =====================
+var dbUrl = process.env.TURSO_DATABASE_URL || 'file:local.db';
+var dbToken = process.env.TURSO_AUTH_TOKEN || undefined;
+
+var db = createClient({
+  url: dbUrl,
+  authToken: dbToken
+});
 
 // ===================== DATABASE HELPERS =====================
-function dbRun(sql, params) {
+async function dbRun(sql, params) {
   params = params || [];
-  _db.run(sql, params);
-  var changes = _db.getRowsModified();
-  var lastId = 0;
+  await db.execute({ sql: sql, args: params });
   try {
-    var r = _db.exec("SELECT last_insert_rowid() as id");
-    if (r.length > 0 && r[0].values.length > 0) lastId = r[0].values[0][0];
-  } catch (e) {}
-  saveDb();
-  return { changes: changes, lastInsertRowid: lastId };
+    var r = await db.execute("SELECT last_insert_rowid() as id");
+    return { changes: 1, lastInsertRowid: r.rows[0].id };
+  } catch (e) {
+    return { changes: 1, lastInsertRowid: 0 };
+  }
 }
 
-function dbGet(sql, params) {
+async function dbGet(sql, params) {
   params = params || [];
   try {
-    var stmt = _db.prepare(sql);
-    if (params.length > 0) stmt.bind(params);
-    var row = undefined;
-    if (stmt.step()) row = stmt.getAsObject();
-    stmt.free();
-    return row;
+    var result = await db.execute({ sql: sql, args: params });
+    if (result.rows.length > 0) return result.rows[0];
+    return undefined;
   } catch (e) {
     return undefined;
   }
 }
 
-function dbAll(sql, params) {
+async function dbAll(sql, params) {
   params = params || [];
   try {
-    var stmt = _db.prepare(sql);
-    if (params.length > 0) stmt.bind(params);
-    var rows = [];
-    while (stmt.step()) rows.push(stmt.getAsObject());
-    stmt.free();
-    return rows;
+    var result = await db.execute({ sql: sql, args: params });
+    return result.rows;
   } catch (e) {
     return [];
   }
 }
 
-function dbExec(sql) {
-  _db.run(sql);
-  saveDb();
-}
-
-function saveDb() {
-  try {
-    var data = _db.export();
-    var buffer = Buffer.from(data);
-    fs.writeFileSync('/tmp/warehouse.db', buffer);
-  } catch (e) {}
-}
-
-function loadDb() {
-  try {
-    if (fs.existsSync('/tmp/warehouse.db')) {
-      var data = fs.readFileSync('/tmp/warehouse.db');
-      _db = new SQL.Database(data);
-      return true;
-    }
-  } catch (e) {}
-  return false;
+async function dbExec(sql) {
+  await db.execute(sql);
 }
 
 // ===================== TABLE CREATION =====================
@@ -234,21 +211,21 @@ var TABLES_SQL = `
 `;
 
 // ===================== HELPERS =====================
-function getNextNumber(prefix) {
+async function getNextNumber(prefix) {
   var today = new Date().toISOString().split('T')[0];
   var dateStr = today.replace(/-/g, '');
-  var row = dbGet('SELECT * FROM sequences WHERE name = ?', [prefix]);
+  var row = await dbGet('SELECT * FROM sequences WHERE name = ?', [prefix]);
   if (!row || row.date !== today) {
-    dbRun('INSERT OR REPLACE INTO sequences (name, last_value, date) VALUES (?, 1, ?)', [prefix, today]);
+    await dbRun('INSERT OR REPLACE INTO sequences (name, last_value, date) VALUES (?, 1, ?)', [prefix, today]);
     return prefix + dateStr + '0001';
   }
   var next = row.last_value + 1;
-  dbRun('UPDATE sequences SET last_value = ? WHERE name = ?', [next, prefix]);
+  await dbRun('UPDATE sequences SET last_value = ? WHERE name = ?', [next, prefix]);
   return prefix + dateStr + String(next).padStart(4, '0');
 }
 
-function logActivity(module, action, details, user) {
-  dbRun('INSERT INTO activity_log (module, action, details, user) VALUES (?, ?, ?, ?)', [module, action, details || '', user || '']);
+async function logActivity(module, action, details, user) {
+  await dbRun('INSERT INTO activity_log (module, action, details, user) VALUES (?, ?, ?, ?)', [module, action, details || '', user || '']);
 }
 
 function authMiddleware(req, res, next) {
@@ -271,145 +248,144 @@ function hasAccess(user, mod) {
 }
 
 // ===================== AUTH ROUTES =====================
-app.post('/api/auth/login', function(req, res) {
+app.post('/api/auth/login', async function(req, res) {
   var username = req.body.username;
   var password = req.body.password;
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
-  var user = dbGet('SELECT * FROM users WHERE username = ? AND active = 1', [username]);
+  var user = await dbGet('SELECT * FROM users WHERE username = ? AND active = 1', [username]);
   if (!user) return res.status(401).json({ error: 'Invalid credentials' });
   if (!bcrypt.compareSync(password, user.password)) return res.status(401).json({ error: 'Invalid credentials' });
   var token = jwt.sign({ id: user.id, username: user.username, name: user.name, role: user.role, access: user.access }, JWT_SECRET, { expiresIn: '24h' });
-  logActivity('auth', 'login', 'User ' + user.name + ' logged in', user.name);
+  await logActivity('auth', 'login', 'User ' + user.name + ' logged in', user.name);
   res.json({ token: token, user: { id: user.id, username: user.username, name: user.name, role: user.role, access: user.access } });
 });
 
-app.post('/api/auth/change-password', authMiddleware, function(req, res) {
+app.post('/api/auth/change-password', authMiddleware, async function(req, res) {
   var oldPassword = req.body.oldPassword;
   var newPassword = req.body.newPassword;
-  var user = dbGet('SELECT * FROM users WHERE id = ?', [req.user.id]);
+  var user = await dbGet('SELECT * FROM users WHERE id = ?', [req.user.id]);
   if (!bcrypt.compareSync(oldPassword, user.password)) return res.status(400).json({ error: 'Old password incorrect' });
-  dbRun('UPDATE users SET password = ? WHERE id = ?', [bcrypt.hashSync(newPassword, 10), req.user.id]);
+  await dbRun('UPDATE users SET password = ? WHERE id = ?', [bcrypt.hashSync(newPassword, 10), req.user.id]);
   res.json({ message: 'Password changed' });
 });
 
 // ===================== USER ROUTES =====================
-app.get('/api/users', authMiddleware, function(req, res) {
+app.get('/api/users', authMiddleware, async function(req, res) {
   if (!hasAccess(req.user, 'admin')) return res.status(403).json({ error: 'No access' });
-  res.json(dbAll('SELECT id, username, name, role, access, active, created_at FROM users ORDER BY id'));
+  res.json(await dbAll('SELECT id, username, name, role, access, active, created_at FROM users ORDER BY id'));
 });
 
-app.post('/api/users', authMiddleware, function(req, res) {
+app.post('/api/users', authMiddleware, async function(req, res) {
   if (!hasAccess(req.user, 'admin')) return res.status(403).json({ error: 'No access' });
   var username = req.body.username, password = req.body.password, name = req.body.name, role = req.body.role, access = req.body.access;
   if (!username || !password || !name) return res.status(400).json({ error: 'Username, password, name required' });
-  var exists = dbGet('SELECT id FROM users WHERE username = ?', [username]);
+  var exists = await dbGet('SELECT id FROM users WHERE username = ?', [username]);
   if (exists) return res.status(400).json({ error: 'Username already exists' });
-  dbRun('INSERT INTO users (username, password, name, role, access) VALUES (?, ?, ?, ?, ?)', [username, bcrypt.hashSync(password, 10), name, role || 'user', JSON.stringify(access || [])]);
-  logActivity('admin', 'create_user', 'Created user: ' + name, req.user.name);
+  await dbRun('INSERT INTO users (username, password, name, role, access) VALUES (?, ?, ?, ?, ?)', [username, bcrypt.hashSync(password, 10), name, role || 'user', JSON.stringify(access || [])]);
+  await logActivity('admin', 'create_user', 'Created user: ' + name, req.user.name);
   res.json({ message: 'User created' });
 });
 
-app.put('/api/users/:id', authMiddleware, function(req, res) {
+app.put('/api/users/:id', authMiddleware, async function(req, res) {
   if (!hasAccess(req.user, 'admin')) return res.status(403).json({ error: 'No access' });
   var name = req.body.name, role = req.body.role, access = req.body.access, active = req.body.active, password = req.body.password;
   if (password) {
-    dbRun('UPDATE users SET name=?, role=?, access=?, active=?, password=? WHERE id=?', [name, role, JSON.stringify(access || []), active ? 1 : 0, bcrypt.hashSync(password, 10), req.params.id]);
+    await dbRun('UPDATE users SET name=?, role=?, access=?, active=?, password=? WHERE id=?', [name, role, JSON.stringify(access || []), active ? 1 : 0, bcrypt.hashSync(password, 10), req.params.id]);
   } else {
-    dbRun('UPDATE users SET name=?, role=?, access=?, active=? WHERE id=?', [name, role, JSON.stringify(access || []), active ? 1 : 0, req.params.id]);
+    await dbRun('UPDATE users SET name=?, role=?, access=?, active=? WHERE id=?', [name, role, JSON.stringify(access || []), active ? 1 : 0, req.params.id]);
   }
-  logActivity('admin', 'update_user', 'Updated user ID: ' + req.params.id, req.user.name);
+  await logActivity('admin', 'update_user', 'Updated user ID: ' + req.params.id, req.user.name);
   res.json({ message: 'User updated' });
 });
 
-app.delete('/api/users/:id', authMiddleware, function(req, res) {
+app.delete('/api/users/:id', authMiddleware, async function(req, res) {
   if (!hasAccess(req.user, 'admin')) return res.status(403).json({ error: 'No access' });
   if (req.user.id === parseInt(req.params.id)) return res.status(400).json({ error: 'Cannot delete yourself' });
-  dbRun('DELETE FROM users WHERE id = ?', [req.params.id]);
-  logActivity('admin', 'delete_user', 'Deleted user ID: ' + req.params.id, req.user.name);
+  await dbRun('DELETE FROM users WHERE id = ?', [req.params.id]);
+  await logActivity('admin', 'delete_user', 'Deleted user ID: ' + req.params.id, req.user.name);
   res.json({ message: 'User deleted' });
 });
 
 // ===================== VEHICLE / INBOUND ENTRY =====================
-app.post('/api/vehicles', authMiddleware, function(req, res) {
+app.post('/api/vehicles', authMiddleware, async function(req, res) {
   if (!hasAccess(req.user, 'inbound')) return res.status(403).json({ error: 'No access' });
   var v = req.body;
   if (!v.vehicle_no || !v.driver_name || !v.driver_mobile || !v.transport || !v.invoices || !v.invoices.length) return res.status(400).json({ error: 'All fields required' });
-  var result = dbRun('INSERT INTO vehicles (vehicle_no, driver_name, driver_mobile, transport) VALUES (?, ?, ?, ?)', [v.vehicle_no, v.driver_name, v.driver_mobile, v.transport]);
+  var result = await dbRun('INSERT INTO vehicles (vehicle_no, driver_name, driver_mobile, transport) VALUES (?, ?, ?, ?)', [v.vehicle_no, v.driver_name, v.driver_mobile, v.transport]);
   var vid = result.lastInsertRowid;
   for (var i = 0; i < v.invoices.length; i++) {
-    dbRun('INSERT INTO vehicle_invoices (vehicle_id, invoice_no) VALUES (?, ?)', [vid, v.invoices[i].invoice_no]);
+    await dbRun('INSERT INTO vehicle_invoices (vehicle_id, invoice_no) VALUES (?, ?)', [vid, v.invoices[i].invoice_no]);
   }
-  logActivity('inbound', 'vehicle_entry', 'Vehicle ' + v.vehicle_no + ' with ' + v.invoices.length + ' invoices', req.user.name);
+  await logActivity('inbound', 'vehicle_entry', 'Vehicle ' + v.vehicle_no + ' with ' + v.invoices.length + ' invoices', req.user.name);
   res.json({ id: vid, message: 'Vehicle entry saved' });
 });
 
-app.get('/api/vehicles', authMiddleware, function(req, res) {
+app.get('/api/vehicles', authMiddleware, async function(req, res) {
   if (!hasAccess(req.user, 'inbound')) return res.status(403).json({ error: 'No access' });
-  var vehicles = dbAll('SELECT v.*, (SELECT GROUP_CONCAT(vi.invoice_no, ", ") FROM vehicle_invoices vi WHERE vi.vehicle_id = v.id) as invoice_list FROM vehicles v ORDER BY v.id DESC');
-  res.json(vehicles);
+  res.json(await dbAll('SELECT v.*, (SELECT GROUP_CONCAT(vi.invoice_no, ", ") FROM vehicle_invoices vi WHERE vi.vehicle_id = v.id) as invoice_list FROM vehicles v ORDER BY v.id DESC'));
 });
 
-app.get('/api/vehicles/:id', authMiddleware, function(req, res) {
-  var vehicle = dbGet('SELECT * FROM vehicles WHERE id = ?', [req.params.id]);
+app.get('/api/vehicles/:id', authMiddleware, async function(req, res) {
+  var vehicle = await dbGet('SELECT * FROM vehicles WHERE id = ?', [req.params.id]);
   if (!vehicle) return res.status(404).json({ error: 'Not found' });
-  var invoices = dbAll('SELECT * FROM vehicle_invoices WHERE vehicle_id = ?', [req.params.id]);
-  var materials = dbAll('SELECT * FROM inbound_materials WHERE vehicle_id = ?', [req.params.id]);
+  var invoices = await dbAll('SELECT * FROM vehicle_invoices WHERE vehicle_id = ?', [req.params.id]);
+  var materials = await dbAll('SELECT * FROM inbound_materials WHERE vehicle_id = ?', [req.params.id]);
   vehicle.invoices = invoices;
   vehicle.materials = materials;
   res.json(vehicle);
 });
 
 // ===================== INBOUND MATERIALS =====================
-app.post('/api/inbound/materials', authMiddleware, function(req, res) {
+app.post('/api/inbound/materials', authMiddleware, async function(req, res) {
   if (!hasAccess(req.user, 'inbound')) return res.status(403).json({ error: 'No access' });
   var vehicle_id = req.body.vehicle_id, materials = req.body.materials;
   if (!vehicle_id || !materials || !materials.length) return res.status(400).json({ error: 'Vehicle ID and materials required' });
   for (var i = 0; i < materials.length; i++) {
     var m = materials[i];
-    dbRun('INSERT INTO inbound_materials (vehicle_id, invoice_no, material, ean, description, div, brand, qty) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [vehicle_id, m.invoice_no, m.material, m.ean || '', m.description || '', m.div || '', m.brand || '', m.qty || 0]);
+    await dbRun('INSERT INTO inbound_materials (vehicle_id, invoice_no, material, ean, description, div, brand, qty) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [vehicle_id, m.invoice_no, m.material, m.ean || '', m.description || '', m.div || '', m.brand || '', m.qty || 0]);
   }
-  dbRun('UPDATE vehicles SET status = ? WHERE id = ?', ['material_entered', vehicle_id]);
-  logActivity('inbound', 'materials_entered', 'Materials for vehicle ID: ' + vehicle_id, req.user.name);
+  await dbRun('UPDATE vehicles SET status = ? WHERE id = ?', ['material_entered', vehicle_id]);
+  await logActivity('inbound', 'materials_entered', 'Materials for vehicle ID: ' + vehicle_id, req.user.name);
   res.json({ message: 'Materials saved, moved to unloading pending' });
 });
 
-app.get('/api/inbound/pending', authMiddleware, function(req, res) {
+app.get('/api/inbound/pending', authMiddleware, async function(req, res) {
   if (!hasAccess(req.user, 'inbound')) return res.status(403).json({ error: 'No access' });
-  res.json(dbAll('SELECT v.*, (SELECT GROUP_CONCAT(vi.invoice_no, ", ") FROM vehicle_invoices vi WHERE vi.vehicle_id = v.id) as invoice_list FROM vehicles v WHERE v.status IN ("material_entered", "pending", "unloading") ORDER BY v.id DESC'));
+  res.json(await dbAll('SELECT v.*, (SELECT GROUP_CONCAT(vi.invoice_no, ", ") FROM vehicle_invoices vi WHERE vi.vehicle_id = v.id) as invoice_list FROM vehicles v WHERE v.status IN ("material_entered", "pending", "unloading") ORDER BY v.id DESC'));
 });
 
 // ===================== UNLOAD PROCESS =====================
-app.post('/api/inbound/unload', authMiddleware, function(req, res) {
+app.post('/api/inbound/unload', authMiddleware, async function(req, res) {
   if (!hasAccess(req.user, 'inbound')) return res.status(403).json({ error: 'No access' });
   var vehicle_id = req.body.vehicle_id, invoice_no = req.body.invoice_no, scanned_materials = req.body.scanned_materials;
   if (!vehicle_id || !invoice_no || !scanned_materials || !scanned_materials.length) return res.status(400).json({ error: 'All fields required' });
   for (var i = 0; i < scanned_materials.length; i++) {
-    dbRun('UPDATE inbound_materials SET status = ? WHERE vehicle_id = ? AND invoice_no = ? AND material = ?', ['unloaded', vehicle_id, invoice_no, scanned_materials[i].material]);
+    await dbRun('UPDATE inbound_materials SET status = ? WHERE vehicle_id = ? AND invoice_no = ? AND material = ?', ['unloaded', vehicle_id, invoice_no, scanned_materials[i].material]);
   }
-  var pending = dbGet('SELECT COUNT(*) as c FROM inbound_materials WHERE vehicle_id = ? AND status = "pending"', [vehicle_id]);
+  var pending = await dbGet('SELECT COUNT(*) as c FROM inbound_materials WHERE vehicle_id = ? AND status = "pending"', [vehicle_id]);
   if (pending.c === 0) {
-    var grn_no = getNextNumber('GRN');
-    dbRun('INSERT INTO grn_records (grn_no, vehicle_id) VALUES (?, ?)', [grn_no, vehicle_id]);
-    dbRun('UPDATE vehicles SET status = ? WHERE id = ?', ['unloaded', vehicle_id]);
-    logActivity('inbound', 'unload_complete', 'Vehicle ID: ' + vehicle_id + ' GRN: ' + grn_no, req.user.name);
+    var grn_no = await getNextNumber('GRN');
+    await dbRun('INSERT INTO grn_records (grn_no, vehicle_id) VALUES (?, ?)', [grn_no, vehicle_id]);
+    await dbRun('UPDATE vehicles SET status = ? WHERE id = ?', ['unloaded', vehicle_id]);
+    await logActivity('inbound', 'unload_complete', 'Vehicle ID: ' + vehicle_id + ' GRN: ' + grn_no, req.user.name);
     res.json({ message: 'All invoices scanned, GRN created', grn_no: grn_no });
   } else {
-    dbRun('UPDATE vehicles SET status = ? WHERE id = ?', ['unloading', vehicle_id]);
-    logActivity('inbound', 'unload_partial', 'Partial unload vehicle ID: ' + vehicle_id, req.user.name);
+    await dbRun('UPDATE vehicles SET status = ? WHERE id = ?', ['unloading', vehicle_id]);
+    await logActivity('inbound', 'unload_partial', 'Partial unload vehicle ID: ' + vehicle_id, req.user.name);
     res.json({ message: 'Invoice scanned, more pending' });
   }
 });
 
 // ===================== GRN ROUTES =====================
-app.get('/api/grn', authMiddleware, function(req, res) {
-  res.json(dbAll('SELECT gr.*, v.vehicle_no, v.driver_name, (SELECT GROUP_CONCAT(vi.invoice_no, ", ") FROM vehicle_invoices vi WHERE vi.vehicle_id = gr.vehicle_id) as invoice_list FROM grn_records gr JOIN vehicles v ON gr.vehicle_id = v.id ORDER BY gr.id DESC'));
+app.get('/api/grn', authMiddleware, async function(req, res) {
+  res.json(await dbAll('SELECT gr.*, v.vehicle_no, v.driver_name, (SELECT GROUP_CONCAT(vi.invoice_no, ", ") FROM vehicle_invoices vi WHERE vi.vehicle_id = gr.vehicle_id) as invoice_list FROM grn_records gr JOIN vehicles v ON gr.vehicle_id = v.id ORDER BY gr.id DESC'));
 });
 
-app.get('/api/grn/:grn_no', authMiddleware, function(req, res) {
-  var grn = dbGet('SELECT * FROM grn_records WHERE grn_no = ?', [req.params.grn_no]);
+app.get('/api/grn/:grn_no', authMiddleware, async function(req, res) {
+  var grn = await dbGet('SELECT * FROM grn_records WHERE grn_no = ?', [req.params.grn_no]);
   if (!grn) return res.status(404).json({ error: 'GRN not found' });
-  var materials = dbAll('SELECT * FROM inbound_materials WHERE vehicle_id = ?', [grn.vehicle_id]);
-  var invoiceRows = dbAll('SELECT DISTINCT invoice_no FROM inbound_materials WHERE vehicle_id = ?', [grn.vehicle_id]);
+  var materials = await dbAll('SELECT * FROM inbound_materials WHERE vehicle_id = ?', [grn.vehicle_id]);
+  var invoiceRows = await dbAll('SELECT DISTINCT invoice_no FROM inbound_materials WHERE vehicle_id = ?', [grn.vehicle_id]);
   var invoices = [];
   for (var i = 0; i < invoiceRows.length; i++) invoices.push(invoiceRows[i].invoice_no);
   grn.materials = materials;
@@ -418,28 +394,28 @@ app.get('/api/grn/:grn_no', authMiddleware, function(req, res) {
 });
 
 // ===================== PUTAWAY ROUTES =====================
-app.post('/api/putaway', authMiddleware, function(req, res) {
+app.post('/api/putaway', authMiddleware, async function(req, res) {
   if (!hasAccess(req.user, 'putaway')) return res.status(403).json({ error: 'No access' });
   var grn_no = req.body.grn_no, invoice_no = req.body.invoice_no, items = req.body.items;
   if (!grn_no || !invoice_no || !items || !items.length) return res.status(400).json({ error: 'All fields required' });
   var today = new Date().toISOString().split('T')[0];
   for (var i = 0; i < items.length; i++) {
     var it = items[i];
-    dbRun('INSERT INTO putaway_records (grn_no, invoice_no, material, ean, description, div, brand, inbound_qty, putaway_qty, short_qty, rack, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [grn_no, invoice_no, it.material, it.ean || '', it.description || '', it.div || '', it.brand || '', it.inbound_qty || 0, it.putaway_qty || 0, it.short_qty || 0, it.rack || '', req.user.name]);
-    var existing = dbGet('SELECT id FROM location_data WHERE source="putaway" AND date=? AND rack=? AND material=? AND qty=? AND active=1', [today, it.rack || '', it.material, it.putaway_qty || 0]);
+    await dbRun('INSERT INTO putaway_records (grn_no, invoice_no, material, ean, description, div, brand, inbound_qty, putaway_qty, short_qty, rack, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [grn_no, invoice_no, it.material, it.ean || '', it.description || '', it.div || '', it.brand || '', it.inbound_qty || 0, it.putaway_qty || 0, it.short_qty || 0, it.rack || '', req.user.name]);
+    var existing = await dbGet('SELECT id FROM location_data WHERE source="putaway" AND date=? AND rack=? AND material=? AND qty=? AND active=1', [today, it.rack || '', it.material, it.putaway_qty || 0]);
     if (!existing) {
-      dbRun('INSERT INTO location_data (source, grn_no, invoice_no, date, rack, ean, material, description, qty, packing, box_no) VALUES ("putaway", ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [grn_no, invoice_no, today, it.rack || '', it.ean || '', it.material, it.description || '', it.putaway_qty || 0, '', '']);
+      await dbRun('INSERT INTO location_data (source, grn_no, invoice_no, date, rack, ean, material, description, qty, packing, box_no) VALUES ("putaway", ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [grn_no, invoice_no, today, it.rack || '', it.ean || '', it.material, it.description || '', it.putaway_qty || 0, '', '']);
     }
   }
-  logActivity('putaway', 'putaway_done', 'Putaway GRN: ' + grn_no + ' Invoice: ' + invoice_no, req.user.name);
+  await logActivity('putaway', 'putaway_done', 'Putaway GRN: ' + grn_no + ' Invoice: ' + invoice_no, req.user.name);
   res.json({ message: 'Putaway saved' });
 });
 
-app.get('/api/putaway/difference/:grn_no', authMiddleware, function(req, res) {
-  var grn = dbGet('SELECT * FROM grn_records WHERE grn_no = ?', [req.params.grn_no]);
+app.get('/api/putaway/difference/:grn_no', authMiddleware, async function(req, res) {
+  var grn = await dbGet('SELECT * FROM grn_records WHERE grn_no = ?', [req.params.grn_no]);
   if (!grn) return res.status(404).json({ error: 'GRN not found' });
-  var inbound = dbAll('SELECT * FROM inbound_materials WHERE vehicle_id = ?', [grn.vehicle_id]);
-  var putaway = dbAll('SELECT * FROM putaway_records WHERE grn_no = ?', [req.params.grn_no]);
+  var inbound = await dbAll('SELECT * FROM inbound_materials WHERE vehicle_id = ?', [grn.vehicle_id]);
+  var putaway = await dbAll('SELECT * FROM putaway_records WHERE grn_no = ?', [req.params.grn_no]);
   var diff = [];
   for (var i = 0; i < inbound.length; i++) {
     var ib = inbound[i];
@@ -456,34 +432,34 @@ app.get('/api/putaway/difference/:grn_no', authMiddleware, function(req, res) {
 });
 
 // ===================== PIV ROUTES =====================
-app.post('/api/piv', authMiddleware, function(req, res) {
+app.post('/api/piv', authMiddleware, async function(req, res) {
   if (!hasAccess(req.user, 'piv')) return res.status(403).json({ error: 'No access' });
   var piv_by = req.body.piv_by, items = req.body.items;
   if (!piv_by || !items || !items.length) return res.status(400).json({ error: 'PIV by and items required' });
   for (var i = 0; i < items.length; i++) {
     var it = items[i];
     var pDate = it.date || new Date().toISOString().split('T')[0];
-    dbRun('INSERT INTO piv_records (piv_by, date, rack, ean, material, description, qty, packing, box_no) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', [piv_by, pDate, it.rack, it.ean || '', it.material, it.description || '', it.qty || 0, it.packing || '', it.box_no || '']);
-    dbRun('UPDATE location_data SET active = 0 WHERE source = "piv" AND rack = ? AND active = 1', [it.rack]);
-    var existing = dbGet('SELECT id FROM location_data WHERE source="piv" AND date=? AND rack=? AND material=? AND qty=? AND active=1', [pDate, it.rack, it.material, it.qty || 0]);
+    await dbRun('INSERT INTO piv_records (piv_by, date, rack, ean, material, description, qty, packing, box_no) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', [piv_by, pDate, it.rack, it.ean || '', it.material, it.description || '', it.qty || 0, it.packing || '', it.box_no || '']);
+    await dbRun('UPDATE location_data SET active = 0 WHERE source = "piv" AND rack = ? AND active = 1', [it.rack]);
+    var existing = await dbGet('SELECT id FROM location_data WHERE source="piv" AND date=? AND rack=? AND material=? AND qty=? AND active=1', [pDate, it.rack, it.material, it.qty || 0]);
     if (!existing) {
-      dbRun('INSERT INTO location_data (source, date, rack, ean, material, description, qty, packing, box_no) VALUES ("piv", ?, ?, ?, ?, ?, ?, ?, ?)', [pDate, it.rack, it.ean || '', it.material, it.description || '', it.qty || 0, it.packing || '', it.box_no || '']);
+      await dbRun('INSERT INTO location_data (source, date, rack, ean, material, description, qty, packing, box_no) VALUES ("piv", ?, ?, ?, ?, ?, ?, ?, ?)', [pDate, it.rack, it.ean || '', it.material, it.description || '', it.qty || 0, it.packing || '', it.box_no || '']);
     }
   }
-  logActivity('piv', 'piv_done', 'PIV by ' + piv_by + ', ' + items.length + ' items', req.user.name);
+  await logActivity('piv', 'piv_done', 'PIV by ' + piv_by + ', ' + items.length + ' items', req.user.name);
   res.json({ message: 'PIV saved' });
 });
 
-app.get('/api/piv', authMiddleware, function(req, res) {
-  res.json(dbAll('SELECT * FROM piv_records ORDER BY id DESC LIMIT 500'));
+app.get('/api/piv', authMiddleware, async function(req, res) {
+  res.json(await dbAll('SELECT * FROM piv_records ORDER BY id DESC LIMIT 500'));
 });
 
 // ===================== LOCATION ROUTES =====================
-app.get('/api/location', authMiddleware, function(req, res) {
-  res.json(dbAll('SELECT * FROM location_data WHERE active = 1 ORDER BY id DESC'));
+app.get('/api/location', authMiddleware, async function(req, res) {
+  res.json(await dbAll('SELECT * FROM location_data WHERE active = 1 ORDER BY id DESC'));
 });
 
-app.get('/api/location/search', authMiddleware, function(req, res) {
+app.get('/api/location/search', authMiddleware, async function(req, res) {
   var materials = req.query.materials;
   if (!materials) return res.status(400).json({ error: 'Materials required' });
   var matList = materials.split(',');
@@ -492,32 +468,10 @@ app.get('/api/location/search', authMiddleware, function(req, res) {
   var placeholders = [];
   var params = [];
   for (var j = 0; j < cleanList.length; j++) { placeholders.push('?'); params.push(cleanList[j]); }
-  res.json(dbAll('SELECT * FROM location_data WHERE active = 1 AND material IN (' + placeholders.join(',') + ') ORDER BY rack', params));
+  res.json(await dbAll('SELECT * FROM location_data WHERE active = 1 AND material IN (' + placeholders.join(',') + ') ORDER BY rack', params));
 });
 
-app.post('/api/location/report', authMiddleware, function(req, res) {
-  if (!hasAccess(req.user, 'location')) return res.status(403).json({ error: 'No access' });
-  var picker_name = req.body.picker_name, materials = req.body.materials, location_ids = req.body.location_ids;
-  if (!picker_name || !location_ids || !location_ids.length) return res.status(400).json({ error: 'Picker name and location IDs required' });
-  var ho_no = getNextNumber('HO');
-  dbRun('INSERT INTO location_reports (ho_no, picker_name, materials) VALUES (?, ?, ?)', [ho_no, picker_name, materials || '']);
-  var report = dbGet('SELECT id FROM location_reports WHERE ho_no = ?', [ho_no]);
-  for (var i = 0; i < location_ids.length; i++) {
-    dbRun('INSERT INTO location_report_items (report_id, location_data_id, action) VALUES (?, ?, ?)', [report.id, location_ids[i], 'none']);
-  }
-  logActivity('location', 'report_created', 'HO: ' + ho_no + ' Picker: ' + picker_name, req.user.name);
-  res.json({ ho_no: ho_no, message: 'Location report created' });
-});
-
-app.get('/api/location/report/:ho_no', authMiddleware, function(req, res) {
-  var report = dbGet('SELECT * FROM location_reports WHERE ho_no = ?', [req.params.ho_no]);
-  if (!report) return res.status(404).json({ error: 'Report not found' });
-  var items = dbAll('SELECT lri.id as report_item_id, lri.action, ld.* FROM location_report_items lri JOIN location_data ld ON lri.location_data_id = ld.id WHERE lri.report_id = ?', [report.id]);
-  report.items = items;
-  res.json(report);
-});
-
-app.post('/api/location/bulk', authMiddleware, function(req, res) {
+app.post('/api/location/bulk', authMiddleware, async function(req, res) {
   if (!hasAccess(req.user, 'location')) return res.status(403).json({ error: 'No access' });
   var items = req.body.items;
   if (!items || !items.length) return res.status(400).json({ error: 'Items array required' });
@@ -528,127 +482,158 @@ app.post('/api/location/bulk', authMiddleware, function(req, res) {
     if (!it.rack || !it.material) continue;
     var qty = parseFloat(it.qty) || 0;
     if (qty <= 0) continue;
-    var existing = dbGet('SELECT id FROM location_data WHERE date=? AND rack=? AND material=? AND qty=? AND active=1', [it.date || today, it.rack, it.material, qty]);
+    var existing = await dbGet('SELECT id FROM location_data WHERE date=? AND rack=? AND material=? AND qty=? AND active=1', [it.date || today, it.rack, it.material, qty]);
     if (!existing) {
-      dbRun('INSERT INTO location_data (source, date, rack, ean, material, description, qty, packing, box_no) VALUES ("manual", ?, ?, ?, ?, ?, ?, ?, ?)', [it.date || today, it.rack, it.ean || '', it.material, it.description || '', qty, it.packing || '', it.box_no || '']);
+      await dbRun('INSERT INTO location_data (source, date, rack, ean, material, description, qty, packing, box_no) VALUES ("manual", ?, ?, ?, ?, ?, ?, ?, ?)', [it.date || today, it.rack, it.ean || '', it.material, it.description || '', qty, it.packing || '', it.box_no || '']);
       count++;
     }
   }
-  logActivity('location', 'bulk_add', 'Bulk added ' + count + ' location items', req.user.name);
+  await logActivity('location', 'bulk_add', 'Bulk added ' + count + ' location items', req.user.name);
   res.json({ message: count + ' location items added' });
 });
 
-app.put('/api/location/report/:ho_no/item/:item_id', authMiddleware, function(req, res) {
+app.post('/api/location/report', authMiddleware, async function(req, res) {
+  if (!hasAccess(req.user, 'location')) return res.status(403).json({ error: 'No access' });
+  var picker_name = req.body.picker_name, materials = req.body.materials, location_ids = req.body.location_ids;
+  if (!picker_name || !location_ids || !location_ids.length) return res.status(400).json({ error: 'Picker name and location IDs required' });
+  var ho_no = await getNextNumber('HO');
+  await dbRun('INSERT INTO location_reports (ho_no, picker_name, materials) VALUES (?, ?, ?)', [ho_no, picker_name, materials || '']);
+  var report = await dbGet('SELECT id FROM location_reports WHERE ho_no = ?', [ho_no]);
+  for (var i = 0; i < location_ids.length; i++) {
+    await dbRun('INSERT INTO location_report_items (report_id, location_data_id, action) VALUES (?, ?, ?)', [report.id, location_ids[i], 'none']);
+  }
+  await logActivity('location', 'report_created', 'HO: ' + ho_no + ' Picker: ' + picker_name, req.user.name);
+  res.json({ ho_no: ho_no, message: 'Location report created' });
+});
+
+app.get('/api/location/report/:ho_no', authMiddleware, async function(req, res) {
+  var report = await dbGet('SELECT * FROM location_reports WHERE ho_no = ?', [req.params.ho_no]);
+  if (!report) return res.status(404).json({ error: 'Report not found' });
+  var items = await dbAll('SELECT lri.id as report_item_id, lri.action, ld.* FROM location_report_items lri JOIN location_data ld ON lri.location_data_id = ld.id WHERE lri.report_id = ?', [report.id]);
+  report.items = items;
+  res.json(report);
+});
+
+app.put('/api/location/report/:ho_no/item/:item_id', authMiddleware, async function(req, res) {
   if (!hasAccess(req.user, 'location')) return res.status(403).json({ error: 'No access' });
   var action = req.body.action, qty = req.body.qty;
-  var reportItem = dbGet('SELECT lri.*, ld.* FROM location_report_items lri JOIN location_data ld ON lri.location_data_id = ld.id WHERE lri.id = ?', [req.params.item_id]);
+  var reportItem = await dbGet('SELECT lri.*, ld.* FROM location_report_items lri JOIN location_data ld ON lri.location_data_id = ld.id WHERE lri.id = ?', [req.params.item_id]);
   if (!reportItem) return res.status(404).json({ error: 'Item not found' });
   if (action === 'delete') {
-    dbRun('UPDATE location_data SET active = 0 WHERE id = ?', [reportItem.location_data_id]);
-    dbRun('UPDATE location_report_items SET action = ? WHERE id = ?', ['deleted', req.params.item_id]);
-    dbRun('INSERT INTO location_audit (ho_no, action, location_data_id, rack, ean, material, description, qty, performed_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', [req.params.ho_no, 'delete', reportItem.location_data_id, reportItem.rack, reportItem.ean, reportItem.material, reportItem.description, reportItem.qty, req.user.name]);
-    logActivity('location', 'item_deleted', 'HO: ' + req.params.ho_no + ' Material: ' + reportItem.material, req.user.name);
+    await dbRun('UPDATE location_data SET active = 0 WHERE id = ?', [reportItem.location_data_id]);
+    await dbRun('UPDATE location_report_items SET action = ? WHERE id = ?', ['deleted', req.params.item_id]);
+    await dbRun('INSERT INTO location_audit (ho_no, action, location_data_id, rack, ean, material, description, qty, performed_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', [req.params.ho_no, 'delete', reportItem.location_data_id, reportItem.rack, reportItem.ean, reportItem.material, reportItem.description, reportItem.qty, req.user.name]);
+    await logActivity('location', 'item_deleted', 'HO: ' + req.params.ho_no + ' Material: ' + reportItem.material, req.user.name);
   } else if (action === 'minus') {
     var minusQty = qty || reportItem.qty;
     var newQty = Math.max(0, reportItem.qty - minusQty);
     if (newQty === 0) {
-      dbRun('UPDATE location_data SET active = 0 WHERE id = ?', [reportItem.location_data_id]);
+      await dbRun('UPDATE location_data SET active = 0 WHERE id = ?', [reportItem.location_data_id]);
     } else {
-      dbRun('UPDATE location_data SET qty = ? WHERE id = ?', [newQty, reportItem.location_data_id]);
+      await dbRun('UPDATE location_data SET qty = ? WHERE id = ?', [newQty, reportItem.location_data_id]);
     }
-    dbRun('UPDATE location_report_items SET action = ? WHERE id = ?', ['minus', req.params.item_id]);
-    dbRun('INSERT INTO location_audit (ho_no, action, location_data_id, rack, ean, material, description, qty, performed_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', [req.params.ho_no, 'minus', reportItem.location_data_id, reportItem.rack, reportItem.ean, reportItem.material, reportItem.description, minusQty, req.user.name]);
-    logActivity('location', 'item_minus', 'HO: ' + req.params.ho_no + ' Material: ' + reportItem.material + ' Qty: -' + minusQty, req.user.name);
+    await dbRun('UPDATE location_report_items SET action = ? WHERE id = ?', ['minus', req.params.item_id]);
+    await dbRun('INSERT INTO location_audit (ho_no, action, location_data_id, rack, ean, material, description, qty, performed_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', [req.params.ho_no, 'minus', reportItem.location_data_id, reportItem.rack, reportItem.ean, reportItem.material, reportItem.description, minusQty, req.user.name]);
+    await logActivity('location', 'item_minus', 'HO: ' + req.params.ho_no + ' Material: ' + reportItem.material + ' Qty: -' + minusQty, req.user.name);
   }
   res.json({ message: 'Action ' + action + ' performed' });
 });
 
-app.get('/api/location/audit', authMiddleware, function(req, res) {
-  res.json(dbAll('SELECT * FROM location_audit ORDER BY id DESC'));
+app.get('/api/location/audit', authMiddleware, async function(req, res) {
+  res.json(await dbAll('SELECT * FROM location_audit ORDER BY id DESC'));
 });
 
 // ===================== MATERIAL MASTER =====================
-app.get('/api/materials', authMiddleware, function(req, res) {
+app.get('/api/materials', authMiddleware, async function(req, res) {
   var search = req.query.search;
   if (search) {
-    res.json(dbAll('SELECT * FROM material_master WHERE material LIKE ? OR description LIKE ? OR ean LIKE ? ORDER BY id DESC', ['%' + search + '%', '%' + search + '%', '%' + search + '%']));
+    res.json(await dbAll('SELECT * FROM material_master WHERE material LIKE ? OR description LIKE ? OR ean LIKE ? ORDER BY id DESC', ['%' + search + '%', '%' + search + '%', '%' + search + '%']));
   } else {
-    res.json(dbAll('SELECT * FROM material_master ORDER BY id DESC'));
+    res.json(await dbAll('SELECT * FROM material_master ORDER BY id DESC'));
   }
 });
 
-app.post('/api/materials/bulk', authMiddleware, function(req, res) {
+app.post('/api/materials/bulk', authMiddleware, async function(req, res) {
   if (!hasAccess(req.user, 'material')) return res.status(403).json({ error: 'No access' });
   var materials = req.body.materials;
   if (!materials || !materials.length) return res.status(400).json({ error: 'Materials array required' });
   var count = 0;
   for (var i = 0; i < materials.length; i++) {
     var m = materials[i];
-    var result = dbRun('INSERT OR IGNORE INTO material_master (material, description, div, ean, brand) VALUES (?, ?, ?, ?, ?)', [m.material, m.description || '', m.div || '', m.ean || '', m.brand || '']);
-    if (result.changes > 0) count++;
+    await dbRun('INSERT OR IGNORE INTO material_master (material, description, div, ean, brand) VALUES (?, ?, ?, ?, ?)', [m.material, m.description || '', m.div || '', m.ean || '', m.brand || '']);
+    count++;
   }
-  logActivity('material', 'bulk_add', 'Added ' + count + ' materials', req.user.name);
+  await logActivity('material', 'bulk_add', 'Added ' + count + ' materials', req.user.name);
   res.json({ message: count + ' materials added' });
 });
 
-app.post('/api/materials/single', authMiddleware, function(req, res) {
+app.post('/api/materials/single', authMiddleware, async function(req, res) {
   if (!hasAccess(req.user, 'material')) return res.status(403).json({ error: 'No access' });
   var m = req.body;
   if (!m.material) return res.status(400).json({ error: 'Material code required' });
-  dbRun('INSERT OR IGNORE INTO material_master (material, description, div, ean, brand) VALUES (?, ?, ?, ?, ?)', [m.material, m.description || '', m.div || '', m.ean || '', m.brand || '']);
-  logActivity('material', 'add_single', 'Added material: ' + m.material, req.user.name);
+  await dbRun('INSERT OR IGNORE INTO material_master (material, description, div, ean, brand) VALUES (?, ?, ?, ?, ?)', [m.material, m.description || '', m.div || '', m.ean || '', m.brand || '']);
+  await logActivity('material', 'add_single', 'Added material: ' + m.material, req.user.name);
   res.json({ message: 'Material added' });
 });
 
-app.get('/api/materials/lookup/:ean', authMiddleware, function(req, res) {
-  var mat = dbGet('SELECT * FROM material_master WHERE ean = ? OR material = ?', [req.params.ean, req.params.ean]);
+app.get('/api/materials/lookup/:ean', authMiddleware, async function(req, res) {
+  var mat = await dbGet('SELECT * FROM material_master WHERE ean = ? OR material = ?', [req.params.ean, req.params.ean]);
   res.json(mat || null);
 });
 
 // ===================== BIN MANAGEMENT =====================
-app.get('/api/bins', authMiddleware, function(req, res) {
-  res.json(dbAll('SELECT * FROM bins ORDER BY rack, bin'));
+app.get('/api/bins', authMiddleware, async function(req, res) {
+  res.json(await dbAll('SELECT * FROM bins ORDER BY rack, bin'));
 });
 
-app.post('/api/bins/bulk', authMiddleware, function(req, res) {
+app.post('/api/bins/bulk', authMiddleware, async function(req, res) {
   if (!hasAccess(req.user, 'bin')) return res.status(403).json({ error: 'No access' });
   var bins = req.body.bins;
   if (!bins || !bins.length) return res.status(400).json({ error: 'Bins array required' });
   var count = 0;
   for (var i = 0; i < bins.length; i++) {
     var b = bins[i];
-    var result = dbRun('INSERT OR IGNORE INTO bins (rack, bin, capacity) VALUES (?, ?, ?)', [b.rack, b.bin, b.capacity || 0]);
-    if (result.changes > 0) count++;
+    await dbRun('INSERT OR IGNORE INTO bins (rack, bin, capacity) VALUES (?, ?, ?)', [b.rack, b.bin, b.capacity || 0]);
+    count++;
   }
-  logActivity('bin', 'bulk_add', 'Added ' + count + ' bins', req.user.name);
+  await logActivity('bin', 'bulk_add', 'Added ' + count + ' bins', req.user.name);
   res.json({ message: count + ' bins added' });
 });
 
-app.get('/api/bins/search/:material', authMiddleware, function(req, res) {
+app.get('/api/bins/search/:material', authMiddleware, async function(req, res) {
   var mat = req.params.material;
-  var locations = dbAll('SELECT * FROM location_data WHERE active = 1 AND material = ? ORDER BY rack', [mat]);
-  var putawayHistory = dbAll('SELECT grn_no, rack, putaway_qty, created_at FROM putaway_records WHERE material = ? ORDER BY created_at DESC LIMIT 20', [mat]);
-  var pivHistory = dbAll('SELECT rack, qty, created_at FROM piv_records WHERE material = ? ORDER BY created_at DESC LIMIT 20', [mat]);
+  var locations = await dbAll('SELECT * FROM location_data WHERE active = 1 AND material = ? ORDER BY rack', [mat]);
+  var putawayHistory = await dbAll('SELECT grn_no, rack, putaway_qty, created_at FROM putaway_records WHERE material = ? ORDER BY created_at DESC LIMIT 20', [mat]);
+  var pivHistory = await dbAll('SELECT rack, qty, created_at FROM piv_records WHERE material = ? ORDER BY created_at DESC LIMIT 20', [mat]);
   res.json({ locations: locations, putawayHistory: putawayHistory, pivHistory: pivHistory });
 });
 
 // ===================== LIVE ACTION =====================
-app.get('/api/live-actions', authMiddleware, function(req, res) {
-  res.json(dbAll('SELECT * FROM activity_log ORDER BY id DESC LIMIT 100'));
+app.get('/api/live-actions', authMiddleware, async function(req, res) {
+  res.json(await dbAll('SELECT * FROM activity_log ORDER BY id DESC LIMIT 100'));
 });
 
 // ===================== DASHBOARD =====================
-app.get('/api/dashboard/stats', authMiddleware, function(req, res) {
+app.get('/api/dashboard/stats', authMiddleware, async function(req, res) {
+  var pv = await dbGet("SELECT COUNT(*) as c FROM vehicles WHERE status IN ('pending', 'material_entered')");
+  var uv = await dbGet("SELECT COUNT(*) as c FROM vehicles WHERE status = 'unloading'");
+  var grn = await dbGet("SELECT COUNT(*) as c FROM grn_records");
+  var pa = await dbGet("SELECT COUNT(*) as c FROM putaway_records");
+  var piv = await dbGet("SELECT COUNT(*) as c FROM piv_records");
+  var mat = await dbGet("SELECT COUNT(*) as c FROM material_master");
+  var tb = await dbGet("SELECT COUNT(*) as c FROM bins");
+  var fb = await dbGet("SELECT COUNT(*) as c FROM bins WHERE status = 'filled'");
+  var al = await dbGet("SELECT COUNT(*) as c FROM location_data WHERE active = 1");
   res.json({
-    pendingVehicles: dbGet("SELECT COUNT(*) as c FROM vehicles WHERE status IN ('pending', 'material_entered')").c,
-    unloadingVehicles: dbGet("SELECT COUNT(*) as c FROM vehicles WHERE status = 'unloading'").c,
-    totalGRN: dbGet("SELECT COUNT(*) as c FROM grn_records").c,
-    totalPutaway: dbGet("SELECT COUNT(*) as c FROM putaway_records").c,
-    totalPIV: dbGet("SELECT COUNT(*) as c FROM piv_records").c,
-    totalMaterials: dbGet("SELECT COUNT(*) as c FROM material_master").c,
-    totalBins: dbGet("SELECT COUNT(*) as c FROM bins").c,
-    filledBins: dbGet("SELECT COUNT(*) as c FROM bins WHERE status = 'filled'").c,
-    activeLocations: dbGet("SELECT COUNT(*) as c FROM location_data WHERE active = 1").c
+    pendingVehicles: pv.c,
+    unloadingVehicles: uv.c,
+    totalGRN: grn.c,
+    totalPutaway: pa.c,
+    totalPIV: piv.c,
+    totalMaterials: mat.c,
+    totalBins: tb.c,
+    filledBins: fb.c,
+    activeLocations: al.c
   });
 });
 
@@ -659,22 +644,13 @@ app.get('*', function(req, res) {
 
 // ===================== START SERVER =====================
 async function startServer() {
-  console.log('Initializing database...');
-  var SQL = await initSqlJs();
+  console.log('Connecting to Turso Cloud Database...');
+  await dbExec(TABLES_SQL);
+  console.log('Tables ready.');
 
-  if (!loadDb()) {
-    _db = new SQL.Database();
-    console.log('Creating new database...');
-  } else {
-    console.log('Loaded existing database from disk...');
-  }
-
-  dbExec(TABLES_SQL);
-
-  // Create default admin if not exists
-  var adminExists = dbGet("SELECT id FROM users WHERE username = 'admin'");
+  var adminExists = await dbGet("SELECT id FROM users WHERE username = 'admin'");
   if (!adminExists) {
-    dbRun("INSERT INTO users (username, password, name, role, access) VALUES (?, ?, ?, ?, ?)", [
+    await dbRun("INSERT INTO users (username, password, name, role, access) VALUES (?, ?, ?, ?, ?)", [
       'admin', bcrypt.hashSync('admin123', 10), 'Admin', 'admin', JSON.stringify(['admin','inbound','putaway','piv','location','material','bin'])
     ]);
     console.log('Default admin created: username=admin, password=admin123');
@@ -684,6 +660,7 @@ async function startServer() {
     console.log('');
     console.log('======================================================');
     console.log('   VIP Industry (MD20) - WMS Server');
+    console.log('   Database: Turso Cloud (Permanent Storage)');
     console.log('   Running on: http://localhost:' + PORT);
     console.log('   Developed by: Nikhil Patil');
     console.log('======================================================');
@@ -692,6 +669,6 @@ async function startServer() {
 }
 
 startServer().catch(function(err) {
-  console.error('Failed to start server:', err);
+  console.error('Failed to start:', err);
   process.exit(1);
 });

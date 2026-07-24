@@ -653,7 +653,7 @@ const App = {
       '<tbody>' + rows + '</tbody></table></div>', 800);
   },
 
-  // ===================== PUTAWAY =====================
+    // ===================== PUTAWAY =====================
   async pagePutaway() {
     var grns = await this.api('GET', '/api/grn');
     if (!grns) return;
@@ -670,57 +670,67 @@ const App = {
   async _paLoadGrn() {
     var grnNo = document.getElementById('paGrn').value;
     if (!grnNo) { document.getElementById('paContent').innerHTML = ''; return; }
-    var data = await this.api('GET', '/api/grn/' + grnNo);
-    if (!data) return;
     window._paGrnNo = grnNo;
 
-    // Group materials by invoice
+    // Get remaining qty - not original
+    var remaining = await this.api('GET', '/api/putaway/remaining/' + grnNo);
+    if (!remaining) return;
+
+    // Group by invoice
     var invMap = {};
-    for (var i = 0; i < data.materials.length; i++) {
-      var m = data.materials[i];
-      if (!invMap[m.invoice_no]) invMap[m.invoice_no] = [];
-      invMap[m.invoice_no].push(m);
+    for (var i = 0; i < remaining.length; i++) {
+      var r = remaining[i];
+      if (!invMap[r.invoice_no]) invMap[r.invoice_no] = [];
+      if (!r.completed) invMap[r.invoice_no].push(r);
+    }
+
+    var invNos = Object.keys(invMap);
+    var hasAnyPending = false;
+    for (var h = 0; h < invNos.length; h++) {
+      if (invMap[invNos[h]].length > 0) { hasAnyPending = true; break; }
+    }
+
+    if (!hasAnyPending) {
+      document.getElementById('paContent').innerHTML = '<div class="empty-state"><i class="fas fa-check-circle text-success"></i><p>All materials already putaway for this GRN!</p></div>';
+      return;
     }
 
     var sheets = '';
-    var invIdx = 0;
     for (var inv in invMap) {
       var mats = invMap[inv];
+      if (mats.length === 0) continue;
       var mRows = '';
       for (var j = 0; j < mats.length; j++) {
+        var m = mats[j];
         mRows += '<div class="scan-row">' +
-          '<input type="text" value="' + mats[j].material + '" readonly style="background:var(--bg-secondary);color:var(--text-muted);" data-mat="' + mats[j].material + '" data-ean="' + (mats[j].ean || '') + '" data-desc="' + (mats[j].description || '') + '" data-qty="' + mats[j].qty + '">' +
-          '<input type="text" id="paScan_' + invIdx + '_' + j + '" placeholder="Scan/Type material" data-mat="' + mats[j].material + '" data-inbound-qty="' + mats[j].qty + '">' +
-          '<input type="number" id="paQty_' + invIdx + '_' + j + '" placeholder="Putaway Qty">' +
-          '<input type="text" id="paRack_' + invIdx + '_' + j + '" placeholder="Rack">' +
-          '<button class="btn btn-primary btn-xs" onclick="App._paScanRow(\'paScan_' + invIdx + '_' + j + '\')"><i class="fas fa-qrcode"></i></button>' +
+          '<input type="text" value="' + m.material + '" readonly style="background:var(--bg-secondary);color:var(--text-muted);font-size:13px;">' +
+          '<input type="text" id="paScan_' + j + '" placeholder="Scan/Type" data-mat="' + m.material + '" data-remaining="' + m.remaining_qty + '" data-inbound="' + m.inbound_qty + '" style="font-size:13px;">' +
+          '<div style="display:flex;flex-direction:column;gap:2px;"><span style="font-size:10px;color:var(--text-muted);">Remaining: <strong class="text-accent">' + m.remaining_qty + '</strong> / ' + m.inbound_qty + '</span>' +
+          '<input type="number" id="paQty_' + j + '" placeholder="Putaway Qty" max="' + m.remaining_qty + '" style="font-size:13px;" oninput="App._paCheckQty(this,' + m.remaining_qty + ')"></div>' +
+          '<input type="text" id="paRack_' + j + '" placeholder="Rack" style="font-size:13px;">' +
+          '<button class="btn btn-primary btn-xs" onclick="App._paScanRow(\'paScan_' + j + '\')"><i class="fas fa-qrcode"></i></button>' +
           '</div>';
       }
       sheets += '<div class="scan-sheet"><div class="flex-between mb-1"><strong class="text-accent">Invoice: ' + inv + '</strong></div>' +
-        '<div class="scan-row scan-row-header"><span>Material</span><span>Scan/Type</span><span>Putaway Qty</span><span>Rack</span><span></span></div>' +
+        '<div class="scan-row scan-row-header"><span>Material</span><span>Scan/Type</span><span>Qty</span><span>Rack</span><span></span></div>' +
         mRows + '</div>';
-      invIdx++;
     }
+
     document.getElementById('paContent').innerHTML = sheets +
       '<div class="mt-2"><button class="btn btn-success" onclick="App._paSubmit()"><i class="fas fa-check"></i> Submit Putaway</button></div>';
+  },
+
+  _paCheckQty: function(input, maxQty) {
+    if (parseFloat(input.value) > maxQty) {
+      input.value = maxQty;
+      this.toast('Cannot putaway more than remaining ' + maxQty, 'warning');
+    }
   },
 
   _paScanRow: function(inputId) {
     var input = document.getElementById(inputId);
     var self = this;
-    this.scannerOpen(function(val) {
-      input.value = val;
-      // Auto-fill from material master
-      self.api('GET', '/api/materials/lookup/' + encodeURIComponent(val)).then(function(mat) {
-        if (mat) {
-          var row = input.closest('.scan-row');
-          var readonlyField = row.querySelector('input[readonly]');
-          if (readonlyField && !readonlyField.dataset.mat) {
-            // auto fill material code
-          }
-        }
-      });
-    });
+    this.scannerOpen(function(val) { input.value = val; });
   },
 
   _paSubmit: async function() {
@@ -731,24 +741,27 @@ const App = {
       var idxStr = si.id.replace('paScan_', '');
       var qtyVal = parseFloat(document.getElementById('paQty_' + idxStr).value) || 0;
       var rackVal = document.getElementById('paRack_' + idxStr).value.trim();
+      var remaining = parseFloat(si.dataset.remaining) || 0;
+      var inbound = parseFloat(si.dataset.inbound) || 0;
       if (si.value.trim() && qtyVal > 0) {
-        var readonlyField = si.closest('.scan-row').querySelector('input[readonly]');
+        if (qtyVal > remaining) {
+          return this.toast('Cannot putaway ' + qtyVal + ', only ' + remaining + ' remaining for ' + si.dataset.mat, 'error');
+        }
         items.push({
           material: si.dataset.mat || si.value.trim(),
-          ean: readonlyField ? readonlyField.dataset.ean : '',
-          description: readonlyField ? readonlyField.dataset.desc : '',
-          inbound_qty: parseFloat(si.dataset.inboundQty) || 0,
+          ean: '',
+          description: '',
+          inbound_qty: inbound,
           putaway_qty: qtyVal,
-          short_qty: (parseFloat(si.dataset.inboundQty) || 0) - qtyVal,
+          short_qty: 0,
           rack: rackVal
         });
       }
     }
-    if (items.length === 0) return this.toast('Scan at least one item', 'warning');
+    if (items.length === 0) return this.toast('Scan at least one item with qty', 'warning');
 
-    // Get invoice from first item context
+    // Get invoice from first item
     var firstScanId = scanInputs[0].id;
-    // We need invoice_no - get from sheet headers
     var sheets = document.querySelectorAll('.scan-sheet');
     var invoiceNo = '';
     if (sheets.length > 0) {
@@ -756,19 +769,15 @@ const App = {
       if (strong) invoiceNo = strong.textContent.replace('Invoice: ', '').trim();
     }
 
-    var res = await this.api('POST', '/api/putaway', {
-      grn_no: window._paGrnNo,
-      invoice_no: invoiceNo,
-      items: items
-    });
+    var res = await this.api('POST', '/api/putaway', { grn_no: window._paGrnNo, invoice_no: invoiceNo, items: items });
     if (res && !res.error) {
-      this.toast('Putaway saved successfully!', 'success');
-      this.route();
+      this.toast('Putaway saved!', 'success');
+      this._paLoadGrn(); // Reload to show updated remaining
     } else {
       this.toast((res && res.error) || 'Error', 'error');
     }
   },
-
+  
   // ===================== PIV =====================
   pagePIV() {
     var self = this;
@@ -868,10 +877,36 @@ const App = {
   },
 
   // ===================== LOCATION PAGE =====================
+    // ===================== LOCATION PAGE =====================
   async pageLocation() {
-    var data = await this.api('GET', '/api/location');
-    if (!data) return;
+    document.getElementById('pageContent').innerHTML =
+      '<div class="card-3d"><div class="card-title"><i class="fas fa-map-marker-alt"></i> Location Page - All Data</div>' +
+        '<div class="flex-between mb-2">' +
+          '<div class="input-group" style="max-width:400px;">' +
+            '<input type="text" id="locSearch" placeholder="Search materials (comma separated)">' +
+            '<button class="btn btn-primary btn-sm" onclick="App._locSearch()"><i class="fas fa-search"></i> Search</button>' +
+          '</div>' +
+          '<div style="display:flex;gap:8px;flex-wrap:wrap;">' +
+            '<button class="btn btn-outline btn-sm" onclick="App._locAddSingle()"><i class="fas fa-plus"></i> Add Single</button>' +
+            '<button class="btn btn-outline btn-sm" onclick="App._locCreateReport()"><i class="fas fa-file-alt"></i> Create HO Report</button>' +
+            '<button class="btn btn-warning btn-sm" onclick="App._locEditReport()"><i class="fas fa-edit"></i> Edit HO Report</button>' +
+          '</div>' +
+        '</div>' +
+        '<div class="file-upload-zone mb-2" onclick="document.getElementById(\'locFileInput\').click()">' +
+          '<i class="fas fa-file-excel"></i>' +
+          '<p>Click to upload Excel for bulk location add</p>' +
+          '<p style="font-size:11px;color:var(--text-muted);">Format: Date, Rack, EAN, Material, Description, Qty, Packing, Box No</p>' +
+          '<input type="file" id="locFileInput" accept=".xlsx,.xls,.csv" style="display:none" onchange="App._locBulkUpload(this)">' +
+        '</div>' +
+        '<div id="locTableArea"><div class="spinner"></div></div>' +
+      '</div>';
 
+    var data = await this.api('GET', '/api/location');
+    if (!data) { document.getElementById('locTableArea').innerHTML = '<p class="text-danger">Failed to load data</p>'; return; }
+    if (data.length === 0) {
+      document.getElementById('locTableArea').innerHTML = '<div class="empty-state"><i class="fas fa-inbox"></i><p>No location data yet.</p></div>';
+      return;
+    }
     var rows = '';
     for (var i = 0; i < data.length; i++) {
       var d = data[i];
@@ -880,42 +915,97 @@ const App = {
         '<td>' + d.ean + '</td><td>' + d.material + '</td><td>' + d.description + '</td><td>' + d.qty + '</td>' +
         '<td>' + (d.packing || '-') + '</td><td>' + (d.box_no || '-') + '</td></tr>';
     }
-
-    document.getElementById('pageContent').innerHTML =
-      '<div class="card-3d"><div class="card-title"><i class="fas fa-map-marker-alt"></i> Location Page - All Data</div>' +
-        '<div class="flex-between mb-2">' +
-          '<div class="input-group" style="max-width:400px;">' +
-            '<input type="text" id="locSearch" placeholder="Search materials (comma separated for multiple)">' +
-            '<button class="btn btn-primary btn-sm" onclick="App._locSearch()"><i class="fas fa-search"></i> Search</button>' +
-          '</div>' +
-                    '<div style="display:flex;gap:8px;flex-wrap:wrap;">' +
-            '<button class="btn btn-outline btn-sm" onclick="App._locAddSingle()"><i class="fas fa-plus"></i> Add Single</button>' +
-            '<button class="btn btn-outline btn-sm" onclick="App._locCreateReport()"><i class="fas fa-file-alt"></i> Create HO Report</button>' +
-            '<button class="btn btn-warning btn-sm" onclick="App._locEditReport()"><i class="fas fa-edit"></i> Edit HO Report</button>' +
-          '</div>' +
-          '<div class="file-upload-zone mb-2" onclick="document.getElementById(\'locFileInput\').click()">' +
-            '<i class="fas fa-file-excel"></i>' +
-            '<p>Click to upload Excel for bulk location add</p>' +
-            '<p style="font-size:11px;color:var(--text-muted);">Format: Date, Rack, EAN, Material, Description, Qty, Packing, Box No</p>' +
-            '<input type="file" id="locFileInput" accept=".xlsx,.xls,.csv" style="display:none" onchange="App._locBulkUpload(this)">' +
-          '</div>' +
-        '</div>' +
-        (data.length === 0 ? '<div class="empty-state"><i class="fas fa-inbox"></i><p>No location data yet.</p></div>' :
-        '<div class="table-wrapper"><table><thead><tr><th>Source</th><th>Date</th><th>Rack</th><th>EAN</th><th>Material</th><th>Description</th><th>Qty</th><th>Packing</th><th>Box No</th></tr></thead>' +
-        '<tbody>' + rows + '</tbody></table></div>') +
-      '</div>';
+    document.getElementById('locTableArea').innerHTML =
+      '<div class="table-wrapper"><table><thead><tr><th>Source</th><th>Date</th><th>Rack</th><th>EAN</th><th>Material</th><th>Description</th><th>Qty</th><th>Packing</th><th>Box No</th></tr></thead>' +
+      '<tbody>' + rows + '</tbody></table></div>';
   },
+
+  async _locSearch() {
+    var materials = document.getElementById('locSearch').value.trim();
+    if (!materials) return this.toast('Enter material(s)', 'warning');
+    var data = await this.api('GET', '/api/location/search?materials=' + encodeURIComponent(materials));
+    if (!data || data.length === 0) { this.toast('No location found', 'warning'); return; }
+    var rows = '';
+    for (var i = 0; i < data.length; i++) {
+      var d = data[i];
+      var srcBadge = d.source === 'piv' ? 'badge-piv' : 'badge-putaway';
+      rows += '<tr><td><span class="badge ' + srcBadge + '">' + d.source + '</span></td><td>' + d.date + '</td><td>' + d.rack + '</td>' +
+        '<td>' + d.ean + '</td><td>' + d.material + '</td><td>' + d.description + '</td><td>' + d.qty + '</td></tr>';
+    }
+    this.openModal('<i class="fas fa-search"></i> Location Search Results',
+      '<div class="table-wrapper"><table><thead><tr><th>Source</th><th>Date</th><th>Rack</th><th>EAN</th><th>Material</th><th>Description</th><th>Qty</th></tr></thead>' +
+      '<tbody>' + rows + '</tbody></table></div>', 800);
+  },
+
+  _locCreateReport: function() {
+    var pickerName = prompt('Enter Picker Name:');
+    if (!pickerName) return;
+    var materials = prompt('Enter materials (comma separated):');
+    if (!materials) return;
+    var self = this;
+    this.api('GET', '/api/location/search?materials=' + encodeURIComponent(materials)).then(function(locData) {
+      if (!locData || locData.length === 0) { self.toast('No location data found', 'warning'); return; }
+      var ids = locData.map(function(d) { return d.id; });
+      self.api('POST', '/api/location/report', { picker_name: pickerName, materials: materials, location_ids: ids }).then(function(res) {
+        if (res && !res.error) self.toast('HO Report Created: ' + res.ho_no, 'success');
+        else self.toast((res && res.error) || 'Error', 'error');
+      });
+    });
+  },
+
+  _locEditReport: function() {
+    var hoNo = prompt('Enter HO Report No:');
+    if (!hoNo) return;
+    this._locShowReport(hoNo);
+  },
+
+  _locShowReport: function(hoNo) {
+    var self = this;
+    this.api('GET', '/api/location/report/' + hoNo).then(function(data) {
+      if (!data || !data.items || data.items.length === 0) { self.toast('Report not found or empty', 'error'); return; }
+      var rows = '';
+      for (var i = 0; i < data.items.length; i++) {
+        var item = data.items[i];
+        var srcBadge = item.source === 'piv' ? 'badge-piv' : 'badge-putaway';
+        var actionBadge = item.action === 'none' ? '' : '<span class="badge badge-' + item.action + '">' + item.action + '</span>';
+        rows += '<tr><td><span class="badge ' + srcBadge + '">' + item.source + '</span></td><td>' + item.rack + '</td><td>' + item.material + '</td><td>' + item.description + '</td><td>' + item.qty + '</td>' +
+          '<td>' + actionBadge + '</td>' +
+          '<td class="action-btns">' +
+            '<button class="btn btn-danger btn-xs" onclick="App._locAction(\'' + hoNo + '\',' + item.report_item_id + ',\'delete\')"><i class="fas fa-trash"></i> Delete</button>' +
+            '<button class="btn btn-warning btn-xs" onclick="App._locAction(\'' + hoNo + '\',' + item.report_item_id + ',\'minus\')"><i class="fas fa-minus"></i> Minus</button>' +
+          '</td></tr>';
+      }
+      self.openModal('<i class="fas fa-edit"></i> Edit HO Report: ' + hoNo,
+        '<p class="mb-1">Picker: <strong>' + data.picker_name + '</strong> | Created: ' + data.created_at + '</p>' +
+        '<div class="table-wrapper"><table><thead><tr><th>Source</th><th>Rack</th><th>Material</th><th>Desc</th><th>Qty</th><th>Action</th><th>Operations</th></tr></thead>' +
+        '<tbody>' + rows + '</tbody></table></div>', 900);
+    });
+  },
+
+  _locAction: function(hoNo, itemId, action) {
+    var self = this;
+    this.api('PUT', '/api/location/report/' + hoNo + '/item/' + itemId, { action: action, qty: 0 }).then(function(res) {
+      if (res && !res.error) {
+        self.toast('Action ' + action + ' done', 'success');
+        self._locShowReport(hoNo);
+      } else {
+        self.toast((res && res.error) || 'Error', 'error');
+      }
+    });
+  },
+
   _locBulkUpload: function(input) {
     var self = this;
     var file = input.files[0];
     if (!file) return;
+    this.toast('Processing file...', 'info');
     var reader = new FileReader();
     reader.onload = function(e) {
       try {
         var wb = XLSX.read(e.target.result, { type: 'array' });
         var ws = wb.Sheets[wb.SheetNames[0]];
         var json = XLSX.utils.sheet_to_json(ws);
-        if (json.length === 0) return self.toast('No data found in file', 'warning');
+        if (json.length === 0) { self.toast('No data found in file', 'warning'); return; }
         var items = [];
         for (var i = 0; i < json.length; i++) {
           var row = json[i];
@@ -927,39 +1017,25 @@ const App = {
           var packing = row['PACKING'] || row['Packing'] || row['packing'] || '';
           var box_no = row['BOX NO'] || row['Box No'] || row['box no'] || row['BoxNo'] || '';
           var date = row['DATE'] || row['Date'] || row['date'] || '';
-          // Date format convert: 07/24/2025 → 2025-07-24
-          if (date) {
-            if (String(date).indexOf('/') >= 0) {
-              var parts = String(date).split('/');
-              if (parts.length === 3) {
-                date = parts[2] + '-' + parts[0].padStart(2, '0') + '-' + parts[1].padStart(2, '0');
-              }
-            }
-            // Excel serial date convert
-            else if (typeof date === 'number') {
-              var d = new Date((date - 25569) * 86400 * 1000);
-              date = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-            }
+          if (String(date).indexOf('/') >= 0) {
+            var parts = String(date).split('/');
+            if (parts.length === 3) date = parts[2] + '-' + parts[0].padStart(2, '0') + '-' + parts[1].padStart(2, '0');
+          } else if (typeof date === 'number') {
+            var d = new Date((date - 25569) * 86400 * 1000);
+            date = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
           }
           if (rack && material) {
             items.push({ rack: String(rack), ean: String(ean), material: String(material), description: String(description), qty: parseFloat(qty) || 0, packing: String(packing), box_no: String(box_no), date: String(date) });
           }
         }
-        if (items.length === 0) return self.toast('No valid data found', 'warning');
+        if (items.length === 0) { self.toast('No valid data found', 'warning'); return; }
         self.api('POST', '/api/location/bulk', { items: items }).then(function(res) {
-          if (res && !res.error) {
-            self.toast(res.message, 'success');
-            self.pageLocation();
-          } else {
-            self.toast((res && res.error) || 'Error', 'error');
-          }
+          if (res && !res.error) { self.toast(res.message, 'success'); self.pageLocation(); }
+          else self.toast((res && res.error) || 'Error', 'error');
         });
-      } catch (err) {
-        self.toast('Error reading file: ' + err.message, 'error');
-      }
+      } catch (err) { self.toast('Error reading file: ' + err.message, 'error'); }
     };
     reader.readAsArrayBuffer(file);
-  
   },
 
   _locAddSingle: function() {
@@ -982,128 +1058,10 @@ const App = {
     var material = document.getElementById('lsMaterial').value.trim();
     var qty = parseFloat(document.getElementById('lsQty').value) || 0;
     if (!rack || !material || qty <= 0) return this.toast('Rack, Material and Qty required', 'warning');
-    var items = [{
-      rack: rack,
-      ean: document.getElementById('lsEan').value.trim(),
-      material: material,
-      description: document.getElementById('lsDesc').value.trim(),
-      qty: qty,
-      packing: document.getElementById('lsPacking').value.trim(),
-      box_no: document.getElementById('lsBox').value.trim(),
-      date: document.getElementById('lsDate').value
-    }];
+    var items = [{ rack: rack, ean: document.getElementById('lsEan').value.trim(), material: material, description: document.getElementById('lsDesc').value.trim(), qty: qty, packing: document.getElementById('lsPacking').value.trim(), box_no: document.getElementById('lsBox').value.trim(), date: document.getElementById('lsDate').value }];
     var res = await this.api('POST', '/api/location/bulk', { items: items });
-    if (res && !res.error) {
-      this.toast('Location added!', 'success');
-      this.closeModal();
-      this.pageLocation();
-    } else {
-      this.toast((res && res.error) || 'Error', 'error');
-    }
-  },
-  
-  async _locSearch() {
-    var materials = document.getElementById('locSearch').value.trim();
-    if (!materials) return this.toast('Enter material(s) to search', 'warning');
-    var data = await this.api('GET', '/api/location/search?materials=' + encodeURIComponent(materials));
-    if (!data) return;
-    if (data.length === 0) {
-      this.toast('No location found for these materials', 'warning');
-      return;
-    }
-    var rows = '';
-    for (var i = 0; i < data.length; i++) {
-      var d = data[i];
-      var srcBadge = d.source === 'piv' ? 'badge-piv' : 'badge-putaway';
-      rows += '<tr><td><span class="badge ' + srcBadge + '">' + d.source + '</span></td><td>' + d.date + '</td><td>' + d.rack + '</td>' +
-        '<td>' + d.ean + '</td><td>' + d.material + '</td><td>' + d.description + '</td><td>' + d.qty + '</td></tr>';
-    }
-    this.openModal('<i class="fas fa-search"></i> Location Search Results',
-      '<div class="table-wrapper"><table><thead><tr><th>Source</th><th>Date</th><th>Rack</th><th>EAN</th><th>Material</th><th>Description</th><th>Qty</th></tr></thead>' +
-      '<tbody>' + rows + '</tbody></table></div>', 800);
-  },
-
-  _locCreateReport: async function() {
-    var pickerName = prompt('Enter Picker Name:');
-    if (!pickerName) return;
-    var materials = prompt('Enter materials (comma separated):');
-    if (!materials) return;
-
-    // Get location data for these materials
-    var locData = await this.api('GET', '/api/location/search?materials=' + encodeURIComponent(materials));
-    if (!locData || locData.length === 0) return this.toast('No location data found', 'warning');
-
-    var ids = locData.map(function(d) { return d.id; });
-    var res = await this.api('POST', '/api/location/report', {
-      picker_name: pickerName,
-      materials: materials,
-      location_ids: ids
-    });
-    if (res && !res.error) {
-      this.toast('HO Report Created: ' + res.ho_no, 'success');
-    } else {
-      this.toast((res && res.error) || 'Error', 'error');
-    }
-  },
-
-  _locEditReport: function() {
-    var self = this;
-    var hoNo = prompt('Enter HO Report No:');
-    if (!hoNo) return;
-    this.api('GET', '/api/location/report/' + hoNo).then(function(data) {
-      if (!data || !data.items || data.items.length === 0) {
-        self.toast('Report not found or empty', 'error');
-        return;
-      }
-      var rows = '';
-      for (var i = 0; i < data.items.length; i++) {
-        var item = data.items[i];
-        var srcBadge = item.source === 'piv' ? 'badge-piv' : 'badge-putaway';
-        rows += '<tr>' +
-          '<td><span class="badge ' + srcBadge + '">' + item.source + '</span></td>' +
-          '<td>' + item.rack + '</td><td>' + item.material + '</td><td>' + item.description + '</td><td>' + item.qty + '</td>' +
-          '<td>' + (item.action === 'none' ? '-' : '<span class="badge badge-' + item.action + '">' + item.action + '</span>') + '</td>' +
-          '<td class="action-btns">' +
-            '<button class="btn btn-danger btn-xs" onclick="App._locAction(\'' + hoNo + '\',' + item.report_item_id + ',\'delete\')"><i class="fas fa-trash"></i> Delete</button>' +
-            '<button class="btn btn-warning btn-xs" onclick="App._locAction(\'' + hoNo + '\',' + item.report_item_id + ',\'minus\')"><i class="fas fa-minus"></i> Minus</button>' +
-          '</td></tr>';
-      }
-      self.openModal('<i class="fas fa-edit"></i> Edit HO Report: ' + hoNo,
-        '<p class="mb-1">Picker: <strong>' + data.picker_name + '</strong> | Created: ' + data.created_at + '</p>' +
-        '<div class="table-wrapper"><table><thead><tr><th>Source</th><th>Rack</th><th>Material</th><th>Desc</th><th>Qty</th><th>Action</th><th>Operations</th></tr></thead>' +
-        '<tbody>' + rows + '</tbody></table></div>', 900);
-    });
-  },
-
-  _locAction: async function(hoNo, itemId, action) {
-    var res = await this.api('PUT', '/api/location/report/' + hoNo + '/item/' + itemId, { action: action, qty: 0 });
-    if (res && !res.error) {
-      this.toast('Action ' + action + ' performed', 'success');
-      this._locEditReport(); // Refresh - will ask hoNo again so let's bypass
-      // Instead, refresh the modal directly
-      var self = this;
-      this.api('GET', '/api/location/report/' + hoNo).then(function(data) {
-        if (!data || !data.items) return;
-        var rows = '';
-        for (var i = 0; i < data.items.length; i++) {
-          var item = data.items[i];
-          var srcBadge = item.source === 'piv' ? 'badge-piv' : 'badge-putaway';
-          rows += '<tr><td><span class="badge ' + srcBadge + '">' + item.source + '</span></td>' +
-            '<td>' + item.rack + '</td><td>' + item.material + '</td><td>' + item.description + '</td><td>' + item.qty + '</td>' +
-            '<td>' + (item.action === 'none' ? '-' : '<span class="badge badge-' + item.action + '">' + item.action + '</span>') + '</td>' +
-            '<td class="action-btns">' +
-              '<button class="btn btn-danger btn-xs" onclick="App._locAction(\'' + hoNo + '\',' + item.report_item_id + ',\'delete\')"><i class="fas fa-trash"></i> Delete</button>' +
-              '<button class="btn btn-warning btn-xs" onclick="App._locAction(\'' + hoNo + '\',' + item.report_item_id + ',\'minus\')"><i class="fas fa-minus"></i> Minus</button>' +
-            '</td></tr>';
-        }
-        document.getElementById('genericModalBody').innerHTML =
-          '<p class="mb-1">Picker: <strong>' + data.picker_name + '</strong> | Created: ' + data.created_at + '</p>' +
-          '<div class="table-wrapper"><table><thead><tr><th>Source</th><th>Rack</th><th>Material</th><th>Desc</th><th>Qty</th><th>Action</th><th>Operations</th></tr></thead>' +
-          '<tbody>' + rows + '</tbody></table></div>';
-      });
-    } else {
-      this.toast((res && res.error) || 'Error', 'error');
-    }
+    if (res && !res.error) { this.toast('Location added!', 'success'); this.closeModal(); this.pageLocation(); }
+    else this.toast((res && res.error) || 'Error', 'error');
   },
 
   // ===================== MATERIAL MASTER =====================

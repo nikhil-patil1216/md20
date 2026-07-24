@@ -410,7 +410,34 @@ app.post('/api/putaway', authMiddleware, async function(req, res) {
   await logActivity('putaway', 'putaway_done', 'Putaway GRN: ' + grn_no + ' Invoice: ' + invoice_no, req.user.name);
   res.json({ message: 'Putaway saved' });
 });
-
+app.get('/api/putaway/remaining/:grn_no', authMiddleware, async function(req, res) {
+  var grn = await dbGet('SELECT * FROM grn_records WHERE grn_no = ?', [req.params.grn_no]);
+  if (!grn) return res.status(404).json({ error: 'GRN not found' });
+  var inbound = await dbAll('SELECT * FROM inbound_materials WHERE vehicle_id = ?', [grn.vehicle_id]);
+  var putaway = await dbAll('SELECT * FROM putaway_records WHERE grn_no = ?', [req.params.grn_no]);
+  var result = [];
+  for (var i = 0; i < inbound.length; i++) {
+    var ib = inbound[i];
+    var paQty = 0;
+    for (var j = 0; j < putaway.length; j++) {
+      if (putaway[j].invoice_no === ib.invoice_no && putaway[j].material === ib.material) {
+        paQty += putaway[j].putaway_qty;
+      }
+    }
+    var remaining = ib.qty - paQty;
+    result.push({
+      invoice_no: ib.invoice_no,
+      material: ib.material,
+      ean: ib.ean || '',
+      description: ib.description || '',
+      inbound_qty: ib.qty,
+      putaway_qty: paQty,
+      remaining_qty: remaining,
+      completed: remaining <= 0
+    });
+  }
+  res.json(result);
+});
 app.get('/api/putaway/difference/:grn_no', authMiddleware, async function(req, res) {
   var grn = await dbGet('SELECT * FROM grn_records WHERE grn_no = ?', [req.params.grn_no]);
   if (!grn) return res.status(404).json({ error: 'GRN not found' });

@@ -691,6 +691,13 @@ app.get('*', function(req, res) {
 async function startServer() {
   console.log('Connecting to Database...');
   try {
+    var dbUrl = process.env.TURSO_DATABASE_URL || '';
+    var dbToken = process.env.TURSO_AUTH_TOKEN || undefined;
+    if (dbUrl && dbUrl.startsWith('libsql://')) {
+      db = createClient({ url: dbUrl, authToken: dbToken });
+    } else {
+      db = createClient({ url: 'file:local.db' });
+    }
     var statements = TABLES_SQL.split(';');
     for (var i = 0; i < statements.length; i++) {
       var s = statements[i].trim();
@@ -698,7 +705,7 @@ async function startServer() {
         try { await db.execute(s); } catch(e) {}
       }
     }
-    console.log('Cloud Database connected!');
+    console.log('Database connected!');
   } catch (err) {
     console.log('Cloud DB failed, using local fallback...');
     db = createClient({ url: 'file:local.db' });

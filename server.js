@@ -57,7 +57,12 @@ async function dbAll(sql, params) {
 }
 
 async function dbExec(sql) {
-  await db.execute(sql);
+  try {
+    await db.execute(sql);
+  } catch (e) {
+    console.error('SQL Error:', e.message);
+  }
+
 }
 
 // ===================== TABLE CREATION =====================
@@ -672,13 +677,29 @@ app.get('*', function(req, res) {
 // ===================== START SERVER =====================
 async function startServer() {
   console.log('Connecting to Turso Cloud Database...');
-  var statements = TABLES_SQL.split(';');
-  for (var i = 0; i < statements.length; i++) {
-    var s = statements[i].trim();
-    if (s.length > 5) {
-      await db.execute(s);
+  try {
+    var statements = TABLES_SQL.split(';');
+    for (var i = 0; i < statements.length; i++) {
+      var s = statements[i].trim();
+      if (s.length > 10) {
+        try { await db.execute(s); } catch(e) { console.log('Table skip:', e.message); }
+      }
+    }
+    console.log('Tables ready.');
+  } catch (err) {
+    console.error('DB Connection Error:', err.message);
+    console.log('Starting with fallback local DB...');
+    db = createClient({ url: 'file:local.db' });
+    var statements2 = TABLES_SQL.split(';');
+    for (var j = 0; j < statements2.length; j++) {
+      var s2 = statements2[j].trim();
+      if (s2.length > 10) {
+        try { await db.execute(s2); } catch(e2) {}
+      }
     }
   }
+    }
+  
   console.log('Tables ready.');
 
   var adminExists = await dbGet("SELECT id FROM users WHERE username = 'admin'");
@@ -699,7 +720,7 @@ async function startServer() {
     console.log('======================================================');
     console.log('');
   });
-}
+
 
 startServer().catch(function(err) {
   console.error('Failed to start:', err);

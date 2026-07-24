@@ -864,14 +864,28 @@ const App = {
         var items = [];
         for (var i = 0; i < json.length; i++) {
           var row = json[i];
-          var rack = row['Rack'] || row['rack'] || row['RACK'] || '';
-          var ean = row['EAN'] || row['ean'] || row['EAN No'] || row['ean no'] || '';
-          var material = row['Material'] || row['material'] || row['MATERIAL'] || '';
-          var description = row['Description'] || row['description'] || row['DESCRIPTION'] || row['Material Description'] || '';
-          var qty = row['Qty'] || row['qty'] || row['QTY'] || row['Quantity'] || 0;
-          var packing = row['Packing'] || row['packing'] || row['PACKING'] || '';
-          var box_no = row['Box No'] || row['box no'] || row['BOX NO'] || row['BoxNo'] || '';
-          var date = row['Date'] || row['date'] || row['DATE'] || '';
+          var rack = row['RACK'] || row['Rack'] || row['rack'] || '';
+          var ean = row['EAN NO'] || row['EAN No'] || row['ean no'] || row['EAN'] || row['ean'] || '';
+          var material = row['MATERIAL'] || row['Material'] || row['material'] || '';
+          var description = row['DESCRIPTION'] || row['Description'] || row['description'] || '';
+          var qty = row['QTY'] || row['Qty'] || row['qty'] || row['Quantity'] || 0;
+          var packing = row['PACKING'] || row['Packing'] || row['packing'] || '';
+          var box_no = row['BOX NO'] || row['Box No'] || row['box no'] || row['BoxNo'] || '';
+          var date = row['DATE'] || row['Date'] || row['date'] || '';
+          // Date format convert: 07/24/2025 → 2025-07-24
+          if (date) {
+            if (String(date).indexOf('/') >= 0) {
+              var parts = String(date).split('/');
+              if (parts.length === 3) {
+                date = parts[2] + '-' + parts[0].padStart(2, '0') + '-' + parts[1].padStart(2, '0');
+              }
+            }
+            // Excel serial date convert
+            else if (typeof date === 'number') {
+              var d = new Date((date - 25569) * 86400 * 1000);
+              date = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+            }
+          }
           if (rack && material) {
             items.push({ rack: String(rack), ean: String(ean), material: String(material), description: String(description), qty: parseFloat(qty) || 0, packing: String(packing), box_no: String(box_no), date: String(date) });
           }
@@ -890,6 +904,7 @@ const App = {
       }
     };
     reader.readAsArrayBuffer(file);
+  
   },
 
   _locAddSingle: function() {

@@ -487,10 +487,14 @@ async function startServer() {
     }
     console.log('Local Database ready.');
   }
-  var adminExists = await dbGet("SELECT id FROM users WHERE username = 'admin'");
-  if (!adminExists) {
-    await dbRun("INSERT INTO users (username, password, name, role, access) VALUES (?, ?, ?, ?, ?)", ['admin', bcrypt.hashSync('admin123', 10), 'Admin', 'admin', JSON.stringify(['admin', 'inbound', 'putaway', 'piv', 'location', 'material', 'bin'])]);
-    console.log('Default admin created: username=admin, password=admin123');
+    try {
+    var adminExists = await dbGet("SELECT id FROM users WHERE username = 'admin'");
+    if (!adminExists) {
+      await dbRun("INSERT INTO users (username, password, name, role, access) VALUES (?, ?, ?, ?, ?)", ['admin', bcrypt.hashSync('admin123', 10), 'Admin', 'admin', JSON.stringify(['admin', 'inbound', 'putaway', 'piv', 'location', 'material', 'bin'])]);
+      console.log('Default admin created: username=admin, password=admin123');
+    }
+  } catch (e) {
+    console.log('Admin already exists, skipping...');
   }
   app.listen(PORT, function() {
     console.log('');

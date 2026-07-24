@@ -375,7 +375,7 @@ app.post('/api/inbound/materials', authMiddleware, function(req, res) {
 
 app.get('/api/inbound/pending', authMiddleware, function(req, res) {
   if (!hasAccess(req.user, 'inbound')) return res.status(403).json({ error: 'No access' });
-  res.json(dbAll('SELECT v.*, (SELECT GROUP_CONCAT(vi.invoice_no, ", ") FROM vehicle_invoices vi WHERE vi.vehicle_id = v.id) as invoice_list FROM vehicles v WHERE v.status IN ("material_entered", "pending") ORDER BY v.id DESC'));
+  res.json(dbAll('SELECT v.*, (SELECT GROUP_CONCAT(vi.invoice_no, ", ") FROM vehicle_invoices vi WHERE vi.vehicle_id = v.id) as invoice_list FROM vehicles v WHERE v.status IN ("material_entered", "pending", "unloading") ORDER BY v.id DESC'));
 });
 
 // ===================== UNLOAD PROCESS =====================

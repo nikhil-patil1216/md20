@@ -469,14 +469,21 @@ const App = {
         '<tbody>' + rows + '</tbody></table></div></div>';
   },
 
-  async _ulStart(vid) {
+    async _ulStart(vid) {
     var data = await this.api('GET', '/api/vehicles/' + vid);
     if (!data) return;
-    var invMap = {};
+    // Sirf wo invoices dikhao jinka abhi bhi pending material hai
+    var pendingInvMap = {};
     for (var i = 0; i < data.materials.length; i++) {
-      invMap[data.materials[i].invoice_no] = true;
+      if (data.materials[i].status === 'pending') {
+        pendingInvMap[data.materials[i].invoice_no] = true;
+      }
     }
-    var invNos = Object.keys(invMap);
+    var invNos = Object.keys(pendingInvMap);
+    if (invNos.length === 0) {
+      this.toast('All invoices already unloaded!', 'info');
+      return;
+    }
     var opts = '<option value="">-- Select Invoice --</option>';
     for (var j = 0; j < invNos.length; j++) opts += '<option value="' + invNos[j] + '">' + invNos[j] + '</option>';
     this.openModal('<i class="fas fa-dolly"></i> Unload Vehicle: ' + data.vehicle_no,

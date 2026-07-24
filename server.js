@@ -491,16 +491,13 @@ app.get('/api/location', authMiddleware, async function(req, res) {
   res.json(await dbAll('SELECT * FROM location_data WHERE active = 1 ORDER BY id DESC'));
 });
 
-app.get('/api/location/search', authMiddleware, async function(req, res) {
-  var materials = req.query.materials;
-  if (!materials) return res.status(400).json({ error: 'Materials required' });
-  var matList = materials.split(',');
-  var cleanList = [];
-  for (var i = 0; i < matList.length; i++) { var m = matList[i].trim(); if (m) cleanList.push(m); }
-  var placeholders = [];
-  var params = [];
-  for (var j = 0; j < cleanList.length; j++) { placeholders.push('?'); params.push(cleanList[j]); }
-  res.json(await dbAll('SELECT * FROM location_data WHERE active = 1 AND material IN (' + placeholders.join(',') + ') ORDER BY rack', params));
+app.get('/api/location', authMiddleware, async function(req, res) {
+  var page = parseInt(req.query.page) || 1;
+  var limit = parseInt(req.query.limit) || 200;
+  var offset = (page - 1) * limit;
+  var data = await dbAll('SELECT * FROM location_data WHERE active = 1 ORDER BY id DESC LIMIT ? OFFSET ?', [limit, offset]);
+  var total = await dbGet('SELECT COUNT(*) as c FROM location_data WHERE active = 1');
+  res.json({ data: data, total: total.c, page: page, limit: limit, pages: Math.ceil(total.c / limit) });
 });
 
 app.post('/api/location/bulk', authMiddleware, async function(req, res) {
@@ -573,6 +570,28 @@ app.put('/api/location/report/:ho_no/item/:item_id', authMiddleware, async funct
 
 app.get('/api/location/audit', authMiddleware, async function(req, res) {
   res.json(await dbAll('SELECT * FROM location_audit ORDER BY id DESC'));
+});
+app.get('/api/location/reports', authMiddleware, async function(req, res) {
+  res.json(await dbAll('SELECT * FROM location_reports ORDER BY id DESC'));
+});
+
+app.post('/api/location/pick', authMiddleware, async function(req, res) {
+  if (!hasAccess(req.user, 'location')) return res.status(403).json({ error: 'No access' });
+  var locationId = req.body.location_id;
+  var pickQty = parseFloat(req.body.pick_qty) || 0;
+  if (!locationId || pickQty <= 0) return res.status(400).json({ error: 'Location ID and qty required' });
+  var loc = await dbGet('SELECT * FROM location_data WHERE id = ? AND active = 1', [locationId]);
+  if (!loc) return res.status(404).json({ error: 'Location not found' });
+  if (pickQty > loc.qty) return res.status(400).json({ error: 'Cannot pick more than ' + loc.qty });
+  var newQty = loc.qty - pickQty;
+  if (newQty <= 0) {
+    await dbRun('UPDATE location_data SET active = 0 WHERE id = ?', [locationId]);
+  } else {
+    await dbRun('UPDATE location_data SET qty = ? WHERE id = ?', [newQty, locationId]);
+  }
+  await dbRun('INSERT INTO location_audit (action, location_data_id, rack, ean, material, description, qty, performed_by) VALUES ("picked", ?, ?, ?, ?, ?, ?, ?)', [locationId, loc.rack, loc.ean, loc.material, loc.description, pickQty, req.user.name]);
+  await logActivity('location', 'picked', 'Picked ' + pickQty + ' of ' + loc.material + ' from ' + loc.rack, req.user.name);
+  res.json({ message: 'Picked ' + pickQty + ' from ' + loc.rack, remaining: newQty });
 });
 
 // ===================== MATERIAL MASTER =====================

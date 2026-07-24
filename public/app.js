@@ -1006,18 +1006,24 @@ const App = {
     w.print();
   },
 
-  _locBulkUpload: function(input) {
+    _locBulkUpload: function(input) {
     var self = this;
     var file = input.files[0];
     if (!file) return;
-    this.toast('Processing ' + file.name + '...', 'info');
+    document.getElementById('pageContent').innerHTML =
+      '<div class="card-3d"><div class="card-title"><i class="fas fa-cloud-upload-alt"></i> Uploading File</div>' +
+        '<div class="upload-progress-wrap">' +
+          '<div class="upload-file-name"><i class="fas fa-file-excel"></i> ' + file.name + '</div>' +
+          '<div class="upload-progress-bar"><div class="upload-progress-fill" id="uploadFill" style="width:0%"></div></div>' +
+          '<div class="upload-progress-text" id="uploadText">Reading file...</div>' +
+        '</div></div>';
     var reader = new FileReader();
     reader.onload = function(e) {
       try {
         var wb = XLSX.read(e.target.result, { type: 'array' });
         var ws = wb.Sheets[wb.SheetNames[0]];
         var json = XLSX.utils.sheet_to_json(ws);
-        if (json.length === 0) { self.toast('No data found in file', 'warning'); return; }
+        if (json.length === 0) { self.toast('No data found', 'warning'); self.pageLocation(); return; }
         var items = [];
         for (var i = 0; i < json.length; i++) {
           var row = json[i];
@@ -1040,19 +1046,43 @@ const App = {
             items.push({ rack: String(rack), ean: String(ean), material: String(material), description: String(description), qty: parseFloat(qty) || 0, packing: String(packing), box_no: String(box_no), date: String(date) });
           }
         }
-        if (items.length === 0) { self.toast('No valid rows found', 'warning'); return; }
-        self.toast('Uploading ' + items.length + ' rows to server...', 'info');
-        self.api('POST', '/api/location/bulk', { items: items }).then(function(res) {
-          if (res && !res.error) {
-            self.toast(res.message, 'success');
-            self.pageLocation();
-          } else {
-            self.toast((res && res.error) || 'Upload failed', 'error');
-          }
-        });
-      } catch (err) { self.toast('File error: ' + err.message, 'error'); }
+        if (items.length === 0) { self.toast('No valid rows found', 'warning'); self.pageLocation(); return; }
+        self._locUploadChunks(items, 0);
+      } catch (err) {
+        self.toast('File error: ' + err.message, 'error');
+        self.pageLocation();
+      }
     };
     reader.readAsArrayBuffer(file);
+  },
+
+  _locUploadChunks: function(items, startIdx) {
+    var self = this;
+    var chunkSize = 500;
+    var endIdx = startIdx + chunkSize;
+    var chunk = items.slice(startIdx, endIdx);
+    var total = items.length;
+    var pct = Math.round((startIdx / total) * 100);
+    var fillEl = document.getElementById('uploadFill');
+    var textEl = document.getElementById('uploadText');
+    if (fillEl) fillEl.style.width = pct + '%';
+    if (textEl) textEl.textContent = 'Uploading ' + (startIdx + 1) + ' to ' + Math.min(endIdx, total) + ' of ' + total + ' (' + pct + '%)...';
+
+    self.api('POST', '/api/location/bulk', { items: chunk }).then(function(res) {
+      if (res && !res.error) {
+        if (endIdx < total) {
+          setTimeout(function() { self._locUploadChunks(items, endIdx); }, 100);
+        } else {
+          if (fillEl) fillEl.style.width = '100%';
+          if (textEl) textEl.textContent = 'Complete! ' + total + ' rows uploaded successfully.';
+          self.toast('All ' + total + ' rows uploaded!', 'success');
+          setTimeout(function() { self.pageLocation(); }, 1500);
+        }
+      } else {
+        self.toast((res && res.error) || 'Upload failed at row ' + startIdx, 'error');
+        self.pageLocation();
+      }
+    });
   },
 
   _locAddSingle: function() {
@@ -1205,7 +1235,7 @@ const App = {
       this.toast((res && res.error) || 'Error', 'error');
     }
   },
-  
+
   // ===================== MATERIAL MASTER =====================
   async pageMaterialMaster() {
     var materials = await this.api('GET', '/api/materials');

@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VIP Industry (MD20) - Warehouse Management System</title>
+  <link rel="stylesheet" href="style.css">
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+</head>
+<body>
+  <!-- Water Background -->
+  <div class="water-bg">
+    <div class="wave wave1"></div>
+    <div class="wave wave2"></div>
+    <div class="wave wave3"></div>
+    <div class="water-shimmer"></div>
+  </div>
+
+  <!-- Header -->
+  <header class="main-header">
+    <div class="header-left">
+      <div class="logo-icon"><i class="fas fa-warehouse"></i></div>
+      <div class="header-title">
+        <h1>VIP Industry <span class="md20">(MD20)</span></h1>
+        <p>Warehouse Management System</p>
+      </div>
+    </div>
+    <div class="header-right">
+      <button class="theme-toggle" onclick="App.toggleTheme()" title="Toggle Theme">
+        <i class="fas fa-moon"></i>
+      </button>
+      <div class="user-info" id="headerUser" style="display:none;">
+        <i class="fas fa-user-circle"></i>
+        <span id="headerUserName"></span>
+        <button class="btn-logout" onclick="App.logout()"><i class="fas fa-sign-out-alt"></i></button>
+      </div>
+      <span class="dev-credit">Developed by <strong>Nikhil Patil</strong></span>
+    </div>
+  </header>
+
+  <!-- Sidebar -->
+  <nav class="sidebar" id="sidebar" style="display:none;">
+    <div class="sidebar-menu" id="sidebarMenu"></div>
+  </nav>
+
+  <!-- Main Content -->
+  <main class="main-content" id="mainContent">
+    <div id="pageContent"></div>
+  </main>
+
+  <!-- Scanner Modal -->
+  <div class="modal-overlay" id="scannerModal" style="display:none;">
+    <div class="modal-3d scanner-modal">
+      <div class="modal-header">
+        <h3><i class="fas fa-qrcode"></i> Scanner</h3>
+        <button class="modal-close" onclick="App.scannerClose()"><i class="fas fa-times"></i></button>
+      </div>
+      <div class="modal-body">
+        <div id="scannerContainer" style="width:100%;max-width:400px;margin:0 auto;"></div>
+        <div class="scanner-manual">
+          <p>Or enter manually:</p>
+          <div class="input-group">
+            <input type="text" id="scannerManualInput" placeholder="Scan or type code..." 
+                   onkeydown="if(event.key==='Enter')App.scannerSubmit()">
+            <button class="btn-primary" onclick="App.scannerSubmit()"><i class="fas fa-check"></i></button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Generic Modal -->
+  <div class="modal-overlay" id="genericModal" style="display:none;">
+    <div class="modal-3d" id="genericModalContent">
+      <div class="modal-header">
+        <h3 id="genericModalTitle"></h3>
+        <button class="modal-close" onclick="App.closeModal()"><i class="fas fa-times"></i></button>
+      </div>
+      <div class="modal-body" id="genericModalBody"></div>
+    </div>
+  </div>
+
+  <!-- Toast Container -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

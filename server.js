@@ -487,7 +487,7 @@ async function startServer() {
     }
     console.log('Local Database ready.');
   }
-    try {
+  try {
     var adminExists = await dbGet("SELECT id FROM users WHERE username = 'admin'");
     if (!adminExists) {
       await dbRun("INSERT INTO users (username, password, name, role, access) VALUES (?, ?, ?, ?, ?)", ['admin', bcrypt.hashSync('admin123', 10), 'Admin', 'admin', JSON.stringify(['admin', 'inbound', 'putaway', 'piv', 'location', 'material', 'bin'])]);
@@ -501,21 +501,10 @@ async function startServer() {
     console.log('======================================================');
     console.log('   VIP Industry (MD20) - WMS Server');
     console.log('   Running on: http://localhost:' + PORT);
-    console.log('   Developed by: Nikhil Patil'); 
+    console.log('   Developed by: Nikhil Patil');
     console.log('======================================================');
     console.log('');
   });
 }
 
 startServer().catch(function(err) { console.error('Failed to start:', err); process.exit(1); });
-
-app.get('/reset-admin', async (req, res) => {
-  const hash = bcrypt.hashSync('admin123', 10);
-
-  await dbRun(
-    'UPDATE users SET password = ? WHERE username = ?',
-    [hash, 'admin']
-  );
-
-  res.send('Admin password reset to: admin123');
-});

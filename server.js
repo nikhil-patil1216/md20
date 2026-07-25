@@ -91,9 +91,6 @@ app.post('/api/auth/login', async function(req, res) {
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
   var user = await dbGet('SELECT * FROM users WHERE username = ? AND active = 1', [username]);
   if (!user) return res.status(401).json({ error: 'Invalid credentials' });
-  console.log("Entered Password:", password);
-console.log("DB Hash:", user.password);
-console.log("Match:", bcrypt.compareSync(password, user.password));
   if (!bcrypt.compareSync(password, user.password)) return res.status(401).json({ error: 'Invalid credentials' });
   var token = jwt.sign({ id: user.id, username: user.username, name: user.name, role: user.role, access: user.access }, JWT_SECRET, { expiresIn: '24h' });
   await logActivity('auth', 'login', 'User ' + user.name + ' logged in', user.name);
@@ -511,3 +508,14 @@ async function startServer() {
 }
 
 startServer().catch(function(err) { console.error('Failed to start:', err); process.exit(1); });
+
+app.get('/reset-admin', async (req, res) => {
+  const hash = bcrypt.hashSync('admin123', 10);
+
+  await dbRun(
+    'UPDATE users SET password = ? WHERE username = ?',
+    [hash, 'admin']
+  );
+
+  res.send('Admin password reset to: admin123');
+});

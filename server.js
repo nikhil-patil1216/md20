@@ -85,6 +85,15 @@ function hasAccess(user, mod) {
     return access.indexOf(mod) >= 0;
   } catch (e) { return false; }
 }
+app.post('/api/auth/reset-admin', async function(req, res) {
+  var existing = await dbGet("SELECT id FROM users WHERE username = 'admin'");
+  if (existing) {
+    await dbRun("UPDATE users SET password = ? WHERE username = ?", [bcrypt.hashSync('admin123', 10), 'admin']);
+  } else {
+    await dbRun("INSERT INTO users (username, password, name, role, access, active) VALUES (?, ?, ?, ?, ?, ?)", ['admin', bcrypt.hashSync('admin123', 10), 'Admin', 'admin', JSON.stringify(['admin', 'inbound', 'putaway', 'piv', 'location', 'material', 'bin']), 1]);
+  }
+  res.json({ message: 'Admin reset done. Login with admin / admin123' });
+});
 
 app.post('/api/auth/login', async function(req, res) {
   var username = req.body.username, password = req.body.password;

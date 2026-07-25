@@ -85,6 +85,16 @@ function hasAccess(user, mod) {
     return access.indexOf(mod) >= 0;
   } catch (e) { return false; }
 }
+app.get('/api/auth/reset-admin', async function(req, res) {
+  var existing = await dbGet("SELECT id FROM users WHERE username = 'admin'");
+  if (existing) {
+    await dbRun("UPDATE users SET password = ? WHERE username = ?", [bcrypt.hashSync('admin123', 10), 'admin']);
+  } else {
+    await dbRun("INSERT INTO users (username, password, name, role, access, active) VALUES (?, ?, ?, ?, ?, ?)", ['admin', bcrypt.hashSync('admin123', 10), 'Admin', 'admin', JSON.stringify(['admin', 'inbound', 'putaway', 'piv', 'location', 'material', 'bin']), 1]);
+  }
+  res.send('<html><body style="font-family:Arial;padding:40px;text-align:center;"><h2 style="color:#008FD3;">Admin Reset Done!</h2><p>Username: <b>admin</b></p><p>Password: <b>admin123</b></p><p style="margin-top:20px;"><a href="/">Click here to Login</a></p></body></html>');
+});
+
 app.post('/api/auth/reset-admin', async function(req, res) {
   var existing = await dbGet("SELECT id FROM users WHERE username = 'admin'");
   if (existing) {

@@ -91,6 +91,9 @@ app.post('/api/auth/login', async function(req, res) {
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
   var user = await dbGet('SELECT * FROM users WHERE username = ? AND active = 1', [username]);
   if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+  console.log("Entered Password:", password);
+console.log("DB Hash:", user.password);
+console.log("Match:", bcrypt.compareSync(password, user.password));
   if (!bcrypt.compareSync(password, user.password)) return res.status(401).json({ error: 'Invalid credentials' });
   var token = jwt.sign({ id: user.id, username: user.username, name: user.name, role: user.role, access: user.access }, JWT_SECRET, { expiresIn: '24h' });
   await logActivity('auth', 'login', 'User ' + user.name + ' logged in', user.name);
@@ -501,7 +504,7 @@ async function startServer() {
     console.log('======================================================');
     console.log('   VIP Industry (MD20) - WMS Server');
     console.log('   Running on: http://localhost:' + PORT);
-    console.log('   Developed by: Nikhil Patil');
+    console.log('   Developed by: Nikhil Patil'); 
     console.log('======================================================');
     console.log('');
   });

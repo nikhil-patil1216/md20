@@ -68,7 +68,7 @@ const App = {
   },
 
   // ===================== AUTH =====================
-  showLogin() {
+      showLogin() {
     document.getElementById('sidebar').style.display = 'none';
     document.getElementById('headerUser').style.display = 'none';
     document.getElementById('pageContent').innerHTML =
@@ -77,13 +77,11 @@ const App = {
           '<div class="login-icon"><i class="fas fa-warehouse"></i></div>' +
           '<h2>VIP Industry (MD20)</h2>' +
           '<p>Warehouse Management System - Secure Login</p>' +
-          '<div class="form-group"><label>Username</label>' +
-            '<input type="text" id="loginUser" placeholder="Enter username" onkeydown="if(event.key===\'Enter\')document.getElementById(\'loginPass\').focus()">' +
-          '</div>' +
-          '<div class="form-group"><label>Password</label>' +
-            '<input type="password" id="loginPass" placeholder="Enter password" onkeydown="if(event.key===\'Enter\')App.doLogin()">' +
-          '</div>' +
-          '<button class="btn btn-primary btn-block" onclick="App.doLogin()"><i class="fas fa-sign-in-alt"></i> Login</button>' +
+          '<form id="loginForm" onsubmit="event.preventDefault();App.doLogin()">' +
+          '<div class="form-group"><label>Username</label><input type="text" id="loginUser" placeholder="Enter username"></div>' +
+          '<div class="form-group"><label>Password</label><input type="password" id="loginPass" placeholder="Enter password"></div>' +
+          '<button class="btn btn-primary btn-block" type="submit"><i class="fas fa-sign-in-alt"></i> Login</button>' +
+          '</form>' +
         '</div>' +
       '</div>';
   },

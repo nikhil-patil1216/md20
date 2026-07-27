@@ -2,7 +2,40 @@
    VIP INDUSTRIES LIMITED MD20 — WMS COMPLETE SCRIPT
    Developed by Nikhil Patil
    ============================================================ */
+// ==================== SUPABASE ZERO-BREAK SYNC ====================
+let supabaseClient = null;
+try {
+    // APNI REAL URL AUR KEY YAHAN DAALO
+    const SUPABASE_URL = 'https://whlqsapzywnadvkhfhzp.supabase.co'; 
+    const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndobHFzYXB6eXduYWR2a2hmaHpwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUxNjE4ODMsImV4cCI6MjEwMDczNzg4M30.YaNFKPQ9vmhKHYa0DtaZPbbM44IqgSlibPSABId_bno';
+    
+    if (typeof supabase !== 'undefined' && SUPABASE_URL.includes('supabase.co')) {
+        supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+    }
+} catch(e) {}
 
+// Server pe data bhejne ka function
+async function pushServerData(key, value) {
+    if(!supabaseClient) return;
+    try {
+        await supabaseClient.from('app_data').upsert({ key: key, value: value }, { onConflict: 'key' });
+    } catch(e) {}
+}
+
+// Server se data lene ka function
+async function pullAllServerData() {
+    if(!supabaseClient) return;
+    try {
+        const tables = ['users', 'location_master', 'material_master', 'rack_master', 'vehicles', 'invoices', 'invoice_materials', 'picking_reports', 'audit_log', 'notifications', 'difference_reports'];
+        for (let i = 0; i < tables.length; i++) {
+            let t = tables[i];
+            const { data } = await supabaseClient.from('app_data').select('value').eq('key', t).single();
+            if (data && data.value) {
+                localStorage.setItem('wms_' + t, JSON.stringify(data.value));
+            }
+        }
+    } catch(e) {}
+}
 // ==================== STATE ====================
 const APP = {
     currentUser: null,
@@ -34,6 +67,10 @@ const DB = {
         catch (e) { return {}; }
     },
     set(k, v) { localStorage.setItem(this._key(k), JSON.stringify(v)); },
+    set(k, v) { 
+    localStorage.setItem(this._key(k), JSON.stringify(v)); 
+    pushServerData(k, v); // <-- BAS YEH EK LINE ADD KARO
+},
     add(k, item) {
         const data = this.get(k);
         item.id = item.id || this.uid();
@@ -41,6 +78,7 @@ const DB = {
         data.push(item);
         this.set(k, data);
         return item;
+        
     },
     update(k, id, updates) {
         const data = this.get(k);
@@ -2260,3 +2298,6 @@ function initApp() {
 
 // ==================== START APP ====================
 document.addEventListener('DOMContentLoaded', initApp);
+
+// Jab page khule toh background me data download ho jaye
+pullAllServerData();

@@ -812,6 +812,7 @@ function renderLocationMaster() {
     var searchRack = document.getElementById('locSearchRack') ? document.getElementById('locSearchRack').value.trim().toLowerCase() : '';
     var searchBrand = document.getElementById('locSearchBrand') ? document.getElementById('locSearchBrand').value.trim().toLowerCase() : '';
     var filtered = locations;
+    APP.filteredLocations = filtered;
     if (searchMat) {
         var matParts = searchMat.split(',');
         filtered = filtered.filter(function (l) {
@@ -897,7 +898,7 @@ function bulkUploadLocation(input) {
 
 function exportLocationExcel() {
     if (!checkPermType('download')) { showToast('No download permission', 'error'); return; }
-    var locations = DB.get('location_master');
+    var locations = APP.filteredLocations || DB.get('location_master');
     var wsData = [['Date', 'Rack', 'EAN', 'Material', 'Description', 'Quantity', 'Packing', 'Box', 'Action', 'User', 'DateTime']];
     locations.forEach(function (l) {
         wsData.push([l.date, l.rack, l.ean, l.material, l.description, l.quantity, l.packing, l.box, l.action, l.user, formatDateTime(l.dateTime)]);
@@ -913,7 +914,7 @@ function exportLocationExcel() {
 
 function exportLocationPDF() {
     if (!checkPermType('download')) { showToast('No download permission', 'error'); return; }
-    var locations = DB.get('location_master');
+    var locations = APP.filteredLocations || DB.get('location_master');
     var jsPDF = window.jspdf.jsPDF;
     var doc = new jsPDF('l', 'mm', 'a4');
     doc.setFontSize(16);
@@ -933,7 +934,7 @@ function exportLocationPDF() {
 }
 
 function printLocation() {
-    var locations = DB.get('location_master');
+    var locations = APP.filteredLocations || DB.get('location_master');
     var html = '<html><head><title>Location Master — VIP Industry MD20</title>' +
         '<style>body{font-family:Arial,sans-serif;font-size:11px}table{width:100%;border-collapse:collapse;margin-top:20px}th,td{border:1px solid #ddd;padding:6px 8px;text-align:left}th{background:#00B882;color:#fff}h1{font-size:18px}p{color:#666;font-size:10px}</style></head><body>' +
         '<h1>VIP Industry MD20 — Location Master</h1><p>Generated: ' + formatDateTime(new Date()) + '</p>' +

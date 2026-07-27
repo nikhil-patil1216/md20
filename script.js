@@ -961,8 +961,12 @@ function showPickModal() {
 function createPickingReport() {
     var pickerName = document.getElementById('pickerName').value.trim();
     if (!pickerName) { showToast('Enter picker name', 'error'); return; }
-   var locations = APP.filteredLocations || DB.get('location_master');
-    if (locations.length === 0) { showToast('No location data to create report', 'error'); closeModal(); return; }
+    
+    // YEH LINE HAI JO FIX KAREGI - SIRF FILTERED DATA LEGA
+    var locations = APP.filteredLocations || [];
+    
+    if (locations.length === 0) { showToast('No filtered data! Please search material first.', 'error'); closeModal(); return; }
+    
     var reportNo = DB.reportNo();
     var reportItems = locations.map(function (l) {
         return { locationId: l.id, material: l.material, description: l.description, rack: l.rack, ean: l.ean, quantity: l.quantity, packing: l.packing, box: l.box, pickedQty: l.quantity };

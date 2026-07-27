@@ -961,7 +961,7 @@ function showPickModal() {
 function createPickingReport() {
     var pickerName = document.getElementById('pickerName').value.trim();
     if (!pickerName) { showToast('Enter picker name', 'error'); return; }
-    var locations = DB.get('location_master');
+   var locations = APP.filteredLocations || DB.get('location_master');
     if (locations.length === 0) { showToast('No location data to create report', 'error'); closeModal(); return; }
     var reportNo = DB.reportNo();
     var reportItems = locations.map(function (l) {

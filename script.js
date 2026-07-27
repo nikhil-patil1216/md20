@@ -759,14 +759,16 @@ function submitPutaway() {
 }
 
 // ==================== PIV ====================
+// ==================== PIV ====================
 function renderPIV() {
     var html = '<div class="section-header"><h2><i class="bx bxs-clipboard"></i>Physical Inventory Verification</h2></div>' +
         '<div class="card"><div class="form-row">' +
         '<div class="form-group"><label>User</label><input type="text" class="form-input" value="' + escapeHtml(APP.currentUser ? APP.currentUser.name : '') + '" readonly></div>' +
         '<div class="form-group"><label>Date</label><input type="date" class="form-input" value="' + today() + '" readonly></div>' +
+        '<div class="form-group"><label>Rack <span class="req">*</span></label><div style="display:flex;gap:6px"><input type="text" id="pivRack" class="form-input" placeholder="Scan or enter rack"><button class="btn-icon scan-btn" onclick="simulateScan(\'pivRack\')"><i class="bx bx-qr-scan"></i></button></div></div>' +
         '<div class="form-group"><label>EAN <span class="req">*</span></label><div style="display:flex;gap:6px"><input type="text" id="pivEan" class="form-input" placeholder="Scan or enter EAN" oninput="lookupEANForPIV()"><button class="btn-icon scan-btn" onclick="simulateScan(\'pivEan\')"><i class="bx bx-qr-scan"></i></button></div></div>' +
-        '<div class="form-group"><label>Material</label><input type="text" id="pivMaterial" class="form-input" placeholder="Auto-filled" readonly></div>' +
-        '<div class="form-group"><label>Description</label><input type="text" id="pivDesc" class="form-input" placeholder="Auto-filled" readonly></div>' +
+        '<div class="form-group"><label>Material <span class="req">*</span></label><input type="text" id="pivMaterial" class="form-input" placeholder="Auto-fill from EAN or type manually"></div>' +
+        '<div class="form-group"><label>Description</label><input type="text" id="pivDesc" class="form-input" placeholder="Auto-fills if EAN found"></div>' +
         '<div class="form-group"><label>Packing</label><input type="text" id="pivPacking" class="form-input" placeholder="e.g. Bag, Box"></div>' +
         '<div class="form-group"><label>Box</label><input type="text" id="pivBox" class="form-input" placeholder="Box number"></div>' +
         '<div class="form-group"><label>Quantity <span class="req">*</span></label><input type="number" id="pivQty" class="form-input" placeholder="0" min="1"></div>' +
@@ -776,12 +778,61 @@ function renderPIV() {
 
 function lookupEANForPIV() {
     var ean = document.getElementById('pivEan').value.trim();
+    var matInput = document.getElementById('pivMaterial');
+    var descInput = document.getElementById('pivDesc');
+    
+    // Agar EAN 5 se chhota hai toh kuch mat karo
     if (ean.length < 5) return;
+    
+    // Database me EAN dhundho
     var mat = DB.get('material_master').find(function (m) { return m.ean === ean; });
+    
     if (mat) {
-        document.getElementById('pivMaterial').value = mat.material;
-        document.getElementById('pivDesc').value = mat.description;
+        // EAN mil gaya: Material aur Description auto fill karo
+        matInput.value = mat.material;
+        descInput.value = mat.description;
+    } else {
+        // EAN nahi mila: Fields khali chhodo taaki user manual daal sake
+        matInput.value = '';
+        descInput.value = '';
     }
+}
+
+function submitPIV() {
+    var rack = document.getElementById('pivRack').value.trim();
+    var ean = document.getElementById('pivEan').value.trim();
+    var material = document.getElementById('pivMaterial').value.trim();
+    var description = document.getElementById('pivDesc').value.trim();
+    var packing = document.getElementById('pivPacking').value.trim();
+    var box = document.getElementById('pivBox').value.trim();
+    var qty = parseInt(document.getElementById('pivQty').value) || 0;
+    
+    if (!rack || !ean || !material || qty <= 0) { 
+        showToast('Please fill Rack, EAN, Material and Quantity', 'error'); 
+        return; 
+    }
+    
+    DB.add('location_master', {
+        date: today(), 
+        rack: rack, // Ab yahan user ne jo rack dala hai wo aayega
+        ean: ean, 
+        material: material, 
+        description: description,
+        quantity: qty, 
+        packing: packing, 
+        box: box, 
+        action: 'PIV',
+        user: APP.currentUser ? APP.currentUser.name : 'Unknown', 
+        dateTime: new Date().toISOString()
+    });
+    
+    logAction('PIV', 'PIV', material + ' — ' + qty + ' units verified at ' + rack);
+    showToast('PIV saved successfully', 'success');
+    
+    // Form clear karo (Rack field bhi clear hoga)
+    ['pivRack', 'pivEan', 'pivMaterial', 'pivDesc', 'pivPacking', 'pivBox', 'pivQty'].forEach(function (id) {
+        document.getElementById(id).value = '';
+    });
 }
 
 function submitPIV() {

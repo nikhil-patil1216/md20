@@ -1,5 +1,5 @@
 /* ============================================================
-   VIP INDUSTRY MD20 — WMS COMPLETE SCRIPT
+   VIP INDUSTRIES LIMITED MD20 — WMS COMPLETE SCRIPT
    Developed by Nikhil Patil
    ============================================================ */
 
@@ -316,7 +316,7 @@ function navigateTo(section, sub) {
     var subNames = {
         'vehicle-entry': 'Vehicle Entry', 'pending-vehicle': 'Pending Vehicle', 'unload-process': 'Unload Process'
     };
-    var bc = 'VIP Industry MD20 <i class="bx bx-chevron-right"></i> <span class="bc-item active">' + (names[section] || section) + '</span>';
+    var bc = 'VIP INDUSTRIES LIMITED MD20 <i class="bx bx-chevron-right"></i> <span class="bc-item active">' + (names[section] || section) + '</span>';
     if (sub) bc += ' <i class="bx bx-chevron-right"></i> <span class="bc-item active">' + (subNames[sub] || sub) + '</span>';
     document.getElementById('breadcrumb').innerHTML = bc;
     document.querySelectorAll('.content-section').forEach(function (s) { s.classList.remove('active'); });
@@ -927,7 +927,7 @@ function exportLocationPDF() {
     var jsPDF = window.jspdf.jsPDF;
     var doc = new jsPDF('l', 'mm', 'a4');
     doc.setFontSize(16);
-    doc.text('VIP Industry MD20 — Location Master', 14, 15);
+    doc.text('VIP INDUSTRIES LIMITED MD20 — Location Master', 14, 15);
     doc.setFontSize(9);
     doc.text('Generated: ' + formatDateTime(new Date()), 14, 22);
     var tableData = locations.map(function (l) {
@@ -944,9 +944,9 @@ function exportLocationPDF() {
 
 function printLocation() {
     var locations = DB.get('location_master');
-    var html = '<html><head><title>Location Master — VIP Industry MD20</title>' +
+    var html = '<html><head><title>Location Master — VIP INDUSTRIES LIMITED MD20</title>' +
         '<style>body{font-family:Arial,sans-serif;font-size:11px}table{width:100%;border-collapse:collapse;margin-top:20px}th,td{border:1px solid #ddd;padding:6px 8px;text-align:left}th{background:#00B882;color:#fff}h1{font-size:18px}p{color:#666;font-size:10px}</style></head><body>' +
-        '<h1>VIP Industry MD20 — Location Master</h1><p>Generated: ' + formatDateTime(new Date()) + '</p>' +
+        '<h1>VIP INDUSTRIES LIMITED MD20 — Location Master</h1><p>Generated: ' + formatDateTime(new Date()) + '</p>' +
         '<table><thead><tr><th>Date</th><th>Rack</th><th>EAN</th><th>Material</th><th>Desc</th><th>Qty</th><th>Packing</th><th>Box</th><th>Action</th><th>User</th></tr></thead><tbody>';
     locations.forEach(function (l) {
         html += '<tr><td>' + escapeHtml(l.date) + '</td><td>' + escapeHtml(l.rack) + '</td><td>' + escapeHtml(l.ean) + '</td><td>' + escapeHtml(l.material) + '</td><td>' + escapeHtml(l.description) + '</td><td>' + l.quantity + '</td><td>' + escapeHtml(l.packing) + '</td><td>' + escapeHtml(l.box) + '</td><td>' + escapeHtml(l.action) + '</td><td>' + escapeHtml(l.user) + '</td></tr>';
@@ -1130,7 +1130,7 @@ function exportPickPDF(reportNo) {
     var jsPDF = window.jspdf.jsPDF;
     var doc = new jsPDF('l', 'mm', 'a4');
     doc.setFontSize(16);
-    doc.text('VIP Industry MD20 — Picking Report', 14, 15);
+    doc.text('VIP INDUSTRIES LIMITED MD20 — Picking Report', 14, 15);
     doc.setFontSize(10);
     doc.text('Report: ' + reportNo + '  |  Picker: ' + report.pickerName + '  |  Date: ' + formatDateTime(report.createdAt), 14, 23);
     var tableData = (report.items || []).map(function (item) {
@@ -1149,7 +1149,7 @@ function printPickReport(reportNo) {
     if (!report) return;
     var html = '<html><head><title>Picking Report — ' + reportNo + '</title>' +
         '<style>body{font-family:Arial,sans-serif;font-size:11px}table{width:100%;border-collapse:collapse;margin-top:20px}th,td{border:1px solid #ddd;padding:6px 8px;text-align:left}th{background:#00B882;color:#fff}h1{font-size:18px}p{color:#666;font-size:10px}.info{margin:10px 0}</style></head><body>' +
-        '<h1>VIP Industry MD20 — Picking Report</h1>' +
+        '<h1>VIP INDUSTRIES LIMITED MD20 — Picking Report</h1>' +
         '<div class="info"><p>Report: <strong>' + escapeHtml(reportNo) + '</strong> | Picker: <strong>' + escapeHtml(report.pickerName) + '</strong> | Date: ' + formatDateTime(report.createdAt) + '</p></div>' +
         '<table><thead><tr><th>Material</th><th>Description</th><th>Rack</th><th>EAN</th><th>Original Qty</th><th>Picked Qty</th><th>Packing</th><th>Box</th></tr></thead><tbody>';
     (report.items || []).forEach(function (item) {
@@ -1561,7 +1561,7 @@ function renderSettings() {
         'clip-path:polygon(50% 0%,100% 25%,100% 75%,50% 100%,0% 75%,0% 25%);' +
         'display:flex;align-items:center;justify-content:center;font-size:32px;color:#050810">' +
         '<i class="bx bxs-building-house"></i></div>' +
-        '<strong style="font-family:var(--font-display);font-size:14px;letter-spacing:2px">VIP INDUSTRY MD20</strong>' +
+        '<strong style="font-family:var(--font-display);font-size:14px;letter-spacing:2px">VIP INDUSTRIES LIMITED MD20</strong>' +
         '</div></div>';
     // Password Change
     html += '<div class="card"><div class="card-title">Change Password</div>' +
@@ -1587,7 +1587,7 @@ function renderSettings() {
     // System Info
     html += '<div class="card"><div class="card-title">System Info</div>' +
         '<div style="font-size:13px;line-height:2">' +
-        '<div><strong>System:</strong> VIP Industry MD20 WMS</div>' +
+        '<div><strong>System:</strong> VIP INDUSTRIES LIMITED MD20 WMS</div>' +
         '<div><strong>Version:</strong> 1.0.0</div>' +
         '<div><strong>Developer:</strong> Nikhil Patil</div>' +
         '<div><strong>Storage Used:</strong> ' + (JSON.stringify(localStorage).length / 1024).toFixed(1) + ' KB</div>' +
@@ -1724,7 +1724,7 @@ function exportVehicleReport(format) {
     } else if (format === 'pdf') {
         var jsPDF = window.jspdf.jsPDF;
         var doc = new jsPDF('l', 'mm', 'a4');
-        doc.setFontSize(16); doc.text('VIP Industry MD20 — Vehicle Report', 14, 15);
+        doc.setFontSize(16); doc.text('VIP INDUSTRIES LIMITED MD20 — Vehicle Report', 14, 15);
         doc.autoTable({
             head: [['Vehicle No', 'LR No', 'Driver', 'Mobile', 'Transport', 'Status']],
             body: vehicles.map(function (v) { return [v.vehicleNo, v.lrNo, v.driverName, v.driverMobile, v.transportName, v.status]; }),
@@ -1732,7 +1732,7 @@ function exportVehicleReport(format) {
         });
         doc.save('Vehicle_Report_' + today() + '.pdf');
     } else {
-        var html = '<html><head><title>Vehicle Report</title><style>body{font-family:Arial;font-size:11px}table{width:100%;border-collapse:collapse;margin-top:20px}th,td{border:1px solid #ddd;padding:6px 8px}th{background:#00B882;color:#fff}h1{font-size:18px}</style></head><body><h1>VIP Industry MD20 — Vehicle Report</h1><table><thead><tr><th>Vehicle</th><th>LR</th><th>Driver</th><th>Mobile</th><th>Transport</th><th>Status</th></tr></thead><tbody>';
+        var html = '<html><head><title>Vehicle Report</title><style>body{font-family:Arial;font-size:11px}table{width:100%;border-collapse:collapse;margin-top:20px}th,td{border:1px solid #ddd;padding:6px 8px}th{background:#00B882;color:#fff}h1{font-size:18px}</style></head><body><h1>VIP INDUSTRIES LIMITED MD20 — Vehicle Report</h1><table><thead><tr><th>Vehicle</th><th>LR</th><th>Driver</th><th>Mobile</th><th>Transport</th><th>Status</th></tr></thead><tbody>';
         vehicles.forEach(function (v) { html += '<tr><td>' + escapeHtml(v.vehicleNo) + '</td><td>' + escapeHtml(v.lrNo) + '</td><td>' + escapeHtml(v.driverName) + '</td><td>' + escapeHtml(v.driverMobile) + '</td><td>' + escapeHtml(v.transportName) + '</td><td>' + escapeHtml(v.status) + '</td></tr>'; });
         html += '</tbody></table></body></html>';
         var w = window.open('', '_blank'); w.document.write(html); w.document.close(); w.print();
@@ -1745,7 +1745,7 @@ function exportMaterialReportPDF() {
     var materials = DB.get('material_master');
     var jsPDF = window.jspdf.jsPDF;
     var doc = new jsPDF('l', 'mm', 'a4');
-    doc.setFontSize(16); doc.text('VIP Industry MD20 — Material Master', 14, 15);
+    doc.setFontSize(16); doc.text('VIP INDUSTRIES LIMITED MD20 — Material Master', 14, 15);
     doc.autoTable({
         head: [['Material', 'Description', 'Division', 'EAN', 'Brand']],
         body: materials.map(function (m) { return [m.material, m.description, m.division, m.ean, m.brand]; }),
@@ -1757,7 +1757,7 @@ function exportMaterialReportPDF() {
 
 function exportMaterialReportPrint() {
     var materials = DB.get('material_master');
-    var html = '<html><head><title>Material Report</title><style>body{font-family:Arial;font-size:11px}table{width:100%;border-collapse:collapse;margin-top:20px}th,td{border:1px solid #ddd;padding:6px 8px}th{background:#00B882;color:#fff}h1{font-size:18px}</style></head><body><h1>VIP Industry MD20 — Material Report</h1><table><thead><tr><th>Material</th><th>Description</th><th>Division</th><th>EAN</th><th>Brand</th></tr></thead><tbody>';
+    var html = '<html><head><title>Material Report</title><style>body{font-family:Arial;font-size:11px}table{width:100%;border-collapse:collapse;margin-top:20px}th,td{border:1px solid #ddd;padding:6px 8px}th{background:#00B882;color:#fff}h1{font-size:18px}</style></head><body><h1>VIP INDUSTRIES LIMITED MD20 — Material Report</h1><table><thead><tr><th>Material</th><th>Description</th><th>Division</th><th>EAN</th><th>Brand</th></tr></thead><tbody>';
     materials.forEach(function (m) { html += '<tr><td>' + escapeHtml(m.material) + '</td><td>' + escapeHtml(m.description) + '</td><td>' + escapeHtml(m.division) + '</td><td>' + escapeHtml(m.ean) + '</td><td>' + escapeHtml(m.brand) + '</td></tr>'; });
     html += '</tbody></table></body></html>';
     var w = window.open('', '_blank'); w.document.write(html); w.document.close(); w.print();
@@ -1775,7 +1775,7 @@ function exportDiffReport(format) {
     } else {
         var jsPDF = window.jspdf.jsPDF;
         var doc = new jsPDF('l', 'mm', 'a4');
-        doc.setFontSize(16); doc.text('VIP Industry MD20 — Difference Report', 14, 15);
+        doc.setFontSize(16); doc.text('VIP INDUSTRIES LIMITED MD20 — Difference Report', 14, 15);
         doc.autoTable({
             head: [['Invoice', 'Material', 'Expected', 'Actual', 'Diff', 'Status']],
             body: diffs.map(function (d) { return [d.invoiceNo, d.material, d.expected, d.actual, d.diff, d.status]; }),
@@ -1802,7 +1802,7 @@ function exportAuditPDF() {
     var logs = DB.get('audit_log');
     var jsPDF = window.jspdf.jsPDF;
     var doc = new jsPDF('l', 'mm', 'a4');
-    doc.setFontSize(16); doc.text('VIP Industry MD20 — Audit Log', 14, 15);
+    doc.setFontSize(16); doc.text('VIP INDUSTRIES LIMITED MD20 — Audit Log', 14, 15);
     doc.autoTable({
         head: [['Action No', 'Module', 'Action', 'Details', 'User', 'Date Time']],
         body: logs.map(function (l) { return [l.actionNo, l.module, l.action, l.details, l.userName, formatDateTime(l.dateTime)]; }),

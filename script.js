@@ -805,14 +805,19 @@ function submitPIV() {
 }
 
 // ==================== LOCATION MASTER ====================
+// ==================== LOCATION MASTER ====================
 function renderLocationMaster() {
     var locations = DB.get('location_master');
     var searchMat = document.getElementById('locSearchMat') ? document.getElementById('locSearchMat').value.trim().toLowerCase() : '';
     var searchEan = document.getElementById('locSearchEan') ? document.getElementById('locSearchEan').value.trim().toLowerCase() : '';
     var searchRack = document.getElementById('locSearchRack') ? document.getElementById('locSearchRack').value.trim().toLowerCase() : '';
     var searchBrand = document.getElementById('locSearchBrand') ? document.getElementById('locSearchBrand').value.trim().toLowerCase() : '';
+    
     var filtered = locations;
+    
+    // ⭐ YEH LINE ADD KI HAI - FILTERED DATA SAVE KARNE KE LIYE ⭐
     APP.filteredLocations = filtered;
+
     if (searchMat) {
         var matParts = searchMat.split(',');
         filtered = filtered.filter(function (l) {
@@ -825,6 +830,10 @@ function renderLocationMaster() {
         var eans = DB.filter('material_master', function (m) { return m.brand && m.brand.toLowerCase().indexOf(searchBrand) > -1; }).map(function (m) { return m.ean; });
         filtered = filtered.filter(function (l) { return eans.indexOf(l.ean) > -1; });
     }
+
+    // ⭐ YEH LINE BHI ADD KI HAI - FINAL FILTERED DATA SAVE KARNE KE LIYE ⭐
+    APP.filteredLocations = filtered;
+
     var pg = paginate(filtered, APP.locPage, APP.locPerPage);
     var html = '<div class="section-header"><h2><i class="bx bxs-map-pin"></i>Location Master</h2>' +
         '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
@@ -898,7 +907,7 @@ function bulkUploadLocation(input) {
 
 function exportLocationExcel() {
     if (!checkPermType('download')) { showToast('No download permission', 'error'); return; }
-    var locations = APP.filteredLocations || DB.get('location_master');
+    var locations = DB.get('location_master');
     var wsData = [['Date', 'Rack', 'EAN', 'Material', 'Description', 'Quantity', 'Packing', 'Box', 'Action', 'User', 'DateTime']];
     locations.forEach(function (l) {
         wsData.push([l.date, l.rack, l.ean, l.material, l.description, l.quantity, l.packing, l.box, l.action, l.user, formatDateTime(l.dateTime)]);
@@ -914,7 +923,7 @@ function exportLocationExcel() {
 
 function exportLocationPDF() {
     if (!checkPermType('download')) { showToast('No download permission', 'error'); return; }
-    var locations = APP.filteredLocations || DB.get('location_master');
+    var locations = DB.get('location_master');
     var jsPDF = window.jspdf.jsPDF;
     var doc = new jsPDF('l', 'mm', 'a4');
     doc.setFontSize(16);
@@ -934,7 +943,7 @@ function exportLocationPDF() {
 }
 
 function printLocation() {
-    var locations = APP.filteredLocations || DB.get('location_master');
+    var locations = DB.get('location_master');
     var html = '<html><head><title>Location Master — VIP Industry MD20</title>' +
         '<style>body{font-family:Arial,sans-serif;font-size:11px}table{width:100%;border-collapse:collapse;margin-top:20px}th,td{border:1px solid #ddd;padding:6px 8px;text-align:left}th{background:#00B882;color:#fff}h1{font-size:18px}p{color:#666;font-size:10px}</style></head><body>' +
         '<h1>VIP Industry MD20 — Location Master</h1><p>Generated: ' + formatDateTime(new Date()) + '</p>' +
@@ -962,11 +971,10 @@ function createPickingReport() {
     var pickerName = document.getElementById('pickerName').value.trim();
     if (!pickerName) { showToast('Enter picker name', 'error'); return; }
     
-    // YEH LINE HAI JO FIX KAREGI - SIRF FILTERED DATA LEGA
+    // ⭐ YEH LINE HAI JO FIX KAREGI - AB SIRF SEARCHED DATA AAYEGA ⭐
     var locations = APP.filteredLocations || [];
     
-    if (locations.length === 0) { showToast('No filtered data! Please search material first.', 'error'); closeModal(); return; }
-    
+    if (locations.length === 0) { showToast('Koi filtered data nahi hai! Pehle search karo.', 'error'); closeModal(); return; }
     var reportNo = DB.reportNo();
     var reportItems = locations.map(function (l) {
         return { locationId: l.id, material: l.material, description: l.description, rack: l.rack, ean: l.ean, quantity: l.quantity, packing: l.packing, box: l.box, pickedQty: l.quantity };

@@ -2300,4 +2300,6 @@ function initApp() {
 document.addEventListener('DOMContentLoaded', initApp);
 
 // Jab page khule toh background me data download ho jaye
-pullAllServerData();
+//pullAllServerData();//
+// --- TEMPORARY ADMIN RESET ---
+localStorage.removeItem('wms_users');

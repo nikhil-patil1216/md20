@@ -36,6 +36,29 @@ async function pullAllServerData() {
         }
     } catch(e) {}
 }
+
+    // REAL-TIME SYNC ON (Jab koi aur user data change karega, tumhare screen pe auto update aayega)
+    if (supabaseClient) {
+        try {
+            supabaseClient.channel('db-live-sync')
+            .on('postgres_changes', 
+                { event: '*', schema: 'public', table: 'app_data' }, 
+                (payload) => {
+                    if (payload.new && payload.new.key && payload.new.value) {
+                        // Local storage update karo
+                        localStorage.setItem('wms_' + payload.new.key, JSON.stringify(payload.new.value));
+                        
+                        // Agar app open hai toh screen auto-refresh karo
+                        if (APP.currentUser && APP.currentSection) {
+                            renderSection(APP.currentSection, APP.currentSub);
+                            showToast('Live Update: Data changed by another user', 'info');
+                        }
+                    }
+                }
+            )
+            .subscribe();
+        } catch(e) {}
+    }
 // ==================== STATE ====================
 const APP = {
     currentUser: null,
@@ -292,16 +315,42 @@ function seedData() {
 }
 
 // ==================== AUTH ====================
-function login(username, password) {
+async function login(username, password) {
+    showLoader();
+    
+    // STEP 1: USERS KA LATEST DATA SUPABASE SE LAO (Warna naya user login nahi hoga)
+    try {
+        if (supabaseClient) {
+            const { data } = await supabaseClient.from('app_data').select('value').eq('key', 'users');
+            if (data && data.length > 0 && data[0].value) {
+                localStorage.setItem('wms_users', JSON.stringify(data[0].value));
+            }
+        }
+    } catch(e) { console.log("User sync skipped"); }
+
+    // STEP 2: AB LOGIN CHECK KARO
     var users = DB.get('users');
     var user = users.find(function (u) { return u.username === username && u.password === password; });
-    if (!user) return false;
+    
+    if (!user) { 
+        hideLoader(); 
+        showToast('Invalid username or password', 'error'); 
+        return false; 
+    }
+    
+    // STEP 3: LOGIN HO GAYA? BAAKI SAB DATA BACKGROUND ME SYNC KARO
+    pullAllServerData(); 
+
     APP.currentUser = user;
     APP.sessionStart = Date.now();
     localStorage.setItem('wms_session', JSON.stringify({ userId: user.id, loginTime: new Date().toISOString() }));
     logAction('Auth', 'LOGIN', 'User ' + user.name + ' logged in');
+    
+    // STEP 4: DASHBOARD LOAD KARO
+    hideLoader();
     return true;
 }
+
 function logout() {
     if (APP.currentUser) logAction('Auth', 'LOGOUT', 'User ' + APP.currentUser.name + ' logged out');
     APP.currentUser = null;

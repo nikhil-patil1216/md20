@@ -11,6 +11,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js"></script>
     <link rel="stylesheet" href="style.css">
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 </head>
 <body>
     <!-- ===================== LOGIN PAGE ===================== -->
@@ -185,6 +186,24 @@
     <div id="modalOverlay" class="modal-overlay">
         <div id="modalContainer" class="modal-container"></div>
     </div>
+    
+<!-- ===================== SCANNER MODAL ===================== -->
+<div id="scannerModal" class="modal-overlay" style="z-index:99999; display:none;">
+    <div class="modal-container" style="max-width:420px;">
+        <div class="modal-header">
+            <h3><i class='bx bx-qr-scan'></i> Scan Code</h3>
+            <button class="modal-close" onclick="closeScannerModal()"><i class="bx bx-x"></i></button>
+        </div>
+        <div class="modal-body" style="text-align:center; padding:10px;">
+            <div style="margin-bottom:15px; display:flex; gap:10px; justify-content:center; flex-wrap:wrap;">
+                <button class="btn btn-primary btn-sm" onclick="startCameraScan()"><i class="bx bx-camera"></i> Camera Scan</button>
+                <button class="btn btn-secondary btn-sm" onclick="focusForBluetoothScanner()"><i class="bx bx-bluetooth"></i> Bluetooth/USB/Device</button>
+            </div>
+            <div id="qr-reader" style="width: 100%; border-radius: 8px; overflow: hidden; background:#000; min-height:50px;"></div>
+            <p style="color:var(--text-muted);margin-top:10px;font-size:12px;">Camera open hone pe barcode ko saamne rakhna.</p>
+        </div>
+    </div>
+</div>
 
     <!-- ===================== TOAST ===================== -->
     <div id="toastContainer" class="toast-container"></div>

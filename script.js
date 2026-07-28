@@ -1080,7 +1080,9 @@ function clearLocSearch() {
 }
 
 function bulkUploadLocation(input) {
-    var file = input.files[0]; if (!file) return;
+    var file = input.files[0]; 
+    if (!file) return;
+    
     var reader = new FileReader();
     reader.onload = function (e) {
         try {
@@ -1088,25 +1090,42 @@ function bulkUploadLocation(input) {
             var ws = wb.Sheets[wb.SheetNames[0]];
             var data = XLSX.utils.sheet_to_json(ws);
             var count = 0;
+            
             data.forEach(function (row) {
                 if (row.Rack || row.Material) {
+                    // ⭐ YEH LINE FIX HAI: Qty, Quantity, QTY sab accept karega
+                    var qtyVal = parseInt(row.Quantity) || parseInt(row.Qty) || parseInt(row.QTY) || 0;
+                    
+                    // Agar description nahi hai toh material se bhar do
+                    var desc = row.Description || row.Desc || row.DESCRIPTION || '';
+                    
                     DB.add('location_master', {
-                        date: row.Date || today(), rack: row.Rack || '', ean: row.EAN || '',
-                        material: row.Material || '', description: row.Description || '',
-                        quantity: parseInt(row.Quantity) || 0, packing: row.Packing || '',
-                        box: row.Box || '', action: row.Action || 'UPLOAD',
+                        date: row.Date || today(), 
+                        rack: row.Rack || '', 
+                        ean: row.EAN || '',
+                        material: row.Material || '', 
+                        description: desc,
+                        quantity: qtyVal, // ⭐ Ab yahi sahi Qty save karega
+                        packing: row.Packing || row.Pack || '', 
+                        box: row.Box || '', 
+                        action: row.Action || 'UPLOAD',
                         user: APP.currentUser ? APP.currentUser.name : 'Unknown',
                         dateTime: new Date().toISOString()
                     });
                     count++;
                 }
             });
+            
             logAction('Location', 'BULK_UPLOAD', count + ' records uploaded');
             showToast(count + ' records uploaded successfully', 'success');
             renderLocationMaster();
-        } catch (err) { showToast('Failed to read file', 'error'); }
+        } catch (err) { 
+            console.log(err);
+            showToast('Failed to read file', 'error'); 
+        }
     };
-    reader.readAsArrayBuffer(file); input.value = '';
+    reader.readAsArrayBuffer(file); 
+    input.value = '';
 }
 
 function exportLocationExcel() {
@@ -1211,8 +1230,12 @@ function showBulkPickModal() {
 function processBulkPick() {
     var pickerName = document.getElementById('bulkPickerName').value.trim();
     if (!pickerName) { showToast('Enter picker name', 'error'); return; }
+    
     var fileInput = document.getElementById('bulkPickFile');
-    if (!fileInput.files[0]) { showToast('Please select Excel file', 'error'); return; }
+    if (!fileInput || !fileInput.files || !fileInput.files[0]) { 
+        showToast('Please select a file first!', 'error'); 
+        return; 
+    }
     
     var reader = new FileReader();
     reader.onload = function (e) {
@@ -1223,36 +1246,48 @@ function processBulkPick() {
             
             if (data.length === 0) { showToast('Empty file', 'error'); return; }
             
-            var obdNo = String(data[0][0] || 'OBD-UNKNOWN').trim();
+            var obdNo = '';
             var customer = '';
+            var startRow = 0;
             
             // Check if first row is header
-            var startRow = 0;
-            if (String(data[0][1] || '').toLowerCase().indexOf('material') > -1) {
-                startRow = 1;
-                obdNo = String(data[1][0] || 'OBD-UNKNOWN').trim();
+            if (data[0] && String(data[0][1] || '').toLowerCase().indexOf('material') > -1) {
+                startRow = 1; // Skip header row
+            }
+            
+            // OBD No nikalo
+            if (data[startRow] && data[startRow][0]) {
+                obdNo = String(data[startRow][0]).trim();
+            } else {
+                obdNo = 'OBD-' + Date.now();
             }
             
             var reportItems = [];
             for (var i = startRow; i < data.length; i++) {
-                if (data[i][1]) {
-                    var rowCustomer = String(data[i][5] || '').trim();
-                    if (!customer && rowCustomer) customer = rowCustomer; // First found customer set as main
-                    
-                    reportItems.push({
-                        locationId: null, // Bulk upload is external, not linked to location master directly
-                        material: String(data[i][1] || ''),
-                        description: String(data[i][2] || ''),
-                        quantity: parseInt(data[i][3]) || 0,
-                        ean: String(data[i][4] || ''),
-                        packing: '', box: '',
-                        pickedQty: parseInt(data[i][3]) || 0,
-                        customer: rowCustomer
-                    });
-                }
+                var row = data[i];
+                
+                // YEH LINE SABSE ZAROORI HAI: Agar row khali hai toh skip karo
+                if (!row || !row[1] || String(row[1]).trim() === '') continue;
+                
+                var rowCustomer = String(row[5] || '').trim();
+                if (!customer && rowCustomer) customer = rowCustomer; 
+                
+                reportItems.push({
+                    locationId: null, 
+                    material: String(row[1] || '').trim(),
+                    description: String(row[2] || '').trim(),
+                    quantity: parseInt(row[3]) || 0,
+                    ean: String(row[4] || '').trim(),
+                    packing: '', box: '',
+                    pickedQty: parseInt(row[3]) || 0,
+                    customer: rowCustomer
+                });
             }
             
-            if (reportItems.length === 0) { showToast('No valid data found in Excel', 'error'); return; }
+            if (reportItems.length === 0) { 
+                showToast('No valid data found. Check Material column.', 'error'); 
+                return; 
+            }
             
             DB.add('picking_reports', {
                 reportNo: obdNo, pickerName: pickerName, status: 'Open', customer: customer,
@@ -1264,9 +1299,12 @@ function processBulkPick() {
             closeModal();
             showPickDetail(obdNo);
             
-        } catch (err) { showToast('Failed to read Excel', 'error'); }
+        } catch (err) {
+            console.error("Excel Error:", err); // Console me error dikhega agar aaye
+            showToast('Failed to read Excel. Check console (F12) for error.', 'error'); 
+        }
     };
-    reader.readAsArrayBuffer(fileInput);
+    reader.readAsArrayBuffer(fileInput.files[0]);
 }
 
 function searchObdReport() {
@@ -2434,33 +2472,79 @@ function initMatrixRain() {
     document.getElementById('loginForm').addEventListener('submit', stopMatrix);
 }
 
-// ==================== MOBILE CAMERA SCANNER ====================
-function openCameraScanner(targetInputId) {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        showToast('Camera not supported on this device', 'error');
+// ==================== BARCODE SCANNER SYSTEM ====================
+let activeScannerField = null;
+let html5QrCode = null;
+
+function simulateScan(inputId) {
+    activeScannerField = inputId;
+    // Pehle se camera on hai toh band karo
+    closeCamera();
+    // Modal kholo
+    document.getElementById('scannerModal').style.display = 'flex';
+}
+
+function startCameraScan() {
+    closeCamera(); // Safety: Pehle band karo phir start karo
+    if (typeof Html5Qrcode === 'undefined') {
+        showToast("Scanner library missing! Check index.html", "error");
         return;
     }
-    var html = '<div style="text-align:center">' +
-        '<video id="cameraVideo" autoplay playsinline style="width:100%;max-width:400px;border-radius:8px;background:#000;min-height:250px"></video>' +
-        '<p style="color:var(--text-muted);font-size:12px;margin-top:10px">Point camera at barcode/QR code</p>' +
-        '</div>';
-    showModal('Camera Scanner', html, '',
-        '<button class="btn btn-secondary" onclick="stopCamera();closeModal()">Cancel</button>');
-    navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } }).then(function (stream) {
-        var video = document.getElementById('cameraVideo');
-        video.srcObject = stream;
-        video.play();
-        window._cameraStream = stream;
-    }).catch(function (err) {
-        showToast('Camera access denied', 'error');
-        closeModal();
+    
+    html5QrCode = new Html5Qrcode("qr-reader");
+    
+    html5QrCode.start(
+        { facingMode: "environment" }, // Back camera
+        { fps: 10, qrbox: { width: 250, height: 150 } },
+        function onScanSuccess(decodedText) {
+            // Code mil gaya
+            if (activeScannerField) {
+                var inputEl = document.getElementById(activeScannerField);
+                if(inputEl) {
+                    inputEl.value = decodedText;
+                    inputEl.dispatchEvent(new Event('input')); // Yeh EAN auto-fill ke liye zaroori hai
+                    inputEl.dispatchEvent(new Event('change'));
+                }
+            }
+            closeScannerModal();
+            showToast("Scanned: " + decodedText, "success");
+        },
+        function onScanFailure() {} // Ignore errors
+    ).catch(err => {
+        console.log(err);
+        showToast("Camera access denied or not available", "error");
+        closeScannerModal();
     });
 }
-function stopCamera() {
-    if (window._cameraStream) {
-        window._cameraStream.getTracks().forEach(function (t) { t.stop(); });
-        window._cameraStream = null;
+
+function focusForBluetoothScanner() {
+    closeScannerModal();
+    if (activeScannerField) {
+        var el = document.getElementById(activeScannerField);
+        if(el) {
+            el.focus();
+            el.value = '';
+            showToast("Focused! Ab Scanner se scan karo...", "info");
+        }
     }
+}
+
+function closeCamera() {
+    if (html5QrCode) {
+        html5QrCode.stop().then(() => {
+            html5QrCode.clear();
+            html5QrCode = null;
+        }).catch(err => {
+            html5QrCode.clear();
+            html5QrCode = null;
+        });
+        document.getElementById('qr-reader').innerHTML = '';
+    }
+}
+
+function closeScannerModal() {
+    document.getElementById('scannerModal').style.display = 'none';
+    closeCamera();
 }
 
 // ==================== APP INITIALIZATION ====================

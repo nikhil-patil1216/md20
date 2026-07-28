@@ -315,39 +315,28 @@ function seedData() {
 }
 
 // ==================== AUTH ====================
-async function login(username, password) {
-    showLoader();
-    
-    // STEP 1: USERS KA LATEST DATA SUPABASE SE LAO (Warna naya user login nahi hoga)
+function login(username, password) {
+    // BACKGROUND SYNC (Login me ruka nahi jayega)
     try {
         if (supabaseClient) {
-            const { data } = await supabaseClient.from('app_data').select('value').eq('key', 'users');
-            if (data && data.length > 0 && data[0].value) {
-                localStorage.setItem('wms_users', JSON.stringify(data[0].value));
-            }
+            supabaseClient.from('app_data').select('value').eq('key', 'users').single()
+            .then(({ data }) => {
+                if (data && data.value) localStorage.setItem('wms_users', JSON.stringify(data.value));
+            }).catch(e => {});
         }
-    } catch(e) { console.log("User sync skipped"); }
+    } catch(e) {}
 
-    // STEP 2: AB LOGIN CHECK KARO
+    // TURANT LOCAL CHECK
     var users = DB.get('users');
     var user = users.find(function (u) { return u.username === username && u.password === password; });
     
-    if (!user) { 
-        hideLoader(); 
-        showToast('Invalid username or password', 'error'); 
-        return false; 
-    }
+    if (!user) { showToast('Invalid username or password', 'error'); return false; }
     
-    // STEP 3: LOGIN HO GAYA? BAAKI SAB DATA BACKGROUND ME SYNC KARO
-    pullAllServerData(); 
-
     APP.currentUser = user;
     APP.sessionStart = Date.now();
     localStorage.setItem('wms_session', JSON.stringify({ userId: user.id, loginTime: new Date().toISOString() }));
     logAction('Auth', 'LOGIN', 'User ' + user.name + ' logged in');
-    
-    // STEP 4: DASHBOARD LOAD KARO
-    hideLoader();
+    pullAllServerData(); // Background sync
     return true;
 }
 
@@ -378,8 +367,82 @@ function checkPermType(type) {
     if (APP.currentUser.role === 'Super Admin') return true;
     return APP.currentUser.permissions[type] || false;
 }
+// ==================== DYNAMIC SIDEBAR ====================
+// ==================== DYNAMIC SIDEBAR ====================
+function renderSidebar() {
+    if (!APP.currentUser) return;
+    var modules = [
+        { id: 'dashboard', icon: 'bxs-dashboard', label: 'Dashboard', subs: [] },
+        { id: 'inbound', icon: 'bxs-truck', label: 'Inbound', subs: [
+            { id: 'vehicle-entry', label: 'Vehicle Entry' },
+            { id: 'pending-vehicle', label: 'Pending Vehicle' },
+            { id: 'unload-process', label: 'Unload Process' }
+        ]},
+        { id: 'putaway', icon: 'bxs-package', label: 'Putaway', subs: [] },
+        { id: 'piv', icon: 'bxs-clipboard', label: 'PIV', subs: [] },
+        { id: 'location', icon: 'bxs-map-pin', label: 'Location Master', subs: [] },
+        { id: 'rack', icon: 'bxs-grid-alt', label: 'Rack Master', subs: [] },
+        { id: 'material', icon: 'bxs-label', label: 'Material Master', subs: [] },
+        { id: 'admin', icon: 'bxs-user-detail', label: 'Admin', subs: [] },
+        { id: 'settings', icon: 'bxs-cog', label: 'Settings', subs: [] },
+        { id: 'reports', icon: 'bxs-bar-chart-alt-2', label: 'Reports', subs: [] },
+        { id: 'audit', icon: 'bxs-receipt', label: 'Audit Log', subs: [] }
+    ];
 
+    var html = '';
+    modules.forEach(function(mod) {
+        if (!checkPermission(mod.id)) return; 
+        var hasSub = mod.subs.length > 0;
+        html += '<div class="nav-group">';
+        html += '<a href="#" data-section="' + mod.id + '" class="nav-item' + (hasSub ? ' has-sub' : '') + '">';
+        html += '<i class="bx ' + mod.icon + '"></i><span>' + mod.label + '</span>';
+        if (hasSub) html += '<i class="bx bx-chevron-down sub-arrow"></i>';
+        html += '</a>';
+        if (hasSub) {
+            html += '<div class="nav-sub" id="' + mod.id + 'Sub">';
+            mod.subs.forEach(function(sub) {
+                html += '<a href="#" data-sub="' + sub.id + '" class="nav-sub-item">' + sub.label + '</a>';
+            });
+            html += '</div>';
+        }
+        html += '</div>';
+    });
+    
+    document.getElementById('sidebarNav').innerHTML = html;
+    
+    // CLICK EVENTS LAGAO
+    document.querySelectorAll('#sidebarNav .nav-item').forEach(function(btn) {
+        btn.addEventListener('click', function(e) {
+            e.preventDefault();
+            var section = this.getAttribute('data-section');
+            if (section) navigateTo(section);
+        });
+    });
+
+    document.querySelectorAll('#sidebarNav .nav-sub-item').forEach(function(btn) {
+        btn.addEventListener('click', function(e) {
+            e.preventDefault();
+            var sub = this.getAttribute('data-sub');
+            var parentSection = this.closest('.nav-group').querySelector('.nav-item').getAttribute('data-section');
+            if (sub && parentSection) navigateTo(parentSection, sub);
+        });
+    });
+}
 // ==================== NAVIGATION ====================
+function navigateTo(section, sub) {
+    sub = sub || null;
+    
+    // SECURITY CHECK
+    if (!checkPermission(section)) {
+        showToast('Access Denied! Admin ne iska access nahi diya.', 'error');
+        return;
+    }
+    
+    // ... NEECHE KA PURANA CODE SAME RAHEGA ...
+    APP.currentSection = section;
+    APP.currentSub = sub;
+    // ...
+}
 function navigateTo(section, sub) {
     sub = sub || null;
     APP.currentSection = section;
@@ -2275,22 +2338,19 @@ document.getElementById('loginForm').addEventListener('submit', function (e) {
     var username = document.getElementById('loginUser').value.trim();
     var password = document.getElementById('loginPass').value;
     if (!username || !password) { showToast('Enter username and password', 'error'); return; }
-    showLoader();
-    setTimeout(function () {
-        var success = login(username, password);
-        hideLoader();
-        if (success) {
-            document.getElementById('loginPage').style.display = 'none';
-            document.getElementById('mainApp').style.display = 'flex';
-            document.getElementById('userName').textContent = APP.currentUser.name;
-            document.getElementById('userAvatar').textContent = APP.currentUser.name.charAt(0).toUpperCase();
-            updateNotifBadge();
-            navigateTo('dashboard');
-            showToast('Welcome, ' + APP.currentUser.name + '!', 'success');
-        } else {
-            showToast('Invalid username or password', 'error');
-        }
-    }, 800);
+    
+    var success = login(username, password);
+    
+    if (success) {
+        document.getElementById('loginPage').style.display = 'none';
+        document.getElementById('mainApp').style.display = 'flex';
+        renderSidebar(); // SIDEBAR YAHAN BANEGI
+        navigateTo('dashboard');
+        document.getElementById('userName').textContent = APP.currentUser.name;
+        document.getElementById('userAvatar').textContent = APP.currentUser.name.charAt(0).toUpperCase();
+        updateNotifBadge();
+        showToast('Welcome, ' + APP.currentUser.name + '!', 'success');
+    }
 });
 
 // ==================== KEYBOARD SHORTCUTS ====================

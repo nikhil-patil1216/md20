@@ -976,11 +976,13 @@ function renderLocationMaster() {
     var html = '<div class="section-header"><h2><i class="bx bxs-map-pin"></i>Location Master</h2>' +
         '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
         '<button class="btn btn-secondary btn-sm" onclick="showPickModal()"><i class="bx bx-clipboard"></i> Picking Report</button>' +
+'<button class="btn btn-warning btn-sm" onclick="showBulkPickModal()"><i class="bx bx-upload"></i> Bulk Search (Excel)</button>' +
         '<button class="btn btn-secondary btn-sm" onclick="showReportHistory()"><i class="bx bx-history"></i> Report History</button>' +
         '<label class="btn btn-warning btn-sm" style="cursor:pointer"><i class="bx bx-upload"></i> Bulk Upload' +
         '<input type="file" accept=".xlsx,.xls,.csv" style="display:none" onchange="bulkUploadLocation(this)"></label>' +
         '<button class="btn btn-primary btn-sm" onclick="exportLocationExcel()"><i class="bx bx-download"></i> Export Excel</button>' +
         '<button class="btn btn-secondary btn-sm" onclick="exportLocationPDF()"><i class="bx bx-file"></i> Export PDF</button>' +
+        '<button class="btn btn-warning btn-sm" onclick="searchObdReport()"><i class="bx bx-file-find"></i> Find OBD</button>' +
         '<button class="btn btn-sm" style="background:var(--info-dim);color:var(--info);border:1px solid rgba(59,130,246,.2)" onclick="printLocation()"><i class="bx bx-printer"></i> Print</button>' +
         '</div></div>';
     html += '<div class="card" style="margin-bottom:16px"><div class="card-title">Search & Filter</div><div class="form-row">' +
@@ -988,6 +990,7 @@ function renderLocationMaster() {
         '<div class="form-group"><label>EAN</label><input type="text" id="locSearchEan" class="form-input" placeholder="EAN code" value="' + escapeHtml(searchEan) + '"></div>' +
         '<div class="form-group"><label>Rack</label><input type="text" id="locSearchRack" class="form-input" placeholder="Rack name" value="' + escapeHtml(searchRack) + '"></div>' +
         '<div class="form-group"><label>Brand</label><input type="text" id="locSearchBrand" class="form-input" placeholder="Brand name" value="' + escapeHtml(searchBrand) + '"></div>' +
+        '<div class="form-group"><label>Search OBD No</label><input type="text" id="locSearchObd" class="form-input" placeholder="Enter OBD to open report" style="border-color:var(--warning)"></div>' +
         '</div><div class="form-actions"><button class="btn btn-primary btn-sm" onclick="APP.locPage=1;renderLocationMaster()"><i class="bx bx-search"></i> Search</button>' +
         '<button class="btn btn-secondary btn-sm" onclick="clearLocSearch()"><i class="bx bx-refresh"></i> Clear</button></div></div>';
     html += '<div class="card"><div class="card-title">Records (' + pg.total + ')</div><div class="table-wrapper"><table class="data-table">' +
@@ -1096,54 +1099,147 @@ function printLocation() {
 }
 
 // ==================== PICKING REPORT ====================
+// ==================== PICKING REPORT ====================
 function showPickModal() {
-    var html = '<div class="form-group"><label>Picker Name <span class="req">*</span></label>' +
-        '<input type="text" id="pickerName" class="form-input" placeholder="Enter picker name"></div>' +
-        '<p style="color:var(--text-muted);font-size:12px;margin-top:8px">A unique Report Number will be generated automatically.</p>';
-    showModal('Create Picking Report', html, 'sm',
+    var html = '<div class="form-row">' +
+        '<div class="form-group"><label>OBD No / Ref <span class="req">*</span></label><input type="text" id="pickObdNo" class="form-input" placeholder="e.g. OBD-1001" style="border-color:var(--warning)"></div>' +
+        '<div class="form-group"><label>Picker Name <span class="req">*</span></label><input type="text" id="pickerName" class="form-input" placeholder="Enter picker name"></div>' +
+        '</div>';
+    showModal('Create Manual Picking Report', html, 'sm',
         '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
         '<button class="btn btn-primary" onclick="createPickingReport()"><i class="bx bx-check-circle"></i> Create</button>');
 }
 
 function createPickingReport() {
+    var obdNo = document.getElementById('pickObdNo').value.trim();
     var pickerName = document.getElementById('pickerName').value.trim();
-    if (!pickerName) { showToast('Enter picker name', 'error'); return; }
+    if (!obdNo || !pickerName) { showToast('Enter OBD No and Picker Name', 'error'); return; }
     
-    // ⭐ YEH LINE HAI JO FIX KAREGI - AB SIRF SEARCHED DATA AAYEGA ⭐
     var locations = APP.filteredLocations || [];
+    if (locations.length === 0) { showToast('No filtered data! Pehle search karo.', 'error'); closeModal(); return; }
     
-    if (locations.length === 0) { showToast('Koi filtered data nahi hai! Pehle search karo.', 'error'); closeModal(); return; }
-    var reportNo = DB.reportNo();
     var reportItems = locations.map(function (l) {
         return { locationId: l.id, material: l.material, description: l.description, rack: l.rack, ean: l.ean, quantity: l.quantity, packing: l.packing, box: l.box, pickedQty: l.quantity };
     });
+    
     DB.add('picking_reports', {
-        reportNo: reportNo, pickerName: pickerName, status: 'Open',
+        reportNo: obdNo, pickerName: pickerName, status: 'Open', customer: 'Manual',
         items: reportItems, createdAt: new Date().toISOString()
     });
-    logAction('Location', 'PICK_REPORT', 'Report ' + reportNo + ' created by ' + pickerName);
-    showToast('Picking Report ' + reportNo + ' created', 'success');
+    
+    logAction('Location', 'PICK_REPORT', 'Report ' + obdNo + ' created by ' + pickerName);
+    showToast('Picking Report ' + obdNo + ' created', 'success');
     closeModal();
-    showPickDetail(reportNo);
+    showPickDetail(obdNo);
+}
+
+function showBulkPickModal() {
+    var html = '<div class="form-group"><label>Picker Name <span class="req">*</span></label>' +
+        '<input type="text" id="bulkPickerName" class="form-input" placeholder="Enter picker name"></div>' +
+        '<div class="form-group"><label>Upload Excel File <span class="req">*</span></label>' +
+        '<input type="file" id="bulkPickFile" accept=".xlsx,.xls,.csv" class="form-input" style="padding:8px;background:var(--bg-secondary)"></div>' +
+        '<div style="background:var(--bg-secondary);padding:10px;border-radius:6px;font-size:12px;color:var(--text-muted)">' +
+        '<strong>Excel Format (Strict Order):</strong><br>1. OBD NO &nbsp;|&nbsp; 2. MATERIAL &nbsp;|&nbsp; 3. DESCRIPTION &nbsp;|&nbsp; 4. QTY &nbsp;|&nbsp; 5. EAN NO &nbsp;|&nbsp; 6. CUSTOMER</div>';
+    showModal('Bulk Search - Excel Upload', html, 'md',
+        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+        '<button class="btn btn-primary" onclick="processBulkPick()"><i class="bx bx-check-double"></i> Upload & Create Report</button>');
+}
+
+function processBulkPick() {
+    var pickerName = document.getElementById('bulkPickerName').value.trim();
+    if (!pickerName) { showToast('Enter picker name', 'error'); return; }
+    var fileInput = document.getElementById('bulkPickFile');
+    if (!fileInput.files[0]) { showToast('Please select Excel file', 'error'); return; }
+    
+    var reader = new FileReader();
+    reader.onload = function (e) {
+        try {
+            var wb = XLSX.read(e.target.result, { type: 'array' });
+            var ws = wb.Sheets[wb.SheetNames[0]];
+            var data = XLSX.utils.sheet_to_json(ws, { header: 1 });
+            
+            if (data.length === 0) { showToast('Empty file', 'error'); return; }
+            
+            var obdNo = String(data[0][0] || 'OBD-UNKNOWN').trim();
+            var customer = '';
+            
+            // Check if first row is header
+            var startRow = 0;
+            if (String(data[0][1] || '').toLowerCase().indexOf('material') > -1) {
+                startRow = 1;
+                obdNo = String(data[1][0] || 'OBD-UNKNOWN').trim();
+            }
+            
+            var reportItems = [];
+            for (var i = startRow; i < data.length; i++) {
+                if (data[i][1]) {
+                    var rowCustomer = String(data[i][5] || '').trim();
+                    if (!customer && rowCustomer) customer = rowCustomer; // First found customer set as main
+                    
+                    reportItems.push({
+                        locationId: null, // Bulk upload is external, not linked to location master directly
+                        material: String(data[i][1] || ''),
+                        description: String(data[i][2] || ''),
+                        quantity: parseInt(data[i][3]) || 0,
+                        ean: String(data[i][4] || ''),
+                        packing: '', box: '',
+                        pickedQty: parseInt(data[i][3]) || 0,
+                        customer: rowCustomer
+                    });
+                }
+            }
+            
+            if (reportItems.length === 0) { showToast('No valid data found in Excel', 'error'); return; }
+            
+            DB.add('picking_reports', {
+                reportNo: obdNo, pickerName: pickerName, status: 'Open', customer: customer,
+                items: reportItems, createdAt: new Date().toISOString()
+            });
+            
+            logAction('Location', 'BULK_PICK', 'Bulk Report ' + obdNo + ' created');
+            showToast('Bulk Report ' + obdNo + ' created (' + reportItems.length + ' items)', 'success');
+            closeModal();
+            showPickDetail(obdNo);
+            
+        } catch (err) { showToast('Failed to read Excel', 'error'); }
+    };
+    reader.readAsArrayBuffer(fileInput);
+}
+
+function searchObdReport() {
+    var obd = document.getElementById('locSearchObd').value.trim();
+    if (!obd) { showToast('Enter OBD No to search', 'error'); return; }
+    var report = DB.get('picking_reports').find(function (r) { return r.reportNo.toLowerCase() === obd.toLowerCase(); });
+    if (report) {
+        showPickDetail(report.reportNo);
+    } else {
+        showToast('OBD No ' + obd + ' not found in reports', 'error');
+    }
 }
 
 function showReportHistory() {
+    var searchObd = document.getElementById('histSearchObd') ? document.getElementById('histSearchObd').value.trim().toLowerCase() : '';
     var reports = DB.get('picking_reports').reverse();
+    
+    if (searchObd) {
+        reports = reports.filter(function (r) { return r.reportNo.toLowerCase().indexOf(searchObd) > -1; });
+    }
+
     var html = '<div class="section-header"><h2><i class="bx bx-history"></i>Picking Report History</h2></div><div class="card">';
+    html += '<div style="display:flex;gap:8px;margin-bottom:15px"><input type="text" id="histSearchObd" class="form-input" placeholder="Search by OBD No..." value="' + escapeHtml(searchObd) + '" style="max-width:300px"><button class="btn btn-primary btn-sm" onclick="showReportHistory()"><i class="bx bx-search"></i></button></div>';
+    
     if (reports.length === 0) {
-        html += '<div class="empty-state"><i class="bx bx-clipboard"></i><p>No reports generated yet</p></div>';
+        html += '<div class="empty-state"><i class="bx bx-clipboard"></i><p>No reports found</p></div>';
     } else {
-        html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>Report No</th><th>Picker</th><th>Items</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
+        html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD / Ref No</th><th>Picker</th><th>Customer</th><th>Items</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
         reports.forEach(function (r) {
             var statusBadge = r.status === 'Open' ? 'badge-warning' : 'badge-success';
-            html += '<tr><td><strong style="color:var(--accent)">' + escapeHtml(r.reportNo) + '</strong></td>' +
-                '<td>' + escapeHtml(r.pickerName) + '</td><td>' + (r.items ? r.items.length : 0) + '</td>' +
+            html += '<tr><td><strong style="color:var(--warning);font-family:var(--font-display)">' + escapeHtml(r.reportNo) + '</strong></td>' +
+                '<td>' + escapeHtml(r.pickerName) + '</td><td>' + escapeHtml(r.customer || '-') + '</td><td>' + (r.items ? r.items.length : 0) + '</td>' +
                 '<td><span class="badge ' + statusBadge + '">' + escapeHtml(r.status) + '</span></td>' +
                 '<td style="font-size:12px;color:var(--text-muted)">' + formatDateTime(r.createdAt) + '</td>' +
                 '<td><div class="table-actions">' +
                 '<button class="btn-icon" onclick="showPickDetail(\'' + r.reportNo + '\')" title="Open"><i class="bx bx-show"></i></button>' +
-                '<button class="btn-icon" onclick="exportPickExcel(\'' + r.reportNo + '\')" title="Excel"><i class="bx bx-download"></i></button>' +
-                '<button class="btn-icon" onclick="exportPickPDF(\'' + r.reportNo + '\')" title="PDF"><i class="bx bx-file"></i></button>' +
                 '<button class="btn-icon" onclick="printPickReport(\'' + r.reportNo + '\')" title="Print"><i class="bx bx-printer"></i></button>' +
                 '</div></td></tr>';
         });
@@ -1156,21 +1252,24 @@ function showReportHistory() {
 function showPickDetail(reportNo) {
     var report = DB.get('picking_reports').find(function (r) { return r.reportNo === reportNo; });
     if (!report) { showToast('Report not found', 'error'); return; }
-    var html = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">' +
-        '<div><strong style="font-family:var(--font-display);color:var(--accent);font-size:16px">' + escapeHtml(report.reportNo) + '</strong>' +
-        '<span style="margin-left:12px;color:var(--text-muted);font-size:13px">Picker: ' + escapeHtml(report.pickerName) + '</span></div>' +
-        '<span class="badge ' + (report.status === 'Open' ? 'badge-warning' : 'badge-success') + '">' + escapeHtml(report.status) + '</span></div>';
-    html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>Description</th><th>Rack</th><th>EAN</th><th>Original Qty</th><th>Picked Qty</th><th>Actions</th></tr></thead><tbody>';
+    
+    var html = '<div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:15px;margin-bottom:20px;background:var(--bg-secondary);padding:15px;border-radius:8px;border-left:4px solid var(--warning)">' +
+        '<div><div style="font-size:11px;color:var(--text-muted)">OBD NO / REFERENCE</div><strong style="font-family:var(--font-display);color:var(--warning);font-size:20px">' + escapeHtml(report.reportNo) + '</strong></div>' +
+        '<div><div style="font-size:11px;color:var(--text-muted)">CUSTOMER</div><strong style="font-size:16px;color:var(--accent)">' + escapeHtml(report.customer || 'N/A') + '</strong></div>' +
+        '<div><div style="font-size:11px;color:var(--text-muted)">PICKER</div><strong>' + escapeHtml(report.pickerName) + '</strong></div>' +
+        '<div><span class="badge ' + (report.status === 'Open' ? 'badge-warning' : 'badge-success') + '" style="font-size:14px;padding:8px 12px">' + escapeHtml(report.status) + '</span></div></div>';
+        
+    html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>Description</th><th>Rack</th><th>EAN</th><th>Orig Qty</th><th>Picked Qty</th><th>Actions</th></tr></thead><tbody>';
     if (!report.items || report.items.length === 0) {
         html += '<tr><td colspan="7" style="text-align:center;padding:20px;color:var(--text-muted)">No items</td></tr>';
     } else {
         report.items.forEach(function (item, idx) {
-            html += '<tr id="pick-row-' + idx + '"><td>' + escapeHtml(item.material) + '</td>' +
+            html += '<tr><td>' + escapeHtml(item.material) + '</td>' +
                 '<td style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(item.description) + '</td>' +
-                '<td>' + escapeHtml(item.rack) + '</td><td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(item.ean) + '</td>' +
+                '<td>' + escapeHtml(item.rack || '-') + '</td><td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(item.ean || '-') + '</td>' +
                 '<td>' + item.quantity + '</td><td><strong>' + item.pickedQty + '</strong></td>' +
                 '<td><div class="table-actions">' +
-                '<button class="btn-icon" onclick="minusPickQty(\'' + reportNo + '\',' + idx + ')" title="Minus Qty"><i class="bx bx-minus-circle"></i></button>';
+                '<button class="btn-icon" onclick="minusPickQty(\'' + reportNo + '\',' + idx + ')" title="Minus"><i class="bx bx-minus-circle"></i></button>';
             if (checkPermType('delete')) {
                 html += '<button class="btn-icon danger" onclick="deletePickItem(\'' + reportNo + '\',' + idx + ')" title="Delete"><i class="bx bx-trash"></i></button>';
             }
@@ -1179,10 +1278,9 @@ function showPickDetail(reportNo) {
     }
     html += '</tbody></table></div>';
     html += '<div class="form-actions" style="margin-top:16px">' +
+        '<button class="btn btn-primary btn-sm" onclick="printPickReport(\'' + reportNo + '\')"><i class="bx bx-printer"></i> Print Report</button>' +
         '<button class="btn btn-secondary btn-sm" onclick="exportPickExcel(\'' + reportNo + '\')"><i class="bx bx-download"></i> Excel</button>' +
-        '<button class="btn btn-secondary btn-sm" onclick="exportPickPDF(\'' + reportNo + '\')"><i class="bx bx-file"></i> PDF</button>' +
-        '<button class="btn btn-secondary btn-sm" onclick="printPickReport(\'' + reportNo + '\')"><i class="bx bx-printer"></i> Print</button>' +
-        '<button class="btn btn-primary btn-sm" onclick="closePickReport(\'' + reportNo + '\')"><i class="bx bx-check"></i> Close Report</button></div>';
+        '<button class="btn btn-danger btn-sm" onclick="closePickReport(\'' + reportNo + '\')"><i class="bx bx-check"></i> Close Report</button></div>';
     showModal('Picking Report — ' + reportNo, html, 'lg');
 }
 
@@ -1195,7 +1293,7 @@ function minusPickQty(reportNo, idx) {
         '<input type="number" id="minusQtyInput" class="form-input" min="1" max="' + item.pickedQty + '" placeholder="Enter qty" value="1"></div>' +
         '<p style="color:var(--text-muted);font-size:12px">Current picked qty: <strong>' + item.pickedQty + '</strong></p>';
     showModal('Minus Quantity — ' + item.material, diffHtml, 'sm',
-        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+        '<button class="btn btn-secondary" onclick="showPickDetail(\'' + reportNo + '\')"><i class="bx bx-arrow-back"></i> Back</button>' +
         '<button class="btn btn-primary" onclick="confirmMinusQty(\'' + reportNo + '\',' + idx + ')"><i class="bx bx-check"></i> Confirm</button>');
 }
 
@@ -1208,28 +1306,37 @@ function confirmMinusQty(reportNo, idx) {
     var item = report.items[idx];
     if (qty > item.pickedQty) { showToast('Cannot subtract more than picked qty', 'error'); return; }
     item.pickedQty -= qty;
-    // Update Location Master
-    var locItem = DB.find('location_master', item.locationId);
-    if (locItem && locItem.quantity >= qty) {
-        DB.update('location_master', item.locationId, { quantity: locItem.quantity - qty });
+    
+    // Location master me bhi minus karo (Agar link hai toh)
+    if (item.locationId) {
+        var locItem = DB.find('location_master', item.locationId);
+        if (locItem && locItem.quantity >= qty) {
+            DB.update('location_master', item.locationId, { quantity: locItem.quantity - qty });
+        }
     }
+    
     DB.set('picking_reports', reports);
-    logAction('Location', 'PICK_MINUS', item.material + ' — subtracted ' + qty + ' from Report ' + reportNo);
+    logAction('Location', 'PICK_MINUS', item.material + ' — subtracted ' + qty);
     showToast('Quantity updated', 'success');
     closeModal();
     showPickDetail(reportNo);
 }
 
 function deletePickItem(reportNo, idx) {
+    if (!confirm('Delete this item from report and location master?')) return;
     var reports = DB.get('picking_reports');
     var report = reports.find(function (r) { return r.reportNo === reportNo; });
     if (!report || !report.items[idx]) return;
     var item = report.items[idx];
-    // Remove from Location Master
-    DB.remove('location_master', item.locationId);
+    
+    // Location master se bhi delete karo (Agar link hai toh)
+    if (item.locationId) {
+        DB.remove('location_master', item.locationId);
+    }
+    
     report.items.splice(idx, 1);
     DB.set('picking_reports', reports);
-    logAction('Location', 'PICK_DELETE', item.material + ' — deleted from Report ' + reportNo);
+    logAction('Location', 'PICK_DELETE', item.material + ' deleted');
     showToast('Item removed', 'success');
     showPickDetail(reportNo);
 }
@@ -1248,11 +1355,11 @@ function exportPickExcel(reportNo) {
     if (!checkPermType('download')) { showToast('No download permission', 'error'); return; }
     var report = DB.get('picking_reports').find(function (r) { return r.reportNo === reportNo; });
     if (!report) return;
-    var wsData = [['Report No: ' + reportNo, '', 'Picker: ' + report.pickerName, '', 'Date: ' + formatDateTime(report.createdAt)], [],
+    var wsData = [['OBD NO: ' + reportNo, '', 'Picker: ' + report.pickerName, '', 'Customer: ' + (report.customer || 'N/A'), '', 'Date: ' + formatDateTime(report.createdAt)], [],
         ['Material', 'Description', 'Rack', 'EAN', 'Original Qty', 'Picked Qty', 'Packing', 'Box']
     ];
     (report.items || []).forEach(function (item) {
-        wsData.push([item.material, item.description, item.rack, item.ean, item.quantity, item.pickedQty, item.packing, item.box]);
+        wsData.push([item.material, item.description, item.rack || '-', item.ean || '-', item.quantity, item.pickedQty, item.packing || '-', item.box || '-']);
     });
     var wb = XLSX.utils.book_new();
     var ws = XLSX.utils.aoa_to_sheet(wsData);
@@ -1261,37 +1368,19 @@ function exportPickExcel(reportNo) {
     showToast('Excel exported', 'success');
 }
 
-function exportPickPDF(reportNo) {
-    if (!checkPermType('download')) { showToast('No download permission', 'error'); return; }
-    var report = DB.get('picking_reports').find(function (r) { return r.reportNo === reportNo; });
-    if (!report) return;
-    var jsPDF = window.jspdf.jsPDF;
-    var doc = new jsPDF('l', 'mm', 'a4');
-    doc.setFontSize(16);
-    doc.text('VIP INDUSTRIES LIMITED MD20 — Picking Report', 14, 15);
-    doc.setFontSize(10);
-    doc.text('Report: ' + reportNo + '  |  Picker: ' + report.pickerName + '  |  Date: ' + formatDateTime(report.createdAt), 14, 23);
-    var tableData = (report.items || []).map(function (item) {
-        return [item.material, item.description, item.rack, item.ean, item.quantity, item.pickedQty, item.packing, item.box];
-    });
-    doc.autoTable({
-        head: [['Material', 'Description', 'Rack', 'EAN', 'Original Qty', 'Picked Qty', 'Packing', 'Box']],
-        body: tableData, startY: 30, styles: { fontSize: 8 }, headStyles: { fillColor: [0, 180, 130] }
-    });
-    doc.save(reportNo + '.pdf');
-    showToast('PDF exported', 'success');
-}
-
 function printPickReport(reportNo) {
     var report = DB.get('picking_reports').find(function (r) { return r.reportNo === reportNo; });
     if (!report) return;
     var html = '<html><head><title>Picking Report — ' + reportNo + '</title>' +
-        '<style>body{font-family:Arial,sans-serif;font-size:11px}table{width:100%;border-collapse:collapse;margin-top:20px}th,td{border:1px solid #ddd;padding:6px 8px;text-align:left}th{background:#00B882;color:#fff}h1{font-size:18px}p{color:#666;font-size:10px}.info{margin:10px 0}</style></head><body>' +
-        '<h1>VIP INDUSTRIES LIMITED MD20 — Picking Report</h1>' +
-        '<div class="info"><p>Report: <strong>' + escapeHtml(reportNo) + '</strong> | Picker: <strong>' + escapeHtml(report.pickerName) + '</strong> | Date: ' + formatDateTime(report.createdAt) + '</p></div>' +
-        '<table><thead><tr><th>Material</th><th>Description</th><th>Rack</th><th>EAN</th><th>Original Qty</th><th>Picked Qty</th><th>Packing</th><th>Box</th></tr></thead><tbody>';
+        '<style>body{font-family:Arial,sans-serif;font-size:12px;padding:20px}table{width:100%;border-collapse:collapse;margin-top:15px}th,td{border:1px solid #333;padding:6px 8px;text-align:left}th{background:#00B882;color:#fff;font-size:11px}h1{font-size:22px;margin:0;color:#333}p{color:#555;font-size:11px;margin:3px 0}.header-box{display:flex;justify-content:space-between;border-bottom:3px solid #00B882;padding-bottom:10px;margin-bottom:15px}</style></head><body>' +
+        '<div class="header-box"><div><h1>VIP INDUSTRY MD20</h1><p><strong>WMS — Picking Report</strong></p></div>' +
+        '<div style="text-align:right"><h2 style="color:#00B882;margin:0;font-size:24px">' + escapeHtml(reportNo) + '</h2>' +
+        '<p><strong>Customer:</strong> ' + escapeHtml(report.customer || 'N/A') + '</p>' +
+        '<p><strong>Picker:</strong> ' + escapeHtml(report.pickerName) + '</p>' +
+        '<p><strong>Date:</strong> ' + formatDateTime(report.createdAt) + '</p></div></div>' +
+        '<table><thead><tr><th>Rack</th><th>EAN</th><th>Material</th><th>Description</th><th>Qty</th><th>Packing</th><th>Box</th><th>Picked</th></tr></thead><tbody>';
     (report.items || []).forEach(function (item) {
-        html += '<tr><td>' + escapeHtml(item.material) + '</td><td>' + escapeHtml(item.description) + '</td><td>' + escapeHtml(item.rack) + '</td><td>' + escapeHtml(item.ean) + '</td><td>' + item.quantity + '</td><td>' + item.pickedQty + '</td><td>' + escapeHtml(item.packing) + '</td><td>' + escapeHtml(item.box) + '</td></tr>';
+        html += '<tr><td>' + escapeHtml(item.rack || '-') + '</td><td style="font-size:10px">' + escapeHtml(item.ean || '-') + '</td><td><strong>' + escapeHtml(item.material) + '</strong></td><td>' + escapeHtml(item.description) + '</td><td>' + item.quantity + '</td><td>' + escapeHtml(item.packing || '-') + '</td><td>' + escapeHtml(item.box || '-') + '</td><td><strong>' + item.pickedQty + '</strong></td></tr>';
     });
     html += '</tbody></table></body></html>';
     var w = window.open('', '_blank');

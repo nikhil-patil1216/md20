@@ -316,17 +316,22 @@ function seedData() {
 
 // ==================== AUTH ====================
 function login(username, password) {
-    // BACKGROUND SYNC (Login me ruka nahi jayega)
+    // STEP 1: FAST USER SYNC (Max 3 sec, phir local data se login)
     try {
         if (supabaseClient) {
-            supabaseClient.from('app_data').select('value').eq('key', 'users').single()
+            const userPromise = supabaseClient.from('app_data').select('value').eq('key', 'users');
+            const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 3000));
+            
+            Promise.race([userPromise, timeoutPromise])
             .then(({ data }) => {
-                if (data && data.value) localStorage.setItem('wms_users', JSON.stringify(data.value));
+                if (data && data.length > 0 && data[0].value) {
+                    localStorage.setItem('wms_users', JSON.stringify(data[0].value));
+                }
             }).catch(e => {});
         }
     } catch(e) {}
 
-    // TURANT LOCAL CHECK
+    // STEP 2: TURANT LOCAL LOGIN
     var users = DB.get('users');
     var user = users.find(function (u) { return u.username === username && u.password === password; });
     
@@ -336,27 +341,13 @@ function login(username, password) {
     APP.sessionStart = Date.now();
     localStorage.setItem('wms_session', JSON.stringify({ userId: user.id, loginTime: new Date().toISOString() }));
     logAction('Auth', 'LOGIN', 'User ' + user.name + ' logged in');
-    pullAllServerData(); // Background sync
+    
+    // STEP 3: BAAKI SAB DATA SYNC (Background me, hang nahi karega)
+    pullAllServerData(); 
+    
     return true;
 }
 
-function logout() {
-    if (APP.currentUser) logAction('Auth', 'LOGOUT', 'User ' + APP.currentUser.name + ' logged out');
-    APP.currentUser = null;
-    localStorage.removeItem('wms_session');
-    document.getElementById('mainApp').style.display = 'none';
-    document.getElementById('loginPage').style.display = 'flex';
-    document.getElementById('loginForm').reset();
-}
-function checkSession() {
-    var session = JSON.parse(localStorage.getItem('wms_session') || 'null');
-    if (!session) return false;
-    var user = DB.find('users', session.userId);
-    if (!user) return false;
-    APP.currentUser = user;
-    APP.sessionStart = new Date(session.loginTime).getTime();
-    return true;
-}
 function checkPermission(module) {
     if (!APP.currentUser) return false;
     if (APP.currentUser.permissions.modules.indexOf('all') > -1) return true;
@@ -367,16 +358,18 @@ function checkPermType(type) {
     if (APP.currentUser.role === 'Super Admin') return true;
     return APP.currentUser.permissions[type] || false;
 }
+
 // ==================== DYNAMIC SIDEBAR ====================
 // ==================== DYNAMIC SIDEBAR ====================
 function renderSidebar() {
     if (!APP.currentUser) return;
     var modules = [
         { id: 'dashboard', icon: 'bxs-dashboard', label: 'Dashboard', subs: [] },
-        { id: 'inbound', icon: 'bxs-truck', label: 'Inbound', subs: [
+               { id: 'inbound', icon: 'bxs-truck', label: 'Inbound', subs: [
             { id: 'vehicle-entry', label: 'Vehicle Entry' },
             { id: 'pending-vehicle', label: 'Pending Vehicle' },
-            { id: 'unload-process', label: 'Unload Process' }
+            { id: 'unload-process', label: 'Unload Process' },
+            { id: 'inbound-record', label: 'Inbound Record' } // <-- YEH LINE ADD KARO
         ]},
         { id: 'putaway', icon: 'bxs-package', label: 'Putaway', subs: [] },
         { id: 'piv', icon: 'bxs-clipboard', label: 'PIV', subs: [] },
@@ -465,6 +458,10 @@ function navigateTo(section, sub) {
     };
     var subNames = {
         'vehicle-entry': 'Vehicle Entry', 'pending-vehicle': 'Pending Vehicle', 'unload-process': 'Unload Process'
+    };
+        var subNames = {
+        'vehicle-entry': 'Vehicle Entry', 'pending-vehicle': 'Pending Vehicle', 'unload-process': 'Unload Process',
+        'inbound-record': 'Inbound Record' // <-- YEH LINE ADD KARO
     };
     var bc = 'VIP INDUSTRIES LIMITED MD20 <i class="bx bx-chevron-right"></i> <span class="bc-item active">' + (names[section] || section) + '</span>';
     if (sub) bc += ' <i class="bx bx-chevron-right"></i> <span class="bc-item active">' + (subNames[sub] || sub) + '</span>';
@@ -560,9 +557,11 @@ function renderInbound(sub) {
         container.innerHTML = tabBtns + renderPendingVehicles();
     } else if (sub === 'unload-process') {
         container.innerHTML = tabBtns + renderUnloadProcess();
+            } else if (sub === 'inbound-record') {
+        container.innerHTML = tabBtns + renderInboundRecord();
     }
-}
-
+    }
+    
 function renderVehicleEntryForm() {
     return '<div class="section-header"><h2><i class="bx bxs-truck"></i>Vehicle Entry</h2></div>' +
         '<div class="card" style="margin-bottom:20px"><div class="card-title">Vehicle Details</div>' +
@@ -827,6 +826,61 @@ function confirmUnload(invoiceId) {
     logAction('Inbound', 'UNLOAD', 'Invoice ' + invoiceId + ' unloaded');
     showToast('Unload processed successfully', 'success');
     loadUnloadInvoices();
+}
+function renderInboundRecord() {
+    return '<div class="section-header"><h2><i class="bx bx-search-alt-2"></i>Inbound Record</h2></div>' +
+        '<div class="card" style="margin-bottom:20px"><div class="form-row">' +
+        '<div class="form-group"><label>Search by Invoice No <span class="req">*</span></label>' +
+        '<input type="text" id="searchInvNo" class="form-input" placeholder="e.g. INV-2025-101">' +
+        '<button class="btn btn-primary btn-sm" style="margin-top:8px" onclick="loadInboundRecord()"><i class="bx bx-search"></i> Find Record</button></div>' +
+        '</div></div>' +
+        '<div id="inboundRecordData"></div>';
+}
+
+function loadInboundRecord() {
+    var invNo = document.getElementById('searchInvNo').value.trim();
+    if (!invNo) { showToast('Enter invoice number', 'error'); return; }
+    
+    var container = document.getElementById('inboundRecordData');
+    
+    // Invoice dhundho
+    var invoice = DB.get('invoices').find(function(inv) { return inv.invoiceNo.toLowerCase() === invNo.toLowerCase(); });
+    if (!invoice) { 
+        container.innerHTML = '<div class="card"><div class="empty-state"><i class="bx bx-error-circle"></i><p>Invoice "' + escapeHtml(invNo) + '" not found</p></div></div>';
+        return; 
+    }
+    
+    // Vehicle dhundho
+    var vehicle = DB.find('vehicles', invoice.vehicleId);
+    // Materials dhundho
+    var materials = DB.filter('invoice_materials', function(m) { return m.invoiceId === invoice.id; });
+    
+    var html = '<div class="card" style="border-left:4px solid var(--accent)">' +
+        '<div class="card-title">Vehicle & Invoice Details</div>' +
+        '<div class="form-row">' +
+        '<div class="form-group"><label>Vehicle No</label><div class="form-input" style="background:var(--bg-secondary)">' + escapeHtml(vehicle ? vehicle.vehicleNo : 'N/A') + '</div></div>' +
+        '<div class="form-group"><label>LR No</label><div class="form-input" style="background:var(--bg-secondary)">' + escapeHtml(vehicle ? vehicle.lrNo : 'N/A') + '</div></div>' +
+        '<div class="form-group"><label>Driver Name</label><div class="form-input" style="background:var(--bg-secondary)">' + escapeHtml(vehicle ? vehicle.driverName : 'N/A') + '</div></div>' +
+        '<div class="form-group"><label>Transport</label><div class="form-input" style="background:var(--bg-secondary)">' + escapeHtml(vehicle ? vehicle.transportName : 'N/A') + '</div></div>' +
+        '<div class="form-group"><label>Invoice Status</label><div class="form-input" style="background:var(--bg-secondary)"><span class="badge ' + (invoice.status === 'Unloaded' ? 'badge-success' : 'badge-warning') + '">' + escapeHtml(invoice.status) + '</span></div></div>' +
+        '</div></div>';
+        
+    html += '<div class="card" style="margin-top:16px"><div class="card-title">Materials (' + materials.length + ')</div>';
+    html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material Name</th><th>Invoice Qty</th><th>Unloaded Qty</th><th>Difference</th></tr></thead><tbody>';
+    
+    var totalInv = 0, totalUnloaded = 0;
+    materials.forEach(function(m) {
+        totalInv += m.qty;
+        totalUnloaded += m.unloadedQty;
+        var diff = m.unloadedQty - m.qty;
+        var diffHtml = diff === 0 ? '<span class="qty-match">Match</span>' : '<span class="qty-mismatch">' + (diff > 0 ? '+' : '') + diff + '</span>';
+        
+        html += '<tr><td><strong>' + escapeHtml(m.material) + '</strong></td><td>' + m.qty + '</td><td>' + m.unloadedQty + '</td><td>' + diffHtml + '</td></tr>';
+    });
+    
+    html += '</tbody><tfoot><tr style="font-weight:bold;border-top:2px solid var(--border-color)"><td>TOTAL</td><td>' + totalInv + '</td><td>' + totalUnloaded + '</td><td>' + (totalInv - totalUnloaded !== 0 ? '<span class="qty-mismatch">' + (totalUnloaded - totalInv) + '</span>' : '<span class="qty-match">Match</span>') + '</td></tr></tfoot></table></div></div>';
+
+    container.innerHTML = html;
 }
 
 // ==================== PUTAWAY ====================
@@ -2582,5 +2636,22 @@ function initApp() {
 document.addEventListener('DOMContentLoaded', initApp);
 
 // Jab page khule toh background me data download ho jaye
-pullAllServerData();
+async function pullAllServerData() {
+    if(!supabaseClient) return;
+    try {
+        const tables = ['users', 'location_master', 'material_master', 'rack_master', 'vehicles', 'invoices', 'invoice_materials', 'picking_reports', 'audit_log', 'notifications', 'difference_reports'];
+        for (let i = 0; i < tables.length; i++) {
+            let t = tables[i];
+            const { data } = await supabaseClient.from('app_data').select('value').eq('key', t);
+            if (data && data.length > 0 && data[0].value) {
+                localStorage.setItem('wms_' + t, JSON.stringify(data[0].value));
+            }
+        }
+        
+        // MAGIC: Jab data download ho jaye toh screen auto-update ho jaye
+        if (APP.currentUser && APP.currentSection) {
+            renderSection(APP.currentSection, APP.currentSub);
+        }
+    } catch(e) {}
+}
 

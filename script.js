@@ -2806,154 +2806,575 @@ function bulkUploadPIV(input) {
     input.value = '';
 }
 
-// ==================== LOCATION MASTER / BIN MASTER ====================
+// ==================== LOCATION MASTER ====================
 function renderLocationMaster() {
-    var allLocs = DB.get('location_master').slice().reverse();
+    var locations = DB.get('location_master');
+    var search = document.getElementById('locSearchInput') ? document.getElementById('locSearchInput').value.trim().toLowerCase() : '';
+    var filterRack = document.getElementById('locRackFilter') ? document.getElementById('locRackFilter').value : '';
+    var filterAction = document.getElementById('locActionFilter') ? document.getElementById('locActionFilter').value : '';
 
-    // Filters
-    var filterAction = '', filterMaterial = '', filterRack = '', filterDate = '';
-    var fActionEl = document.getElementById('locFilterAction');
-    var fMatEl = document.getElementById('locFilterMaterial');
-    var fRackEl = document.getElementById('locFilterRack');
-    var fDateEl = document.getElementById('locFilterDate');
-    if (fActionEl) filterAction = fActionEl.value;
-    if (fMatEl) filterMaterial = fMatEl.value.trim().toLowerCase();
-    if (fRackEl) filterRack = fRackEl.value;
-    if (fDateEl) filterDate = fDateEl.value;
+    // Apply filters
+    var filtered = locations;
+    if (search) {
+        filtered = filtered.filter(function(l) {
+            return (l.rack || '').toLowerCase().indexOf(search) > -1 ||
+                (l.material || '').toLowerCase().indexOf(search) > -1 ||
+                (l.ean || '').toLowerCase().indexOf(search) > -1 ||
+                (l.description || '').toLowerCase().indexOf(search) > -1 ||
+                String(l.quantity || '').indexOf(search) > -1;
+        });
+    }
+    if (filterRack) {
+        filtered = filtered.filter(function(l) { return l.rack === filterRack; });
+    }
+    if (filterAction) {
+        filtered = filtered.filter(function(l) { return l.action === filterAction; });
+    }
 
-    var filtered = allLocs;
-    if (filterAction) filtered = filtered.filter(function(l) { return l.action === filterAction; });
-    if (filterMaterial) filtered = filtered.filter(function(l) { return (l.material || '').toLowerCase().indexOf(filterMaterial) > -1; });
-    if (filterRack) filtered = filtered.filter(function(l) { return l.rack === filterRack; });
-    if (filterDate) filtered = filtered.filter(function(l) { return l.date === filterDate; });
+    // Sort newest first
+    filtered.sort(function(a, b) { return new Date(b.createdAt || b.dateTime || 0) - new Date(a.createdAt || a.dateTime || 0); });
 
     var pg = paginate(filtered, APP.locPage, APP.locPerPage);
-
-    // Get all unique racks for filter
-    var rackSet = {};
-    for (var i = 0; i < allLocs.length; i++) { rackSet[allLocs[i].rack] = true; }
-    var rackOptions = Object.keys(rackSet).sort();
-
-    var html = '<div class="section-header"><h2><i class="bx bxs-map-pin"></i> Location Master (Bin Master)</h2>';
-    html += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
-    html += '<label class="btn btn-warning btn-sm" style="cursor:pointer"><i class="bx bx-upload"></i> Bulk Upload<input type="file" accept=".xlsx,.xls,.csv" style="display:none" onchange="bulkUploadLocation(this)"></label>';
-    html += '<button class="btn btn-secondary btn-sm" onclick="exportLocationExcel()"><i class="bx bx-download"></i> Export Excel</button>';
-    html += '</div></div>';
-
-    // Filter bar
-    html += '<div class="card" style="margin-bottom:16px"><div class="form-row">';
-    html += '<div class="form-group"><label>Action</label><select id="locFilterAction" class="form-input" onchange="APP.locPage=1;renderLocationMaster()"><option value="">All</option><option value="PUTAWAY"' + (filterAction === 'PUTAWAY' ? ' selected' : '') + '>Putaway</option><option value="PIV"' + (filterAction === 'PIV' ? ' selected' : '') + '>PIV</option></select></div>';
-    html += '<div class="form-group"><label>Material Search</label><input type="text" id="locFilterMaterial" class="form-input" placeholder="Material name..." value="' + escapeHtml(filterMaterial) + '" onkeydown="if(event.key===\'Enter\'){APP.locPage=1;renderLocationMaster()}"></div>';
-    html += '<div class="form-group"><label>Rack</label><select id="locFilterRack" class="form-input" onchange="APP.locPage=1;renderLocationMaster()"><option value="">All Racks</option>';
-    for (var ro = 0; ro < rackOptions.length; ro++) {
-        html += '<option value="' + escapeHtml(rackOptions[ro]) + '"' + (filterRack === rackOptions[ro] ? ' selected' : '') + '>' + escapeHtml(rackOptions[ro]) + '</option>';
+    var racks = DB.get('rack_master');
+    var rackOptions = '<option value="">All Racks</option>';
+    for (var r = 0; r < racks.length; r++) {
+        rackOptions += '<option value="' + escapeHtml(racks[r].rack) + '"' + (filterRack === racks[r].rack ? ' selected' : '') + '>' + escapeHtml(racks[r].rack) + '</option>';
     }
-    html += '</select></div>';
-    html += '<div class="form-group"><label>Date</label><input type="date" id="locFilterDate" class="form-input" value="' + escapeHtml(filterDate) + '" onchange="APP.locPage=1;renderLocationMaster()"></div>';
+
+    // Total quantity in warehouse
+    var totalQty = 0;
+    for (var tq = 0; tq < locations.length; tq++) {
+        totalQty += (Number(locations[tq].quantity) || 0);
+    }
+
+    var html = '<div class="section-header"><h2><i class="bx bxs-map-pin"></i> Location Master</h2>';
+    html += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
+    html += '<button class="btn btn-primary" onclick="showAddLocationForm()"><i class="bx bx-plus"></i> Add Location</button>';
+    html += '<button class="btn btn-warning" onclick="showBulkLocationUpload()"><i class="bx bx-upload"></i> Bulk Upload</button>';
+    html += '<button class="btn btn-secondary" onclick="exportLocationMaster()"><i class="bx bx-download"></i> Export Excel</button>';
     html += '</div></div>';
 
-    // Summary KPIs
-    var putawayCount = allLocs.filter(function(l) { return l.action === 'PUTAWAY'; }).length;
-    var pivCount = allLocs.filter(function(l) { return l.action === 'PIV'; }).length;
-    var totalQty = 0;
-    for (var tq = 0; tq < allLocs.length; tq++) { totalQty += (allLocs[tq].quantity || 0); }
-    html += '<div class="kpi-grid" style="margin-bottom:16px">';
-    html += kpiCard('bxs-package', putawayCount, 'Putaway Entries');
-    html += kpiCard('bxs-clipboard', pivCount, 'PIV Entries');
-    html += kpiCard('bx-cube', totalQty, 'Total Qty in Bin');
-    html += kpiCard('bx-filter', filtered.length, 'Filtered Results');
+    // KPI row
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;margin-bottom:20px">';
+    html += '<div class="kpi-card"><div class="kpi-value">' + locations.length + '</div><div class="kpi-label">Total Records</div></div>';
+    html += '<div class="kpi-card"><div class="kpi-value">' + totalQty + '</div><div class="kpi-label">Total Quantity</div></div>';
+    html += '<div class="kpi-card"><div class="kpi-value">' + (filtered.length) + '</div><div class="kpi-label">Filtered Records</div></div>';
     html += '</div>';
 
-    // Data table
-    html += '<div class="card"><div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>Date</th><th>EAN</th><th>Material</th><th>Description</th><th>Qty</th><th>Packing</th><th>Box</th><th>Rack</th><th>Action</th><th>User</th><th>Delete</th></tr></thead><tbody>';
+    // Filters
+    html += '<div class="card" style="margin-bottom:16px"><div style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">';
+    html += '<div class="form-group" style="flex:1;min-width:200px"><label>Search</label><input type="text" id="locSearchInput" class="form-input" placeholder="Rack, Material, EAN, Qty..." value="' + escapeHtml(search) + '" oninput="APP.locPage=1;renderLocationMaster()"></div>';
+    html += '<div class="form-group" style="min-width:160px"><label>Rack</label><select id="locRackFilter" class="form-input" onchange="APP.locPage=1;renderLocationMaster()">' + rackOptions + '</select></div>';
+    html += '<div class="form-group" style="min-width:130px"><label>Action</label><select id="locActionFilter" class="form-input" onchange="APP.locPage=1;renderLocationMaster()"><option value="">All</option><option value="PUTAWAY"' + (filterAction === 'PUTAWAY' ? ' selected' : '') + '>PUTAWAY</option><option value="PIV"' + (filterAction === 'PIV' ? ' selected' : '') + '>PIV</option></select></div>';
+    html += '<button class="btn btn-sm btn-secondary" onclick="APP.locPage=1;document.getElementById(\'locSearchInput\').value=\'\';document.getElementById(\'locRackFilter\').value=\'\';document.getElementById(\'locActionFilter\').value=\'\';renderLocationMaster()"><i class="bx bx-refresh"></i> Clear</button>';
+    html += '</div></div>';
+
+    // Table
+    html += '<div class="card"><div class="card-title">Location Records (' + pg.total + ')</div><div class="table-wrapper"><table class="data-table"><thead><tr>';
+    html += '<th>#</th><th>Date</th><th>Rack</th><th>EAN</th><th>Material</th><th>Description</th><th style="color:var(--accent);font-weight:800">Qty</th><th>Packing</th><th>Box</th><th>Action</th><th>User</th><th>Actions</th>';
+    html += '</tr></thead><tbody>';
     if (pg.items.length === 0) {
-        html += '<tr><td colspan="12" style="text-align:center;color:var(--text-muted);padding:30px">No data found</td></tr>';
+        html += '<tr><td colspan="12" style="text-align:center;color:var(--text-muted);padding:40px"><i class="bx bx-inbox" style="font-size:32px;display:block;margin-bottom:8px"></i>No location records found</td></tr>';
     } else {
-        for (var j = 0; j < pg.items.length; j++) {
-            var loc = pg.items[j];
-            var globalIdx = (APP.locPage - 1) * APP.locPerPage + j + 1;
-            html += '<tr><td>' + globalIdx + '</td><td style="font-size:11px">' + escapeHtml(loc.date) + '</td>';
-            html += '<td style="font-family:var(--font-display);font-size:10px">' + escapeHtml(loc.ean) + '</td>';
-            html += '<td>' + escapeHtml(loc.material) + '</td>';
-            html += '<td style="font-size:12px;color:var(--text-secondary);max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(loc.description) + '</td>';
-            html += '<td><strong>' + loc.quantity + '</strong></td><td>' + escapeHtml(loc.packing) + '</td><td>' + escapeHtml(loc.box) + '</td>';
-            html += '<td><span class="badge badge-accent">' + escapeHtml(loc.rack) + '</span></td>';
-            html += '<td><span class="badge ' + (loc.action === 'PUTAWAY' ? 'badge-success' : 'badge-info') + '">' + escapeHtml(loc.action) + '</span></td>';
-            html += '<td style="font-size:11px">' + escapeHtml(loc.user) + '</td>';
-            html += '<td><button class="btn-icon danger" onclick="deleteLocation(\'' + loc.id + '\')"><i class="bx bx-trash"></i></button></td></tr>';
+        for (var i = 0; i < pg.items.length; i++) {
+            var l = pg.items[i];
+            var rowNum = (APP.locPage - 1) * APP.locPerPage + i + 1;
+            var qtyVal = Number(l.quantity) || 0;
+            var qtyClass = qtyVal > 0 ? 'qty-match' : 'qty-mismatch';
+            html += '<tr>';
+            html += '<td>' + rowNum + '</td>';
+            html += '<td style="font-size:12px">' + escapeHtml(l.date || '-') + '</td>';
+            html += '<td><strong style="color:var(--accent)">' + escapeHtml(l.rack || '-') + '</strong></td>';
+            html += '<td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(l.ean || '-') + '</td>';
+            html += '<td>' + escapeHtml(l.material || '-') + '</td>';
+            html += '<td style="font-size:12px;color:var(--text-secondary)">' + escapeHtml(l.description || '-') + '</td>';
+            html += '<td class="' + qtyClass + '" style="font-size:16px;font-weight:800">' + qtyVal + '</td>';
+            html += '<td>' + escapeHtml(l.packing || '-') + '</td>';
+            html += '<td>' + escapeHtml(l.box || '-') + '</td>';
+            html += '<td><span class="badge badge-' + (l.action === 'PUTAWAY' ? 'success' : 'info') + '">' + escapeHtml(l.action || '-') + '</span></td>';
+            html += '<td style="font-size:12px;color:var(--text-muted)">' + escapeHtml(l.user || '-') + '</td>';
+            html += '<td><div class="table-actions">';
+            html += '<button class="btn-icon" title="Edit" onclick="showEditLocation(\'' + l.id + '\')"><i class="bx bx-edit"></i></button>';
+            html += '<button class="btn-icon danger" title="Delete" onclick="deleteLocation(\'' + l.id + '\')"><i class="bx bx-trash"></i></button>';
+            html += '</div></td>';
+            html += '</tr>';
         }
     }
     html += '</tbody></table></div>';
-    html += renderPagination(pg.pages, APP.locPage, 'goLocPage');
+    html += renderPagination(APP.locPage, pg.pages, 'goLocPage');
     html += '</div>';
 
-    // Bulk upload format info
-    html += '<div class="card" style="margin-top:16px"><div class="card-title">Bulk Upload Format (Excel)</div>';
-    html += '<div style="background:var(--bg-secondary);padding:12px;border-radius:6px;font-size:12px;color:var(--text-muted);border:1px dashed var(--warning)">';
-    html += '<strong style="color:var(--warning)">Column Order:</strong> Date | EAN | Material | Description | Qty | Packing | Box<br>';
-    html += '<strong>Note:</strong> Action will be set to "PUTAWAY" for bulk uploads. User will be set to current logged-in user.</div></div>';
-
-    document.getElementById('section-location').innerHTML = html;
+    var sec = document.getElementById('section-location');
+    if (sec) sec.innerHTML = html;
 }
 
-function goLocPage(p) { APP.locPage = p; renderLocationMaster(); }
-
-function deleteLocation(id) {
-    if (!confirm('Delete this bin entry?')) return;
-    DB.remove('location_master', id);
-    logAction('Location', 'DELETE', 'Deleted bin entry');
-    showToast('Deleted', 'info');
+function goLocPage(p) {
+    if (p < 1) return;
+    APP.locPage = p;
     renderLocationMaster();
 }
 
-function bulkUploadLocation(input) {
-    if (!input.files[0]) return;
+// --- ADD SINGLE LOCATION ---
+function showAddLocationForm() {
+    var racks = DB.get('rack_master');
+    var materials = DB.get('material_master');
+    var rackOpts = '<option value="">-- Select Rack --</option>';
+    for (var r = 0; r < racks.length; r++) {
+        rackOpts += '<option value="' + escapeHtml(racks[r].rack) + '">' + escapeHtml(racks[r].rack) + '</option>';
+    }
+    var matOpts = '<option value="">-- Select Material --</option>';
+    for (var m = 0; m < materials.length; m++) {
+        matOpts += '<option value="' + escapeHtml(materials[m].material) + '" data-ean="' + escapeHtml(materials[m].ean || '') + '" data-desc="' + escapeHtml(materials[m].description || '') + '">' + escapeHtml(materials[m].material) + ' (' + escapeHtml(materials[m].ean || 'No EAN') + ')</option>';
+    }
+    var html = '<div class="form-row">';
+    html += '<div class="form-group"><label>Date <span class="req">*</span></label><input type="date" id="locFormDate" class="form-input" value="' + today() + '"></div>';
+    html += '<div class="form-group"><label>Rack <span class="req">*</span></label><select id="locFormRack" class="form-input">' + rackOpts + '</select></div>';
+    html += '<div class="form-group"><label>Material <span class="req">*</span></label><select id="locFormMaterial" class="form-input" onchange="onLocMaterialChange()">' + matOpts + '</select></div>';
+    html += '</div>';
+    html += '<div class="form-row">';
+    html += '<div class="form-group"><label>EAN</label><input type="text" id="locFormEan" class="form-input" placeholder="Auto-filled or scan" readonly style="background:var(--bg-secondary)"></div>';
+    html += '<div class="form-group"><label>Description</label><input type="text" id="locFormDesc" class="form-input" placeholder="Auto-filled" readonly style="background:var(--bg-secondary)"></div>';
+    html += '<div class="form-group"><label>Quantity <span class="req">*</span></label><input type="number" id="locFormQty" class="form-input" placeholder="Enter quantity" min="0" style="font-size:18px;font-weight:800;color:var(--accent)"></div>';
+    html += '</div>';
+    html += '<div class="form-row">';
+    html += '<div class="form-group"><label>Packing</label><input type="text" id="locFormPacking" class="form-input" placeholder="e.g. Bag, Box, Bottle"></div>';
+    html += '<div class="form-group"><label>Box No</label><input type="text" id="locFormBox" class="form-input" placeholder="e.g. B001"></div>';
+    html += '<div class="form-group"><label>Action <span class="req">*</span></label><select id="locFormAction" class="form-input"><option value="PUTAWAY">PUTAWAY</option><option value="PIV">PIV</option></select></div>';
+    html += '</div>';
+    showModal('<i class="bx bx-plus-circle"></i> Add Location', html, 'lg',
+        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+        '<button class="btn btn-primary" onclick="saveLocation()"><i class="bx bx-check-circle"></i> Save Location</button>');
+}
+
+function onLocMaterialChange() {
+    var sel = document.getElementById('locFormMaterial');
+    if (sel && sel.selectedOptions[0]) {
+        var opt = sel.selectedOptions[0];
+        document.getElementById('locFormEan').value = opt.getAttribute('data-ean') || '';
+        document.getElementById('locFormDesc').value = opt.getAttribute('data-desc') || '';
+    }
+}
+
+function saveLocation() {
+    var date = document.getElementById('locFormDate').value;
+    var rack = document.getElementById('locFormRack').value;
+    var material = document.getElementById('locFormMaterial').value;
+    var ean = document.getElementById('locFormEan').value.trim();
+    var desc = document.getElementById('locFormDesc').value.trim();
+    var qtyRaw = document.getElementById('locFormQty').value;
+    var packing = document.getElementById('locFormPacking').value.trim();
+    var box = document.getElementById('locFormBox').value.trim();
+    var action = document.getElementById('locFormAction').value;
+
+    if (!date || !rack || !material) { showToast('Date, Rack and Material are required', 'error'); return; }
+
+    // FIX: Robust quantity parsing
+    var qty = Number(qtyRaw);
+    if (isNaN(qty) || qtyRaw === '') { showToast('Enter a valid quantity', 'error'); return; }
+    if (qty < 0) { showToast('Quantity cannot be negative', 'error'); return; }
+
+    // Check if same rack+ean already exists — if yes, add to quantity
+    var existing = DB.filter('location_master', function(l) {
+        return l.rack === rack && l.ean === ean && ean !== '';
+    });
+
+    if (existing.length > 0) {
+        var oldQty = Number(existing[0].quantity) || 0;
+        DB.update('location_master', existing[0].id, { quantity: oldQty + qty, date: date, packing: packing, box: box, action: action, user: APP.currentUser ? APP.currentUser.name : 'Admin' });
+        logAction('Location Master', 'UPDATE_QTY', 'Added ' + qty + ' to ' + rack + ' / ' + material + '. New qty: ' + (oldQty + qty));
+        showToast('Quantity updated! ' + rack + ' now has ' + (oldQty + qty) + ' units', 'success');
+    } else {
+        DB.add('location_master', {
+            date: date, rack: rack, ean: ean, material: material, description: desc,
+            quantity: qty, packing: packing, box: box, action: action,
+            user: APP.currentUser ? APP.currentUser.name : 'Admin',
+            dateTime: new Date().toISOString()
+        });
+        logAction('Location Master', 'ADD', 'Added ' + material + ' at ' + rack + ', Qty: ' + qty);
+        showToast('Location added successfully! Qty: ' + qty, 'success');
+    }
+    closeModal();
+    renderLocationMaster();
+}
+
+// --- EDIT LOCATION ---
+function showEditLocation(id) {
+    var l = DB.find('location_master', id);
+    if (!l) { showToast('Record not found', 'error'); return; }
+    var racks = DB.get('rack_master');
+    var rackOpts = '<option value="">-- Select Rack --</option>';
+    for (var r = 0; r < racks.length; r++) {
+        rackOpts += '<option value="' + escapeHtml(racks[r].rack) + '"' + (l.rack === racks[r].rack ? ' selected' : '') + '>' + escapeHtml(racks[r].rack) + '</option>';
+    }
+    var html = '<div class="form-row">';
+    html += '<div class="form-group"><label>Date</label><input type="date" id="editLocDate" class="form-input" value="' + escapeHtml(l.date || '') + '"></div>';
+    html += '<div class="form-group"><label>Rack</label><select id="editLocRack" class="form-input">' + rackOpts + '</select></div>';
+    html += '<div class="form-group"><label>EAN</label><input type="text" id="editLocEan" class="form-input" value="' + escapeHtml(l.ean || '') + '"></div>';
+    html += '</div>';
+    html += '<div class="form-row">';
+    html += '<div class="form-group"><label>Material</label><input type="text" id="editLocMaterial" class="form-input" value="' + escapeHtml(l.material || '') + '"></div>';
+    html += '<div class="form-group"><label>Description</label><input type="text" id="editLocDesc" class="form-input" value="' + escapeHtml(l.description || '') + '"></div>';
+    html += '<div class="form-group"><label>Quantity <span class="req">*</span></label><input type="number" id="editLocQty" class="form-input" value="' + (Number(l.quantity) || 0) + '" min="0" style="font-size:18px;font-weight:800;color:var(--accent)"></div>';
+    html += '</div>';
+    html += '<div class="form-row">';
+    html += '<div class="form-group"><label>Packing</label><input type="text" id="editLocPacking" class="form-input" value="' + escapeHtml(l.packing || '') + '"></div>';
+    html += '<div class="form-group"><label>Box No</label><input type="text" id="editLocBox" class="form-input" value="' + escapeHtml(l.box || '') + '"></div>';
+    html += '<div class="form-group"><label>Action</label><select id="editLocAction" class="form-input"><option value="PUTAWAY"' + (l.action === 'PUTAWAY' ? ' selected' : '') + '>PUTAWAY</option><option value="PIV"' + (l.action === 'PIV' ? ' selected' : '') + '>PIV</option></select></div>';
+    html += '</div>';
+    showModal('<i class="bx bx-edit"></i> Edit Location', html, 'lg',
+        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+        '<button class="btn btn-primary" onclick="updateLocation(\'' + id + '\')"><i class="bx bx-check-circle"></i> Update</button>');
+}
+
+function updateLocation(id) {
+    var qtyRaw = document.getElementById('editLocQty').value;
+    var qty = Number(qtyRaw);
+    if (isNaN(qty) || qtyRaw === '') { showToast('Enter a valid quantity', 'error'); return; }
+    if (qty < 0) { showToast('Quantity cannot be negative', 'error'); return; }
+
+    DB.update('location_master', id, {
+        date: document.getElementById('editLocDate').value,
+        rack: document.getElementById('editLocRack').value,
+        ean: document.getElementById('editLocEan').value.trim(),
+        material: document.getElementById('editLocMaterial').value.trim(),
+        description: document.getElementById('editLocDesc').value.trim(),
+        quantity: qty,
+        packing: document.getElementById('editLocPacking').value.trim(),
+        box: document.getElementById('editLocBox').value.trim(),
+        action: document.getElementById('editLocAction').value,
+        user: APP.currentUser ? APP.currentUser.name : 'Admin'
+    });
+    logAction('Location Master', 'EDIT', 'Updated location id=' + id + ', Qty set to: ' + qty);
+    showToast('Location updated! Qty: ' + qty, 'success');
+    closeModal();
+    renderLocationMaster();
+}
+
+// --- DELETE LOCATION ---
+function deleteLocation(id) {
+    var l = DB.find('location_master', id);
+    if (!l) return;
+    showModal('<i class="bx bx-trash" style="color:var(--danger)"></i> Delete Location',
+        '<p>Are you sure you want to delete this location record?</p>' +
+        '<div style="background:var(--bg-secondary);padding:12px;border-radius:8px;margin-top:12px;font-size:13px">' +
+        '<strong>Rack:</strong> ' + escapeHtml(l.rack) + '<br>' +
+        '<strong>Material:</strong> ' + escapeHtml(l.material) + '<br>' +
+        '<strong>Qty:</strong> <span style="color:var(--danger);font-weight:800">' + (Number(l.quantity) || 0) + '</span></div>',
+        'sm',
+        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+        '<button class="btn btn-danger" onclick="confirmDeleteLocation(\'' + id + '\')"><i class="bx bx-trash"></i> Delete</button>');
+}
+
+function confirmDeleteLocation(id) {
+    DB.remove('location_master', id);
+    logAction('Location Master', 'DELETE', 'Deleted location id=' + id);
+    showToast('Location deleted', 'success');
+    closeModal();
+    renderLocationMaster();
+}
+
+// ==================== BULK UPLOAD — FIXED QTY ISSUE ====================
+function showBulkLocationUpload() {
+    var html = '<div style="margin-bottom:16px">';
+    html += '<div class="form-group"><label>Upload Bulk Data (Excel) <span class="req">*</span></label>';
+    html += '<label class="btn btn-warning btn-sm" style="cursor:pointer"><i class="bx bx-upload"></i> Choose File';
+    html += '<input type="file" id="bulkLocFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="document.getElementById(\'bulkLocName\').innerText=this.files[0].name;document.getElementById(\'bulkLocPreviewBtn\').disabled=false"></label>';
+    html += '<div id="bulkLocName" style="font-size:12px;color:var(--text-muted);margin-top:5px">No file chosen</div></div>';
+    html += '<button id="bulkLocPreviewBtn" class="btn btn-secondary btn-sm" disabled onclick="previewBulkLocation()"><i class="bx bx-eye"></i> Preview Data</button>';
+    html += '</div>';
+
+    html += '<div style="background:var(--bg-secondary);padding:14px;border-radius:8px;font-size:12px;color:var(--text-muted);border:1px dashed var(--warning);margin-bottom:16px">';
+    html += '<strong style="color:var(--warning)"><i class="bx bx-info-circle"></i> Excel Format (Row 1 = Header):</strong><br>';
+    html += '<code style="display:block;margin-top:6px;padding:8px;background:var(--bg-input);border-radius:4px;font-size:11px;color:var(--accent)">';
+    html += 'Date | Rack | EAN | Material | Description | Quantity | Packing | Box | Action';
+    html += '</code><br>';
+    html += '<strong>Important:</strong> Column names must match exactly (case-insensitive).<br>';
+    html += 'Quantity column must contain numbers only (no text/spaces).<br>';
+    html += 'If same Rack+EAN exists, quantities will be ADDED to existing record.';
+    html += '</div>';
+
+    html += '<div id="bulkLocPreviewArea"></div>';
+
+    showModal('<i class="bx bx-upload"></i> Bulk Upload Location Master', html, 'lg',
+        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+        '<button id="bulkLocConfirmBtn" class="btn btn-primary" disabled onclick="confirmBulkLocationUpload()"><i class="bx bx-check-double"></i> Confirm Upload</button>');
+}
+
+// Store parsed bulk data globally for confirm step
+var _bulkLocParsedData = [];
+
+function previewBulkLocation() {
+    var fileInput = document.getElementById('bulkLocFile');
+    if (!fileInput || !fileInput.files[0]) { showToast('Select a file first', 'error'); return; }
+
     var reader = new FileReader();
     reader.onload = function(e) {
         try {
             var wb = XLSX.read(e.target.result, { type: 'array' });
             var ws = wb.Sheets[wb.SheetNames[0]];
-            var data = XLSX.utils.sheet_to_json(ws, { header: 1 });
-            if (data.length === 0) { showToast('Empty file', 'error'); return; }
-            var startRow = (String(data[0][0] || '').toLowerCase().indexOf('ean') > -1 || String(data[0][0] || '').toLowerCase().indexOf('date') > -1) ? 1 : 0;
-            var count = 0;
-            for (var k = startRow; k < data.length; k++) {
-                var r = data[k]; if (!r || !r[1]) continue;
-                DB.add('location_master', {
-                    date: String(r[0] || today()), ean: String(r[1] || '').trim(),
-                    material: String(r[2] || '').trim(), description: String(r[3] || '').trim(),
-                    quantity: parseInt(r[4]) || 0, packing: String(r[5] || 'Bag').trim(),
-                    box: String(r[6] || '-').trim(), rack: String(r[7] || 'UNASSIGNED').trim(),
-                    action: 'PUTAWAY', user: APP.currentUser ? APP.currentUser.name : 'System',
-                    dateTime: new Date().toISOString()
-                });
-                count++;
+            var rawData = XLSX.utils.sheet_to_json(ws, { header: 1 });
+
+            if (rawData.length < 2) { showToast('File has no data rows (need header + at least 1 row)', 'error'); return; }
+
+            // ===== FIX: Dynamic column mapping from header =====
+            var headerRow = rawData[0].map(function(h) { return String(h || '').trim().toLowerCase().replace(/[^a-z0-9]/g, ''); });
+            var colMap = {};
+            var possibleColumns = {
+                date: ['date', 'dt', 'datee'],
+                rack: ['rack', 'rackno', 'rackno', 'racknumber'],
+                ean: ['ean', 'eancode', 'barcode', 'bar-code', 'scancode'],
+                material: ['material', 'materialcode', 'materialcode', 'matcode', 'materialname', 'item', 'itemcode', 'product'],
+                description: ['description', 'desc', 'description', 'materialdesc', 'itemdesc', 'productdesc'],
+                quantity: ['quantity', 'qty', 'quantity', 'qty', 'quant', 'amount', 'units', 'stock', 'balance', 'qty', 'qty'],
+                packing: ['packing', 'pack', 'packingtype', 'uom', 'unit'],
+                box: ['box', 'boxno', 'boxnumber', 'boxno', 'carton', 'cartonno'],
+                action: ['action', 'actiontype', 'type', 'transactiontype']
+            };
+
+            // Map each field to the first matching column index
+            for (var field in possibleColumns) {
+                var aliases = possibleColumns[field];
+                for (var a = 0; a < aliases.length; a++) {
+                    var idx = headerRow.indexOf(aliases[a]);
+                    if (idx > -1) {
+                        colMap[field] = idx;
+                        break;
+                    }
+                }
             }
-            logAction('Location', 'BULK_UPLOAD', 'Bulk uploaded ' + count + ' entries');
-            showToast('Bulk upload: ' + count + ' entries!', 'success');
-            renderLocationMaster();
-        } catch(err) { showToast('Error: ' + err.message, 'error'); }
-    };
-    reader.readAsArrayBuffer(input.files[0]);
-    input.value = '';
-}
 
-function exportLocationExcel() {
-    try {
-        var locs = DB.get('location_master');
-        var wsData = [['Date', 'EAN', 'Material', 'Description', 'Qty', 'Packing', 'Box', 'Rack', 'Action', 'User']];
-        for (var i = 0; i < locs.length; i++) {
-            var l = locs[i];
-            wsData.push([l.date, l.ean, l.material, l.description, l.quantity, l.packing, l.box, l.rack, l.action, l.user]);
+            // Log mapping for debugging
+            console.log('=== BULK LOCATION COLUMN MAPPING ===');
+            console.log('Header row:', rawData[0]);
+            console.log('Normalized:', headerRow);
+            console.log('Column map:', colMap);
+
+            // Check critical columns
+            if (colMap.rack === undefined) {
+                showToast('ERROR: "Rack" column not found in header! Found columns: ' + rawData[0].join(', '), 'error');
+                return;
+            }
+
+            // Parse data rows
+            _bulkLocParsedData = [];
+            var errors = [];
+            for (var k = 1; k < rawData.length; k++) {
+                var r = rawData[k];
+                if (!r || r.length === 0) continue;
+
+                // Skip completely empty rows
+                var hasData = false;
+                for (var ci = 0; ci < r.length; ci++) {
+                    if (r[ci] !== null && r[ci] !== undefined && String(r[ci]).trim() !== '') { hasData = true; break; }
+                }
+                if (!hasData) continue;
+
+                // ===== FIX: Robust quantity parsing =====
+                var rawQty = (colMap.quantity !== undefined) ? r[colMap.quantity] : 0;
+                var parsedQty = 0;
+
+                if (rawQty !== null && rawQty !== undefined && String(rawQty).trim() !== '') {
+                    // Remove any non-numeric characters except dot and minus
+                    var cleanQtyStr = String(rawQty).replace(/[^\d.\-]/g, '').trim();
+                    parsedQty = Number(cleanQtyStr);
+                    if (isNaN(parsedQty)) parsedQty = 0;
+                    // Ensure non-negative
+                    if (parsedQty < 0) parsedQty = 0;
+                }
+
+                var row = {
+                    date: colMap.date !== undefined ? String(r[colMap.date] || '').trim() : today(),
+                    rack: colMap.rack !== undefined ? String(r[colMap.rack] || '').trim() : '',
+                    ean: colMap.ean !== undefined ? String(r[colMap.ean] || '').trim() : '',
+                    material: colMap.material !== undefined ? String(r[colMap.material] || '').trim() : '',
+                    description: colMap.description !== undefined ? String(r[colMap.description] || '').trim() : '',
+                    quantity: parsedQty,
+                    packing: colMap.packing !== undefined ? String(r[colMap.packing] || '').trim() : '',
+                    box: colMap.box !== undefined ? String(r[colMap.box] || '').trim() : '',
+                    action: colMap.action !== undefined ? String(r[colMap.action] || '').trim().toUpperCase() : 'PUTAWAY'
+                };
+
+                // Validate action
+                if (row.action !== 'PUTAWAY' && row.action !== 'PIV') row.action = 'PUTAWAY';
+
+                // Validate date format
+                if (row.date && row.date.indexOf('/') > -1) {
+                    var parts = row.date.split('/');
+                    if (parts.length === 3) {
+                        // Try DD/MM/YYYY
+                        var tryDate = new Date(parts[2], parts[1] - 1, parts[0]);
+                        if (!isNaN(tryDate.getTime())) {
+                            row.date = tryDate.toISOString().split('T')[0];
+                        }
+                    }
+                } else if (row.date && row.date.indexOf('-') === -1) {
+                    // Might be Excel serial date
+                    var excelDate = Number(row.date);
+                    if (!isNaN(excelDate) && excelDate > 40000 && excelDate < 60000) {
+                        var jsDate = new Date((excelDate - 25569) * 86400 * 1000);
+                        row.date = jsDate.toISOString().split('T')[0];
+                    }
+                }
+                if (!row.date || row.date === 'undefined' || row.date === 'NaN-NaN-NaN') row.date = today();
+
+                if (!row.rack) {
+                    errors.push('Row ' + (k + 1) + ': Rack is empty — skipped');
+                    continue;
+                }
+
+                _bulkLocParsedData.push(row);
+            }
+
+            if (_bulkLocParsedData.length === 0) {
+                showToast('No valid data rows found! ' + (errors.length > 0 ? 'Errors: ' + errors[0] : 'Check your Excel format.'), 'error');
+                return;
+            }
+
+            // Show preview table
+            var previewHtml = '<div style="margin-top:12px">';
+            previewHtml += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
+            previewHtml += '<strong style="color:var(--accent)"><i class="bx bx-check-circle"></i> Preview: ' + _bulkLocParsedData.length + ' rows parsed</strong>';
+            previewHtml += '<span style="font-size:12px;color:var(--text-muted)">Column Map: ' + JSON.stringify(colMap) + '</span>';
+            previewHtml += '</div>';
+
+            if (errors.length > 0) {
+                previewHtml += '<div style="background:var(--warning-dim);padding:8px 12px;border-radius:6px;margin-bottom:8px;font-size:11px;color:var(--warning)">';
+                previewHtml += '<strong>Warnings:</strong><br>';
+                for (var ei = 0; ei < Math.min(errors.length, 5); ei++) {
+                    previewHtml += '• ' + escapeHtml(errors[ei]) + '<br>';
+                }
+                if (errors.length > 5) previewHtml += '• ...and ' + (errors.length - 5) + ' more';
+                previewHtml += '</div>';
+            }
+
+            previewHtml += '<div class="table-wrapper" style="max-height:300px;overflow-y:auto"><table class="data-table"><thead><tr>';
+            previewHtml += '<th>#</th><th>Date</th><th>Rack</th><th>EAN</th><th>Material</th><th style="color:var(--accent)">Qty</th><th>Packing</th><th>Box</th><th>Action</th>';
+            previewHtml += '</tr></thead><tbody>';
+            for (var pi = 0; pi < _bulkLocParsedData.length; pi++) {
+                var pr = _bulkLocParsedData[pi];
+                var qClass = pr.quantity > 0 ? 'qty-match' : 'qty-mismatch';
+                previewHtml += '<tr>';
+                previewHtml += '<td>' + (pi + 1) + '</td>';
+                previewHtml += '<td style="font-size:11px">' + escapeHtml(pr.date) + '</td>';
+                previewHtml += '<td><strong>' + escapeHtml(pr.rack) + '</strong></td>';
+                previewHtml += '<td style="font-size:11px">' + escapeHtml(pr.ean) + '</td>';
+                previewHtml += '<td>' + escapeHtml(pr.material) + '</td>';
+                previewHtml += '<td class="' + qClass + '" style="font-weight:800;font-size:15px">' + pr.quantity + '</td>';
+                previewHtml += '<td>' + escapeHtml(pr.packing) + '</td>';
+                previewHtml += '<td>' + escapeHtml(pr.box) + '</td>';
+                previewHtml += '<td><span class="badge badge-' + (pr.action === 'PUTAWAY' ? 'success' : 'info') + '">' + escapeHtml(pr.action) + '</span></td>';
+                previewHtml += '</tr>';
+            }
+            previewHtml += '</tbody></table></div></div>';
+
+            document.getElementById('bulkLocPreviewArea').innerHTML = previewHtml;
+            document.getElementById('bulkLocConfirmBtn').disabled = false;
+
+            // Log the mapping
+            console.log('Parsed ' + _bulkLocParsedData.length + ' rows. Sample:', _bulkLocParsedData[0]);
+
+        } catch (err) {
+            showToast('Error reading Excel: ' + err.message, 'error');
+            console.error('Bulk location upload error:', err);
         }
-        var wb = XLSX.utils.book_new();
-        var ws = XLSX.utils.aoa_to_sheet(wsData);
-        XLSX.utils.book_append_sheet(wb, ws, 'Bin Master');
-        XLSX.writeFile(wb, 'Bin_Master_' + today() + '.xlsx');
-        showToast('Excel exported!', 'success');
-    } catch(e) { showToast('Export failed: ' + e.message, 'error'); }
+    };
+    reader.readAsArrayBuffer(fileInput.files[0]);
 }
 
+function confirmBulkLocationUpload() {
+    if (_bulkLocParsedData.length === 0) { showToast('No data to upload', 'error'); return; }
+
+    var addedCount = 0, updatedCount = 0, totalQtyAdded = 0;
+    var allLocations = DB.get('location_master');
+
+    for (var i = 0; i < _bulkLocParsedData.length; i++) {
+        var row = _bulkLocParsedData[i];
+        var qty = Number(row.quantity) || 0;  // ===== FIX: Extra safety =====
+        totalQtyAdded += qty;
+
+        // Check duplicate: same rack + ean
+        var foundIdx = -1;
+        for (var j = 0; j < allLocations.length; j++) {
+            if (allLocations[j].rack === row.rack && allLocations[j].ean === row.ean && row.ean !== '') {
+                foundIdx = j;
+                break;
+            }
+        }
+
+        if (foundIdx > -1) {
+            // Update existing — add quantity
+            var oldQty = Number(allLocations[foundIdx].quantity) || 0;
+            allLocations[foundIdx].quantity = oldQty + qty;
+            allLocations[foundIdx].date = row.date;
+            allLocations[foundIdx].material = row.material;
+            allLocations[foundIdx].description = row.description;
+            allLocations[foundIdx].packing = row.packing;
+            allLocations[foundIdx].box = row.box;
+            allLocations[foundIdx].action = row.action;
+            allLocations[foundIdx].user = APP.currentUser ? APP.currentUser.name : 'Admin';
+            allLocations[foundIdx].updatedAt = new Date().toISOString();
+            updatedCount++;
+        } else {
+            // Add new
+            allLocations.push({
+                id: DB.uid(),
+                date: row.date,
+                rack: row.rack,
+                ean: row.ean,
+                material: row.material,
+                description: row.description,
+                quantity: qty,  // ===== FIX: Using parsed qty, not raw string =====
+                packing: row.packing,
+                box: row.box,
+                action: row.action,
+                user: APP.currentUser ? APP.currentUser.name : 'Admin',
+                dateTime: new Date().toISOString(),
+                createdAt: new Date().toISOString()
+            });
+            addedCount++;
+        }
+    }
+
+    // Save all at once
+    DB.set('location_master', allLocations);
+
+    logAction('Location Master', 'BULK_UPLOAD', 'Uploaded ' + _bulkLocParsedData.length + ' rows (' + addedCount + ' new, ' + updatedCount + ' updated). Total Qty: ' + totalQtyAdded);
+    showToast('Success! ' + addedCount + ' added, ' + updatedCount + ' updated. Total Qty uploaded: ' + totalQtyAdded, 'success');
+    _bulkLocParsedData = [];
+    closeModal();
+    renderLocationMaster();
+}
+
+// ==================== EXPORT LOCATION MASTER ====================
+function exportLocationMaster() {
+    var locations = DB.get('location_master');
+    if (locations.length === 0) { showToast('No data to export', 'warning'); return; }
+
+    var exportData = [];
+    for (var i = 0; i < locations.length; i++) {
+        var l = locations[i];
+        exportData.push({
+            Date: l.date || '',
+            Rack: l.rack || '',
+            EAN: l.ean || '',
+            Material: l.material || '',
+            Description: l.description || '',
+            Quantity: Number(l.quantity) || 0,
+            Packing: l.packing || '',
+            Box: l.box || '',
+            Action: l.action || '',
+            User: l.user || '',
+            'Created At': formatDateTime(l.createdAt || l.dateTime)
+        });
+    }
+
+    var ws = XLSX.utils.json_to_sheet(exportData);
+    var wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Location Master');
+    XLSX.writeFile(wb, 'Location_Master_' + today() + '.xlsx');
+    logAction('Location Master', 'EXPORT', 'Exported ' + locations.length + ' records');
+    showToast('Exported ' + locations.length + ' records!', 'success');
+}
 // ==================== RACK MASTER ====================
 function renderRackMaster() {
     var racks = DB.get('rack_master');
@@ -6618,3 +7039,488 @@ function loadPutawayInvoiceMaterials() {
     html += '</tbody></table></div>';
     container.innerHTML = html;
 }
+// ============================================================
+// NUCLEAR FIX — Location Master Bulk Upload
+// Paste at END of script.js
+// ============================================================
+
+(function(){
+    'use strict';
+
+    // --- Override renderLocationMaster ---
+    var _origRenderLoc = (typeof renderLocationMaster === 'function') ? renderLocationMaster : null;
+
+    window.renderLocationMaster = function() {
+        var locations = DB.get('location_master');
+        var search = (document.getElementById('locSearchInput') || {}).value || '';
+        search = String(search).trim().toLowerCase();
+        var filterRack = (document.getElementById('locRackFilter') || {}).value || '';
+        var filterAction = (document.getElementById('locActionFilter') || {}).value || '';
+
+        var filtered = locations;
+        if (search) {
+            filtered = filtered.filter(function(l) {
+                return String(l.rack||'').toLowerCase().indexOf(search) > -1 ||
+                    String(l.material||'').toLowerCase().indexOf(search) > -1 ||
+                    String(l.ean||'').toLowerCase().indexOf(search) > -1 ||
+                    String(l.description||'').toLowerCase().indexOf(search) > -1 ||
+                    String(l.quantity||'').indexOf(search) > -1;
+            });
+        }
+        if (filterRack) filtered = filtered.filter(function(l){ return l.rack === filterRack; });
+        if (filterAction) filtered = filtered.filter(function(l){ return l.action === filterAction; });
+
+        filtered.sort(function(a,b){ return new Date(b.createdAt||b.dateTime||0) - new Date(a.createdAt||a.dateTime||0); });
+
+        var pg = paginate(filtered, APP.locPage, APP.locPerPage);
+        var racks = DB.get('rack_master');
+        var rackOpts = '<option value="">All Racks</option>';
+        for(var r=0;r<racks.length;r++){
+            rackOpts += '<option value="'+escapeHtml(racks[r].rack)+'"'+(filterRack===racks[r].rack?' selected':'')+'>'+escapeHtml(racks[r].rack)+'</option>';
+        }
+
+        var totalQty = 0;
+        for(var tq=0;tq<locations.length;tq++) totalQty += (Number(locations[tq].quantity) || 0);
+
+        var html = '<div class="section-header"><h2><i class="bx bxs-map-pin"></i> Location Master</h2>';
+        html += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
+        html += '<button class="btn btn-primary" onclick="showAddLocationForm()"><i class="bx bx-plus"></i> Add Location</button>';
+        html += '<button class="btn btn-warning" onclick="window._bulkLocUploadNEW()"><i class="bx bx-upload"></i> Bulk Upload</button>';
+        html += '<button class="btn btn-secondary" onclick="exportLocationMaster()"><i class="bx bx-download"></i> Export Excel</button>';
+        html += '</div></div>';
+
+        html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;margin-bottom:20px">';
+        html += '<div class="kpi-card"><div class="kpi-value">'+locations.length+'</div><div class="kpi-label">Total Records</div></div>';
+        html += '<div class="kpi-card"><div class="kpi-value" style="color:var(--accent)">'+totalQty+'</div><div class="kpi-label">Total Qty in Warehouse</div></div>';
+        html += '<div class="kpi-card"><div class="kpi-value">'+filtered.length+'</div><div class="kpi-label">Filtered</div></div>';
+        html += '</div>';
+
+        html += '<div class="card" style="margin-bottom:16px"><div style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">';
+        html += '<div class="form-group" style="flex:1;min-width:200px"><label>Search</label><input type="text" id="locSearchInput" class="form-input" placeholder="Rack, Material, EAN..." value="'+escapeHtml(search)+'" oninput="APP.locPage=1;renderLocationMaster()"></div>';
+        html += '<div class="form-group" style="min-width:160px"><label>Rack</label><select id="locRackFilter" class="form-input" onchange="APP.locPage=1;renderLocationMaster()">'+rackOpts+'</select></div>';
+        html += '<div class="form-group" style="min-width:130px"><label>Action</label><select id="locActionFilter" class="form-input" onchange="APP.locPage=1;renderLocationMaster()"><option value="">All</option><option value="PUTAWAY"'+(filterAction==='PUTAWAY'?' selected':'')+'>PUTAWAY</option><option value="PIV"'+(filterAction==='PIV'?' selected':'')+'>PIV</option></select></div>';
+        html += '<button class="btn btn-sm btn-secondary" onclick="APP.locPage=1;document.getElementById(\'locSearchInput\').value=\'\';document.getElementById(\'locRackFilter\').value=\'\';document.getElementById(\'locActionFilter\').value=\'\';renderLocationMaster()"><i class="bx bx-refresh"></i> Clear</button>';
+        html += '</div></div>';
+
+        html += '<div class="card"><div class="card-title">Records ('+pg.total+')</div><div class="table-wrapper"><table class="data-table"><thead><tr>';
+        html += '<th>#</th><th>Date</th><th>Rack</th><th>EAN</th><th>Material</th><th>Description</th><th style="color:var(--accent);font-size:13px">QTY</th><th>Packing</th><th>Box</th><th>Action</th><th>User</th><th>Actions</th>';
+        html += '</tr></thead><tbody>';
+
+        if(pg.items.length === 0){
+            html += '<tr><td colspan="12" style="text-align:center;color:var(--text-muted);padding:40px"><i class="bx bx-inbox" style="font-size:32px;display:block;margin-bottom:8px"></i>No records</td></tr>';
+        } else {
+            for(var i=0;i<pg.items.length;i++){
+                var l = pg.items[i];
+                var rowNum = (APP.locPage-1)*APP.locPerPage + i + 1;
+                var qv = Number(l.quantity) || 0;
+                html += '<tr>';
+                html += '<td>'+rowNum+'</td>';
+                html += '<td style="font-size:12px">'+escapeHtml(l.date||'-')+'</td>';
+                html += '<td><strong style="color:var(--accent)">'+escapeHtml(l.rack||'-')+'</strong></td>';
+                html += '<td style="font-family:var(--font-display);font-size:11px">'+escapeHtml(l.ean||'-')+'</td>';
+                html += '<td>'+escapeHtml(l.material||'-')+'</td>';
+                html += '<td style="font-size:12px;color:var(--text-secondary)">'+escapeHtml(l.description||'-')+'</td>';
+                html += '<td style="font-size:18px;font-weight:900;color:'+(qv>0?'var(--accent)':'var(--danger)')+'">'+qv+'</td>';
+                html += '<td>'+escapeHtml(l.packing||'-')+'</td>';
+                html += '<td>'+escapeHtml(l.box||'-')+'</td>';
+                html += '<td><span class="badge badge-'+(l.action==='PUTAWAY'?'success':'info')+'">'+escapeHtml(l.action||'-')+'</span></td>';
+                html += '<td style="font-size:12px;color:var(--text-muted)">'+escapeHtml(l.user||'-')+'</td>';
+                html += '<td><div class="table-actions">';
+                html += '<button class="btn-icon" title="Edit" onclick="showEditLocation(\''+l.id+'\')"><i class="bx bx-edit"></i></button>';
+                html += '<button class="btn-icon danger" title="Delete" onclick="deleteLocation(\''+l.id+'\')"><i class="bx bx-trash"></i></button>';
+                html += '</div></td></tr>';
+            }
+        }
+        html += '</tbody></table></div>';
+        html += renderPagination(APP.locPage, pg.pages, 'goLocPage');
+        html += '</div>';
+
+        var sec = document.getElementById('section-location');
+        if(sec) sec.innerHTML = html;
+    };
+
+    // --- Override goLocPage ---
+    window.goLocPage = function(p){
+        if(p<1) return;
+        APP.locPage = p;
+        renderLocationMaster();
+    };
+
+    // --- NEW BULK UPLOAD (completely independent) ---
+    var _parsedRows = [];
+
+    window._bulkLocUploadNEW = function() {
+        _parsedRows = [];
+        var html = '';
+        html += '<div class="form-group"><label>Choose Excel File</label>';
+        html += '<label class="btn btn-warning" style="cursor:pointer;display:inline-flex"><i class="bx bx-upload"></i> Select File (.xlsx/.xls/.csv)';
+        html += '<input type="file" id="_blFileInput" accept=".xlsx,.xls,.csv" style="display:none"></label>';
+        html += ' <span id="_blFileName" style="font-size:12px;color:var(--text-muted)">No file</span></div>';
+
+        html += '<div style="background:var(--warning-dim);border:1px dashed var(--warning);padding:12px;border-radius:8px;font-size:12px;color:var(--warning);margin:12px 0">';
+        html += '<strong>Required Columns (Header Row):</strong><br>';
+        html += '<code style="display:block;margin-top:6px;padding:6px 10px;background:var(--bg-input);border-radius:4px;color:var(--accent);font-size:11px">Date | Rack | EAN | Material | Description | Quantity | Packing | Box | Action</code>';
+        html += '<br>Minimum required: <strong>Rack</strong> + <strong>Quantity</strong>';
+        html += '</div>';
+
+        html += '<div id="_blStep2" style="display:none">';
+        html += '<button class="btn btn-secondary btn-sm" onclick="window._blParseFile()" style="margin-bottom:12px"><i class="bx bx-search"></i> Step 1: Parse & Preview</button>';
+        html += '</div>';
+
+        html += '<div id="_blPreview"></div>';
+
+        html += '<div id="_blManualCol" style="display:none;margin-top:12px;padding:12px;background:var(--danger-dim);border:1px solid var(--danger);border-radius:8px">';
+        html += '<strong style="color:var(--danger)"><i class="bx bx-error"></i> Auto-detect failed! Manually select column numbers:</strong>';
+        html += '<div class="form-row" style="margin-top:8px">';
+        html += '<div class="form-group"><label>Rack Column #</label><input type="number" id="_blMRack" class="form-input" min="0" placeholder="0,1,2..."></div>';
+        html += '<div class="form-group"><label>Material Column #</label><input type="number" id="_blMMat" class="form-input" min="0" placeholder="0,1,2..."></div>';
+        html += '<div class="form-group"><label>Quantity Column #</label><input type="number" id="_blMQty" class="form-input" min="0" placeholder="0,1,2..." style="border-color:var(--danger)"></div>';
+        html += '</div>';
+        html += '<button class="btn btn-danger btn-sm" onclick="window._blParseManual()"><i class="bx bx-check"></i> Parse with Manual Columns</button>';
+        html += '</div>';
+
+        showModal('<i class="bx bx-upload"></i> Bulk Upload — Location Master', html, 'lg',
+            '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+            '<button id="_blSaveBtn" class="btn btn-primary" disabled onclick="window._blSaveAll()"><i class="bx bx-check-double"></i> Confirm & Save All</button>'
+        );
+
+        // Bind file input
+        setTimeout(function(){
+            var fi = document.getElementById('_blFileInput');
+            if(fi) fi.addEventListener('change', function(){
+                var fn = document.getElementById('_blFileName');
+                if(fn && this.files[0]) fn.innerText = this.files[0].name;
+                document.getElementById('_blStep2').style.display = 'block';
+            });
+        }, 100);
+    };
+
+    // --- Parse file ---
+    window._blParseFile = function() {
+        var fi = document.getElementById('_blFileInput');
+        if(!fi || !fi.files[0]){ showToast('Select file first','error'); return; }
+
+        var reader = new FileReader();
+        reader.onload = function(e) {
+            try {
+                var wb = XLSX.read(e.target.result, {type:'array'});
+                var ws = wb.Sheets[wb.SheetNames[0]];
+                var raw = XLSX.utils.sheet_to_json(ws, {header:1});
+
+                console.log('=== RAW EXCEL DATA ===');
+                console.log('Total rows (including header):', raw.length);
+                console.log('Header:', raw[0]);
+                if(raw.length > 1) console.log('Row 1 (first data):', raw[1]);
+                if(raw.length > 2) console.log('Row 2:', raw[2]);
+
+                if(raw.length < 2){ showToast('File is empty (only header, no data)','error'); return; }
+
+                // Dynamic column mapping
+                var hdr = raw[0].map(function(h){ return String(h||'').trim().toLowerCase().replace(/[^a-z0-9]/g,''); });
+                console.log('Normalized headers:', hdr);
+
+                var colMap = {};
+                                var mapDef = {
+                    date:      ['date','dt'],
+                    rack:      ['rack','rackno','racknumber','location','loc'],
+                    ean:       ['ean','eancode','barcode','scancode','barcodescan'],
+                    material:  ['material','materialcode','materialname','matcode','item','itemcode','product','productcode','itemname','productname','sku','skucode'],
+                    description:['description','desc','materialdesc','itemdesc','productdesc','itemdescription'],
+                    quantity:  ['quantity','qty','quant','units','stock','balance','amount','nos','pieces','pcs','noofpcs','totalqty','qty'],
+                    packing:   ['packing','pack','uom','unit','packtype','packingtype'],
+                    box:       ['box','boxno','boxnumber','carton','cartonno','boxno'],
+                    action:    ['action','actiontype','type','transactiontype','transaction','movetype','movementtype','process','processtype','activity']
+                };
+
+                for(var field in mapDef){
+                    for(var a=0; a<mapDef[field].length; a++){
+                        var idx = hdr.indexOf(mapDef[field][a]);
+                        if(idx > -1){ colMap[field] = idx; break; }
+                    }
+                }
+
+                console.log('=== COLUMN MAPPING ===', colMap);
+
+                // Check critical
+                if(colMap.rack === undefined && colMap.quantity === undefined){
+                    // Show manual column selector
+                    document.getElementById('_blManualCol').style.display = 'block';
+                    document.getElementById('_blManualCol').dataset_raw = JSON.stringify(raw);
+                    showToast('Could not auto-detect Rack/Qty columns. Use manual selection below.','warning');
+                    return;
+                }
+
+                _blDoParse(raw, colMap);
+
+            } catch(err){
+                console.error('Parse error:', err);
+                showToast('Error: ' + err.message, 'error');
+            }
+        };
+        reader.readAsArrayBuffer(fi.files[0]);
+    };
+
+    window._blParseManual = function() {
+        var raw = JSON.parse(document.getElementById('_blManualCol').dataset_raw);
+        var colMap = {
+            rack: parseInt(document.getElementById('_blMRack').value),
+            material: parseInt(document.getElementById('_blMMat').value),
+            quantity: parseInt(document.getElementById('_blMQty').value)
+        };
+        if(isNaN(colMap.quantity)){ showToast('Quantity column # is required','error'); return; }
+        _blDoParse(raw, colMap);
+    };
+
+        function _blDoParse(raw, colMap) {
+        _parsedRows = [];
+        var warnings = [];
+
+        for(var k=1; k<raw.length; k++){
+            var r = raw[k];
+            if(!r) continue;
+
+            // Skip empty rows
+            var isEmpty = true;
+            for(var ci=0; ci<r.length; ci++){
+                if(r[ci] !== null && r[ci] !== undefined && String(r[ci]).trim() !== ''){ isEmpty=false; break; }
+            }
+            if(isEmpty) continue;
+
+            // ===== QUANTITY PARSING =====
+            var rawQtyVal = (colMap.quantity !== undefined) ? r[colMap.quantity] : 0;
+            var finalQty = 0;
+
+            if(rawQtyVal !== null && rawQtyVal !== undefined && String(rawQtyVal).trim() !== ''){
+                if(typeof rawQtyVal === 'number'){
+                    finalQty = rawQtyVal;
+                } else {
+                    var cleanStr = String(rawQtyVal).replace(/[,₹$₽€£\s]/g, '').trim();
+                    finalQty = Number(cleanStr);
+                }
+                if(isNaN(finalQty) || !isFinite(finalQty)) finalQty = 0;
+                if(finalQty < 0) finalQty = 0;
+            }
+
+            // ===== ACTION PARSING — FIXED =====
+            var actRaw = (colMap.action !== undefined) ? String(r[colMap.action] || '').trim() : '';
+            var actVal = '';
+
+            if(!actRaw){
+                // No action column ya empty — default PUTAWAY
+                actVal = 'PUTAWAY';
+            } else {
+                var actUpper = actRaw.toUpperCase().replace(/[\s\-_]/g, '');
+
+                // Match known values — flexible
+                if(actUpper.indexOf('PUTAWAY') > -1 || actUpper.indexOf('PUTAW') > -1 || actUpper === 'PUT' || actUpper === 'PA' || actUpper.indexOf('INBOUND') > -1 || actUpper.indexOf('RECEIVE') > -1 || actUpper.indexOf('GRN') > -1){
+                    actVal = 'PUTAWAY';
+                } else if(actUpper.indexOf('PIV') > -1 || actUpper.indexOf('PHYSICAL') > -1 || actUpper.indexOf('INVENTORY') > -1 || actUpper.indexOf('VERIFICATION') > -1 || actUpper.indexOf('VERIFY') > -1 || actUpper === 'PV' || actUpper === 'IV'){
+                    actVal = 'PIV';
+                } else if(actUpper.indexOf('PICK') > -1){
+                    actVal = 'PICKING';
+                } else if(actUpper.indexOf('LOAD') > -1){
+                    actVal = 'LOADING';
+                } else if(actUpper.indexOf('TRANSFER') > -1 || actUpper.indexOf('MOVEMENT') > -1){
+                    actVal = 'TRANSFER';
+                } else if(actUpper.indexOf('RETURN') > -1){
+                    actVal = 'RETURN';
+                } else {
+                    // Unknown value — JO BHI USER NE LIKHA HAI WOHI SAVE KARO
+                    actVal = actRaw.toUpperCase().substring(0, 20);
+                    warnings.push('Row '+(k+1)+': Unknown action "'+actRaw+'" → saved as "'+actVal+'"');
+                }
+            }
+
+            console.log('Row', k, '- Action raw: "'+actRaw+'" → Parsed: "'+actVal+'"');
+
+            var rackVal = (colMap.rack !== undefined) ? String(r[colMap.rack] || '').trim() : '';
+            var matVal = (colMap.material !== undefined) ? String(r[colMap.material] || '').trim() : '';
+            var eanVal = (colMap.ean !== undefined) ? String(r[colMap.ean] || '').trim() : '';
+            var descVal = (colMap.description !== undefined) ? String(r[colMap.description] || '').trim() : '';
+            var dateVal = (colMap.date !== undefined) ? String(r[colMap.date] || '').trim() : today();
+            var packVal = (colMap.packing !== undefined) ? String(r[colMap.packing] || '').trim() : '';
+            var boxVal = (colMap.box !== undefined) ? String(r[colMap.box] || '').trim() : '';
+
+            // Fix date formats
+            if(dateVal && dateVal.indexOf('/') > -1){
+                var dp = dateVal.split('/');
+                if(dp.length === 3){
+                    var td = new Date(dp[2], dp[1]-1, dp[0]);
+                    if(!isNaN(td.getTime())) dateVal = td.toISOString().split('T')[0];
+                }
+            } else if(dateVal && dateVal.indexOf('-') === -1){
+                var ed = Number(dateVal);
+                if(!isNaN(ed) && ed > 40000 && ed < 60000){
+                    dateVal = new Date((ed-25569)*86400*1000).toISOString().split('T')[0];
+                }
+            }
+            if(!dateVal || dateVal === 'undefined' || dateVal === 'NaN-NaN-NaN') dateVal = today();
+
+            if(!rackVal){
+                warnings.push('Row '+(k+1)+': No rack — skipped');
+                continue;
+            }
+
+            _parsedRows.push({
+                date: dateVal,
+                rack: rackVal,
+                ean: eanVal,
+                material: matVal,
+                description: descVal,
+                quantity: finalQty,
+                packing: packVal,
+                box: boxVal,
+                action: actVal  // <== JO BHI PARSE HUA WOHI
+            });
+        }
+
+        console.log('=== PARSED RESULT ===');
+        console.log('Total parsed rows:', _parsedRows.length);
+        if(_parsedRows.length > 0) console.log('First row:', JSON.stringify(_parsedRows[0]));
+
+        if(_parsedRows.length === 0){
+            showToast('No valid rows! Check console (F12) for details.','error');
+            return;
+        }
+
+        // Build preview
+        var ph = '<div style="margin-top:12px">';
+        ph += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
+        ph += '<strong style="color:var(--accent)"><i class="bx bx-check-circle"></i> '+_parsedRows.length+' rows ready</strong>';
+        ph += '<span style="font-size:11px;color:var(--text-muted)">Columns: '+JSON.stringify(colMap)+'</span>';
+        ph += '</div>';
+
+        if(warnings.length > 0){
+            ph += '<div style="background:var(--warning-dim);padding:8px;border-radius:6px;margin-bottom:8px;font-size:11px;color:var(--warning);max-height:80px;overflow-y:auto">';
+            for(var w=0;w<Math.min(warnings.length,8);w++) ph += '• '+escapeHtml(warnings[w])+'<br>';
+            if(warnings.length>8) ph += '• ...+'+(warnings.length-8)+' more';
+            ph += '</div>';
+        }
+
+        // Action summary
+        var actSummary = {};
+        for(var as=0;as<_parsedRows.length;as++){
+            var av = _parsedRows[as].action;
+            if(!actSummary[av]) actSummary[av] = 0;
+            actSummary[av]++;
+        }
+        ph += '<div style="background:var(--info-dim);padding:8px 12px;border-radius:6px;margin-bottom:8px;font-size:12px;color:var(--info)">';
+        ph += '<strong>Action Summary:</strong> ';
+        var actParts = [];
+        for(var ak in actSummary) actParts.push(ak + ': ' + actSummary[ak]);
+        ph += actParts.join(' | ');
+        ph += '</div>';
+
+        ph += '<div class="table-wrapper" style="max-height:280px;overflow-y:auto"><table class="data-table"><thead><tr>';
+        ph += '<th>#</th><th>Date</th><th>Rack</th><th>EAN</th><th>Material</th><th style="color:var(--accent);font-size:14px">QTY</th><th>Pack</th><th>Box</th><th>Action</th>';
+        ph += '</tr></thead><tbody>';
+
+        for(var pi=0;pi<_parsedRows.length;pi++){
+            var pr = _parsedRows[pi];
+            var qc = pr.quantity > 0 ? 'color:var(--accent)' : 'color:var(--danger)';
+            var actBadge = 'badge-info';
+            if(pr.action === 'PUTAWAY') actBadge = 'badge-success';
+            else if(pr.action === 'PIV') actBadge = 'badge-warning';
+            else actBadge = 'badge-accent';
+
+            ph += '<tr>';
+            ph += '<td>'+(pi+1)+'</td>';
+            ph += '<td style="font-size:11px">'+escapeHtml(pr.date)+'</td>';
+            ph += '<td><strong>'+escapeHtml(pr.rack)+'</strong></td>';
+            ph += '<td style="font-size:11px">'+escapeHtml(pr.ean)+'</td>';
+            ph += '<td>'+escapeHtml(pr.material)+'</td>';
+            ph += '<td style="font-size:18px;font-weight:900;'+qc+'">'+pr.quantity+'</td>';
+            ph += '<td>'+escapeHtml(pr.packing)+'</td>';
+            ph += '<td>'+escapeHtml(pr.box)+'</td>';
+            ph += '<td><span class="badge '+actBadge+'">'+escapeHtml(pr.action)+'</span></td>';
+            ph += '</tr>';
+        }
+        ph += '</tbody></table></div></div>';
+
+        document.getElementById('_blPreview').innerHTML = ph;
+        document.getElementById('_blSaveBtn').disabled = false;
+        document.getElementById('_blManualCol').style.display = 'none';
+
+        showToast('Preview ready! Check Action column.','info');
+    }
+
+    // Also update the column mapping to catch more action column names
+    // Find this line in _blParseFile and replace the mapDef:
+
+    // --- SAVE ALL ---
+    window._blSaveAll = function() {
+        if(_parsedRows.length === 0){ showToast('Nothing to save','error'); return; }
+
+        var allLoc = DB.get('location_master');
+        var added = 0, updated = 0, totalQ = 0;
+
+        for(var i=0; i<_parsedRows.length; i++){
+            var row = _parsedRows[i];
+            var qty = Number(row.quantity); // EXPLICIT Number() call
+            if(isNaN(qty)) qty = 0;
+            totalQ += qty;
+
+            // Find existing
+            var found = -1;
+            for(var j=0; j<allLoc.length; j++){
+                if(allLoc[j].rack === row.rack && allLoc[j].ean === row.ean && row.ean !== ''){
+                    found = j; break;
+                }
+            }
+
+            if(found > -1){
+                var oldQ = Number(allLoc[found].quantity) || 0;
+                allLoc[found].quantity = oldQ + qty;
+                allLoc[found].date = row.date;
+                allLoc[found].material = row.material;
+                allLoc[found].description = row.description;
+                allLoc[found].packing = row.packing;
+                allLoc[found].box = row.box;
+                allLoc[found].action = row.action;
+                allLoc[found].user = APP.currentUser ? APP.currentUser.name : 'Admin';
+                allLoc[found].updatedAt = new Date().toISOString();
+                updated++;
+            } else {
+                allLoc.push({
+                    id: DB.uid(),
+                    date: row.date,
+                    rack: row.rack,
+                    ean: row.ean,
+                    material: row.material,
+                    description: row.description,
+                    quantity: qty,
+                    packing: row.packing,
+                    box: row.box,
+                    action: row.action,
+                    user: APP.currentUser ? APP.currentUser.name : 'Admin',
+                    dateTime: new Date().toISOString(),
+                    createdAt: new Date().toISOString()
+                });
+                added++;
+            }
+        }
+
+        // Save
+        DB.set('location_master', allLoc);
+
+        // VERIFY — Read back and check
+        var verify = DB.get('location_master');
+        var verifyQty = 0;
+        for(var v=0; v<verify.length; v++) verifyQty += (Number(verify[v].quantity) || 0);
+
+        console.log('=== AFTER SAVE VERIFICATION ===');
+        console.log('Total records now:', verify.length);
+        console.log('Total quantity in DB:', verifyQty);
+        console.log('Last 3 records:', verify.slice(-3));
+
+        logAction('Location Master', 'BULK_UPLOAD_FIXED', added+' added, '+updated+' updated. Total qty uploaded: '+totalQ+'. Verified total in DB: '+verifyQty);
+        showToast('DONE! '+added+' new, '+updated+' updated. Qty uploaded: '+totalQ+'. DB total: '+verifyQty, 'success');
+
+        _parsedRows = [];
+        closeModal();
+        renderLocationMaster();
+    }
+
+    console.log('[NUCLEAR FIX] Location Master bulk upload override loaded successfully.');
+
+})();

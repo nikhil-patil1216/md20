@@ -1,0 +1,18 @@
+{
+  "name": "VIP WMS MD20",
+  "short_name": "VIP WMS",
+  "description": "VIP Industries Limited MD20 Warehouse Management System",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#070B14",
+  "theme_color": "#00E5A0",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%2300E5A0'/><text x='50' y='68' text-anchor='middle' font-size='50' font-weight='bold' fill='%23070510'>V</text></svg>",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

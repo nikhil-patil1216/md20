@@ -3,6 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#00E5A0">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="mobile-web-app-capable" content="yes">
     <title>VIP INDUSTRIES LIMITED MD20 — Warehouse Management System</title>
     <link href="https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
@@ -12,6 +17,7 @@
     <link rel="stylesheet" href="style.css">
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+    
 </head>
 <body>
     <!-- ===================== LOGIN PAGE ===================== -->
@@ -207,6 +213,38 @@
 
     <!-- ===================== TOAST ===================== -->
     <div id="toastContainer" class="toast-container"></div>
+
+
+        <!-- ===================== BOTTOM NAV (Mobile) ===================== -->
+    <div id="bottomNav" class="bottom-nav">
+        <a href="#" class="bnav-item active" data-bnav="dashboard">
+            <i class="bx bxs-dashboard"></i><span>Home</span>
+        </a>
+        <a href="#" class="bnav-item" data-bnav="inbound">
+            <i class="bx bxs-truck"></i><span>Inbound</span>
+        </a>
+        <a href="#" class="bnav-item" data-bnav="putaway">
+            <i class="bx bxs-package"></i><span>Putaway</span>
+        </a>
+        <a href="#" class="bnav-item" data-bnav="piv">
+            <i class="bx bxs-clipboard"></i><span>PIV</span>
+        </a>
+        <a href="#" class="bnav-item" data-bnav="more" id="bnavMore">
+            <i class="bx bx-grid-alt"></i><span>More</span>
+        </a>
+    </div>
+
+    <!-- ===================== MORE PANEL (Mobile) ===================== -->
+    <div id="morePanel" class="more-panel">
+        <div class="more-panel-overlay" id="morePanelOverlay"></div>
+        <div class="more-panel-content">
+            <div class="more-panel-header">
+                <h3>All Modules</h3>
+                <button id="morePanelClose"><i class="bx bx-x"></i></button>
+            </div>
+            <div class="more-panel-grid" id="morePanelGrid"></div>
+        </div>
+    </div>
 
     <!-- ===================== LOADER ===================== -->
     <div id="pageLoader" class="page-loader" style="display:none">

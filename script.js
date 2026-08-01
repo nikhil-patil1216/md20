@@ -7524,3 +7524,144 @@ function loadPutawayInvoiceMaterials() {
     console.log('[NUCLEAR FIX] Location Master bulk upload override loaded successfully.');
 
 })();
+// ============================================================
+// SESSION SECURITY FIX — Force login on every device
+// Paste at VERY END of script.js
+// ============================================================
+
+(function() {
+    'use strict';
+
+    // ===== PAGE LOAD — SESSION GUARD =====
+    function checkSessionOnLoad() {
+        var sessionStr = localStorage.getItem('wms_session');
+        
+        // No session found → show login
+        if (!sessionStr) {
+            showLoginPage();
+            return;
+        }
+
+        try {
+            var session = JSON.parse(sessionStr);
+            
+            // Check session timeout (30 min)
+            if (session.loginTime) {
+                var loginMs = new Date(session.loginTime).getTime();
+                var elapsed = Date.now() - loginMs;
+                if (elapsed > APP.SESSION_TIMEOUT) {
+                    console.log('[AUTH] Session expired on load');
+                    localStorage.removeItem('wms_session');
+                    showLoginPage();
+                    return;
+                }
+            }
+
+            // Check if user still exists in DB
+            var users = DB.get('users');
+            var foundUser = null;
+            for (var i = 0; i < users.length; i++) {
+                if (users[i].id === session.userId) {
+                    foundUser = users[i];
+                    break;
+                }
+            }
+
+            if (!foundUser) {
+                console.log('[AUTH] User not found in DB');
+                localStorage.removeItem('wms_session');
+                showLoginPage();
+                return;
+            }
+
+            // Valid session — show app
+            console.log('[AUTH] Valid session for:', foundUser.name);
+            APP.currentUser = foundUser;
+            APP.sessionStart = loginMs || Date.now();
+
+            // Pull latest data from Supabase THEN show app
+            showLoader();
+            document.getElementById('loginPage').style.display = 'none';
+            document.getElementById('mainApp').style.display = 'flex';
+
+            var pullPromise = (typeof pullAllServerData === 'function') ? pullAllServerData() : Promise.resolve();
+            
+            pullPromise.then(function() {
+                hideLoader();
+                finishAppInit(foundUser);
+            }).catch(function() {
+                hideLoader();
+                finishAppInit(foundUser);
+            });
+
+        } catch(e) {
+            console.error('[AUTH] Session parse error:', e);
+            localStorage.removeItem('wms_session');
+            showLoginPage();
+        }
+    }
+
+    function showLoginPage() {
+        document.getElementById('loginPage').style.display = 'flex';
+        document.getElementById('mainApp').style.display = 'none';
+        // Stop matrix animation if running
+        var canvas = document.getElementById('matrixCanvas');
+        if (canvas && !canvas.dataset.started) {
+            startMatrix();
+            canvas.dataset.started = '1';
+        }
+    }
+
+    function finishAppInit(user) {
+        document.getElementById('userAvatar').textContent = (user.name || 'A').charAt(0).toUpperCase();
+        document.getElementById('userName').textContent = user.name || 'Admin';
+        
+        if (typeof renderSidebar === 'function') renderSidebar();
+        if (typeof navigateTo === 'function') navigateTo('dashboard');
+        if (typeof updateNotifBadge === 'function') updateNotifBadge();
+        if (typeof initBottomNav === 'function') initBottomNav();
+        if (typeof updateBottomNav === 'function') updateBottomNav('dashboard');
+
+        // Session timeout checker
+        setInterval(function() {
+            if (APP.sessionStart && Date.now() - APP.sessionStart > APP.SESSION_TIMEOUT) {
+                showToast('Session expired! Please login again.', 'warning');
+                if (typeof logout === 'function') logout();
+            }
+        }, 30000);
+    }
+
+    // ===== OVERRIDE LOGOUT TO CLEAR PROPERLY =====
+    var _origLogout = window.logout;
+    window.logout = function() {
+        if (APP.currentUser) {
+            if (typeof logAction === 'function') {
+                logAction('Auth', 'LOGOUT', 'User ' + APP.currentUser.name + ' logged out');
+            }
+            var sessions = DB.get('user_sessions');
+            for (var i = sessions.length - 1; i >= 0; i--) {
+                if (sessions[i].userId === APP.currentUser.id && !sessions[i].logoutTime) {
+                    DB.update('user_sessions', sessions[i].id, { logoutTime: new Date().toISOString(), status: 'Logged Out' });
+                    break;
+                }
+            }
+        }
+        APP.currentUser = null;
+        APP.sessionStart = null;
+        localStorage.removeItem('wms_session');
+        showLoginPage();
+    };
+
+    // ===== RUN ON PAGE LOAD =====
+    // Wait for DOM + existing script to finish
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', function() {
+            setTimeout(checkSessionOnLoad, 300);
+        });
+    } else {
+        setTimeout(checkSessionOnLoad, 300);
+    }
+
+    console.log('[SESSION GUARD] Active — Login required on every device');
+
+})();

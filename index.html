@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <link rel="manifest" href="manifest.json">
+    <link rel="manifest" href="manifest.json">
     <meta name="theme-color" content="#00E5A0">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -17,13 +17,25 @@
     <link rel="stylesheet" href="style.css">
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
-    
+
 </head>
 <body>
+
     <!-- ===================== LOGIN PAGE ===================== -->
     <div id="loginPage">
+        <!-- Warehouse Background Image -->
+        <div class="login-bg-image"></div>
+        <div class="login-bg-overlay"></div>
+
+        <!-- Video background (uncomment below & comment above image divs to use video) -->
+        <!-- <video class="login-bg-video" autoplay muted loop playsinline>
+            <source src="https://cdn.pixabay.com/video/2020/07/30/45349-446689498_large.mp4" type="video/mp4">
+        </video>
+        <div class="login-bg-overlay"></div> -->
+
         <canvas id="matrixCanvas"></canvas>
         <div class="scan-line"></div>
+
         <div class="login-card">
             <div class="login-hex"></div>
             <div class="login-brand">
@@ -57,6 +69,16 @@
 
     <!-- ===================== MAIN APP ===================== -->
     <div id="mainApp" style="display:none">
+        <!-- Warehouse Background Image -->
+        <div class="main-app-bg"></div>
+        <div class="main-app-bg-overlay"></div>
+
+        <!-- Video background (uncomment below & comment above image divs to use video) -->
+        <!-- <video class="main-app-bg-video" autoplay muted loop playsinline>
+            <source src="https://cdn.pixabay.com/video/2020/07/30/45349-446689498_large.mp4" type="video/mp4">
+        </video>
+        <div class="main-app-bg-overlay"></div> -->
+
         <!-- Sidebar -->
         <aside id="sidebar">
             <div class="sidebar-header">
@@ -151,7 +173,7 @@
                     <div class="user-menu" id="userMenu">
                         <div class="user-avatar" id="userAvatar">A</div>
                         <span id="userName">Admin</span>
-                        <i class='bx bx-chevron-down'></i>
+                        <i class="bx bx-chevron-down"></i>
                         <div class="user-dropdown" id="userDropdown">
                             <a href="#" id="ddProfile"><i class='bx bx-user'></i> Profile</a>
                             <a href="#" id="ddPassword"><i class='bx bx-lock'></i> Change Password</a>
@@ -192,30 +214,29 @@
     <div id="modalOverlay" class="modal-overlay">
         <div id="modalContainer" class="modal-container"></div>
     </div>
-    
-<!-- ===================== SCANNER MODAL ===================== -->
-<div id="scannerModal" class="modal-overlay" style="z-index:99999; display:none;">
-    <div class="modal-container" style="max-width:420px;">
-        <div class="modal-header">
-            <h3><i class='bx bx-qr-scan'></i> Scan Code</h3>
-            <button class="modal-close" onclick="closeScannerModal()"><i class="bx bx-x"></i></button>
-        </div>
-        <div class="modal-body" style="text-align:center; padding:10px;">
-            <div style="margin-bottom:15px; display:flex; gap:10px; justify-content:center; flex-wrap:wrap;">
-                <button class="btn btn-primary btn-sm" onclick="startCameraScan()"><i class="bx bx-camera"></i> Camera Scan</button>
-                <button class="btn btn-secondary btn-sm" onclick="focusForBluetoothScanner()"><i class="bx bx-bluetooth"></i> Bluetooth/USB/Device</button>
+
+    <!-- ===================== SCANNER MODAL ===================== -->
+    <div id="scannerModal" class="modal-overlay" style="z-index:99999; display:none;">
+        <div class="modal-container" style="max-width:420px;">
+            <div class="modal-header">
+                <h3><i class='bx bx-qr-scan'></i> Scan Code</h3>
+                <button class="modal-close" onclick="closeScannerModal()"><i class="bx bx-x"></i></button>
             </div>
-            <div id="qr-reader" style="width: 100%; border-radius: 8px; overflow: hidden; background:#000; min-height:50px;"></div>
-            <p style="color:var(--text-muted);margin-top:10px;font-size:12px;">Camera open hone pe barcode ko saamne rakhna.</p>
+            <div class="modal-body" style="text-align:center; padding:10px;">
+                <div style="margin-bottom:15px; display:flex; gap:10px; justify-content:center; flex-wrap:wrap;">
+                    <button class="btn btn-primary btn-sm" onclick="startCameraScan()"><i class="bx bx-camera"></i> Camera Scan</button>
+                    <button class="btn btn-secondary btn-sm" onclick="focusForBluetoothScanner()"><i class="bx bx-bluetooth"></i> Bluetooth/USB/Device</button>
+                </div>
+                <div id="qr-reader" style="width: 100%; border-radius: 8px; overflow: hidden; background:#000; min-height:50px;"></div>
+                <p style="color:var(--text-muted);margin-top:10px;font-size:12px;">Camera open hone pe barcode ko saamne rakhna.</p>
+            </div>
         </div>
     </div>
-</div>
 
     <!-- ===================== TOAST ===================== -->
     <div id="toastContainer" class="toast-container"></div>
 
-
-        <!-- ===================== BOTTOM NAV (Mobile) ===================== -->
+    <!-- ===================== BOTTOM NAV (Mobile) ===================== -->
     <div id="bottomNav" class="bottom-nav">
         <a href="#" class="bnav-item active" data-bnav="dashboard">
             <i class="bx bxs-dashboard"></i><span>Home</span>

@@ -22,7 +22,7 @@ async function pushServerData(key, value) {
 async function pullAllServerData() {
     if (!supabaseClient) return;
     try {
-        var tables = ['users','location_master','material_master','rack_master','vehicles','invoices','invoice_materials','picking_reports','audit_log','notifications','difference_reports','obd_data','picking_assignments','loading_assignments','loading_data','user_sessions','grn_records','short_reports','receiving_docs','loaded_vehicles','picking_done','loading_users'];
+        var tables = ['users','location_master','material_master','rack_master','vehicles','invoices','invoice_materials','picking_reports','audit_log','notifications','difference_reports','obd_data','picking_assignments','loading_assignments','loading_data','user_sessions','grn_records','short_reports','receiving_docs','loaded_vehicles','picking_done','loading_users','location_requests'];
         for (var i = 0; i < tables.length; i++) {
             var t = tables[i];
             var res = await supabaseClient.from('app_data').select('value').eq('key', t).single();
@@ -2281,25 +2281,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
 
-    // 3D Card tilt effect
-    document.addEventListener('mousemove', function(e) {
-        var cards = document.querySelectorAll('.kpi-card, .card');
-        for (var i = 0; i < cards.length; i++) {
-            var card = cards[i];
-            var rect = card.getBoundingClientRect();
-            var x = e.clientX - rect.left;
-            var y = e.clientY - rect.top;
-            if (x >= 0 && x <= rect.width && y >= 0 && y <= rect.height) {
-                var rotateX = ((y - rect.height / 2) / rect.height) * -4;
-                var rotateY = ((x - rect.width / 2) / rect.width) * 4;
-                card.style.transform = 'perspective(800px) rotateX(' + rotateX + 'deg) rotateY(' + rotateY + 'deg) translateY(-3px)';
-                card.style.transition = 'transform 0.1s ease';
-            } else {
-                card.style.transform = '';
-                card.style.transition = 'transform 0.3s ease';
-            }
-        }
-    });
+    // 3D Card tilt effect disabled
 });
 
 function changePassword() {
@@ -3741,92 +3723,242 @@ function exportMaterialExcel() {
     } catch(e) { showToast('Export failed: ' + e.message, 'error'); }
 }
 /* ============================================================
-   PART 3: PICKING + LOADING (Complete Workflow)
-   Developed by Nikhil Patil
+   PICKING MODULE — Complete Replacement
+   No dropdowns for OBD, Material, or Location
+   Excel format: OBD No | Material | Material Description | EAN | Order Qty | Pick Qty | Customer
    ============================================================ */
 
-// ==================== SESSION STATE ====================
-var currentPickingSession = null;
-var currentLoadingSession = null;
+// Backward-compatible qty helper
+function getMatQty(mat) {
+    return {
+        orderQty: mat.orderQty || mat.requiredQty || 0,
+        pickQty: mat.pickQty || mat.orderQty || mat.requiredQty || 0
+    };
+}
 
-// ==================== PICKING MODULE ====================
+function generateOBDNo() {
+    return 'OBD-' + new Date().getFullYear() + '-' + String(DB.count('obd_data') + 1).padStart(4, '0');
+}
+
+// Location lock check
+function isLocationLocked(locationId, excludeAssignmentId) {
+    var active = DB.filter('picking_done', function(p) {
+        return p.locationId === locationId &&
+            p.status !== 'Done' && p.status !== 'Not Found' && p.status !== 'Replaced' &&
+            (!excludeAssignmentId || p.assignmentId !== excludeAssignmentId);
+    });
+    return active.length > 0;
+}
+
+// Smart Location Allocation — minimum locations to fulfill required qty
+function getSmartLocations(material, requiredQty, excludeAssignmentId) {
+    var locations = DB.filter('location_master', function(loc) {
+        return loc.material === material && loc.quantity > 0;
+    });
+    locations.sort(function(a, b) { return b.quantity - a.quantity; });
+
+    var allocated = [];
+    var remaining = requiredQty;
+
+    for (var i = 0; i < locations.length && remaining > 0; i++) {
+        if (isLocationLocked(locations[i].id, excludeAssignmentId)) continue;
+        var take = Math.min(locations[i].quantity, remaining);
+        allocated.push({
+            locationId: locations[i].id,
+            rack: locations[i].rack,
+            availableQty: locations[i].quantity,
+            assignedQty: take
+        });
+        remaining -= take;
+    }
+
+    return { allocated: allocated, shortfall: remaining };
+}
+
+// Validate assigned qty never exceeds required
+function validateAssignmentQty(obdMaterials, allocationMap) {
+    for (var m = 0; m < obdMaterials.length; m++) {
+        var mat = obdMaterials[m];
+        var qty = getMatQty(mat);
+        var locs = allocationMap[mat.material] || [];
+        var totalAssigned = 0;
+        for (var l = 0; l < locs.length; l++) { totalAssigned += locs[l].assignedQty; }
+        if (totalAssigned > qty.pickQty) return false;
+    }
+    return true;
+}
+
+// ==================== ROUTER ====================
 function renderPicking(sub) {
     var sec = document.getElementById('section-picking');
-    if (!sec) return;
-    if (!sub) {
-        var allSubs = ['obd-upload', 'picking-assign', 'start-picking', 'picking-done'];
-        for (var i = 0; i < allSubs.length; i++) { if (checkPermission(allSubs[i])) { sub = allSubs[i]; break; } }
-        if (!sub) sub = 'obd-upload';
+    if (!sec) {
+        sec = document.createElement('section');
+        sec.id = 'section-picking';
+        sec.className = 'content-section';
+        document.getElementById('contentArea').appendChild(sec);
     }
-    var allowedSubs = [
-        { id: 'obd-upload', label: 'OBD Upload' },
-        { id: 'picking-assign', label: 'Picking Assign' },
-        { id: 'start-picking', label: 'Start Picking' },
-        { id: 'picking-done', label: 'Picking Done' }
-    ].filter(function(s) { return checkPermission(s.id); });
-
-    var tabBtns = '<div class="tab-bar">';
-    for (var t = 0; t < allowedSubs.length; t++) {
-        tabBtns += '<button class="tab-btn ' + (sub === allowedSubs[t].id ? 'active' : '') + '" onclick="navigateTo(\'picking\',\'' + allowedSubs[t].id + '\')">' + allowedSubs[t].label + '</button>';
+    switch (sub) {
+        case 'obd-upload': renderOBDUpload(); break;
+        case 'picking-assign': renderPickingAssign(); break;
+        case 'start-picking': renderStartPicking(); break;
+        case 'picking-done': renderPickingDone(); break;
+        default:
+            sec.innerHTML = '<div class="section-header"><h2><i class="bx bxs-box"></i> Picking Module</h2></div>' +
+                '<div class="card"><div class="empty-state"><i class="bx bxs-box"></i><p>Select a sub-module from sidebar</p></div></div>';
     }
-    tabBtns += '</div>';
-
-    var content = '';
-    if (sub === 'obd-upload') content = renderOBDUpload();
-    else if (sub === 'picking-assign') content = renderPickingAssign();
-    else if (sub === 'start-picking') content = renderStartPicking();
-    else if (sub === 'picking-done') content = renderPickingDone();
-    else content = '<div class="card"><div class="empty-state"><i class="bx bx-error-circle"></i><p>Access Denied</p></div></div>';
-    sec.innerHTML = tabBtns + content;
 }
 
-// --- OBD UPLOAD ---
+// ==================== OBD UPLOAD ====================
+var _obdTempMaterials = [];
+
 function renderOBDUpload() {
-    var allObd = DB.get('obd_data');
-    var html = '<div class="section-header"><h2><i class="bx bx-upload"></i> OBD Upload</h2>';
-    html += '<label class="btn btn-warning"><i class="bx bx-upload"></i> Upload OBD Data (Excel)<input type="file" accept=".xlsx,.xls,.csv" style="display:none" onchange="processOBDUpload(this)"></label></div>';
+    _obdTempMaterials = [];
+    var html = '<div class="section-header"><h2><i class="bx bxs-file-doc"></i> OBD Upload</h2>' +
+        '<button class="btn btn-warning" onclick="showOBDExcelUpload()"><i class="bx bx-upload"></i> Bulk Upload Excel</button></div>';
 
-    html += '<div class="card" style="margin-bottom:16px"><div style="background:var(--bg-secondary);padding:12px;border-radius:6px;font-size:12px;color:var(--text-muted);border:1px dashed var(--warning)">';
-    html += '<strong style="color:var(--warning)">Excel Format (Row 1 = Header):</strong><br>';
-    html += 'OBD No | Material | Description | EAN | Order Qty | Picking Qty | Customer</div></div>';
-
-    // OBD List with location reports
-    html += '<div class="card"><div class="card-title">Uploaded OBDs (' + allObd.length + ')</div>';
-    if (allObd.length === 0) {
-        html += '<div class="empty-state"><i class="bx bx-inbox"></i><p>No OBDs uploaded yet</p></div>';
-    } else {
-        html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Customer</th><th>Materials</th><th>Total Picking Qty</th><th>Location Status</th><th>Picking Status</th><th>Actions</th></tr></thead><tbody>';
-        for (var i = 0; i < allObd.length; i++) {
-            var obd = allObd[i];
-            var totalPick = 0, insufficient = false;
-            if (obd.materials) {
-                for (var m = 0; m < obd.materials.length; m++) {
-                    totalPick += (obd.materials[m].pickingQty || 0);
-                    if (obd.materials[m].locationStatus === 'Insufficient') insufficient = true;
-                }
-            }
-            var statusClass = obd.status === 'Loaded' ? 'badge-success' : (obd.status === 'Qty Mismatch' ? 'badge-danger' : 'badge-warning');
-            html += '<tr><td style="font-family:var(--font-display);font-size:12px;color:var(--accent)">' + escapeHtml(obd.obdNo) + '</td>';
-            html += '<td>' + escapeHtml(obd.customer || '-') + '</td>';
-            html += '<td>' + (obd.materials ? obd.materials.length : 0) + '</td>';
-            html += '<td><strong>' + totalPick + '</strong></td>';
-            html += '<td>' + (insufficient ? '<span class="badge badge-danger">Insufficient Stock</span>' : '<span class="badge badge-success">Sufficient</span>') + '</td>';
-            html += '<td><span class="badge ' + statusClass + '">' + escapeHtml(obd.status || 'Pending') + '</span></td>';
-            html += '<td><div class="table-actions">';
-            html += '<button class="btn btn-secondary btn-sm" onclick="viewOBDReport(\'' + obd.id + '\')"><i class="bx bx-show"></i> Report</button>';
-            if (obd.status === 'Pending' || obd.status === 'Assigned') {
-                html += '<button class="btn-icon danger" onclick="deleteOBD(\'' + obd.id + '\')"><i class="bx bx-trash"></i></button>';
-            }
-            html += '</div></td></tr>';
-        }
-        html += '</tbody></table></div>';
-    }
+    // Create OBD form — all text inputs, zero dropdowns
+    html += '<div class="card"><div class="card-title">Create New OBD</div>';
+    html += '<div class="form-row">';
+    html += '<div class="form-group"><label>OBD Number</label><input type="text" id="obdNo" class="form-input" value="' + generateOBDNo() + '" readonly style="color:var(--accent);font-weight:700"></div>';
+    html += '<div class="form-group"><label>Customer</label><input type="text" id="obdCustomer" class="form-input" placeholder="Enter customer name"></div>';
+    html += '<div class="form-group"><label>Date</label><input type="date" id="obdDate" class="form-input" value="' + today() + '"></div>';
     html += '</div>';
-    return html;
+
+    // Material entry — text inputs only
+    html += '<div style="margin:16px 0"><div class="card-title" style="margin-bottom:8px">Add Materials</div>';
+    html += '<div class="form-row">';
+    html += '<div class="form-group"><label>Material <span class="req">*</span></label><input type="text" id="obdMatName" class="form-input" placeholder="Enter material name"></div>';
+    html += '<div class="form-group"><label>Material Description</label><input type="text" id="obdMatDesc" class="form-input" placeholder="Enter description"></div>';
+    html += '<div class="form-group"><label>EAN</label><input type="text" id="obdMatEan" class="form-input" placeholder="Enter EAN code"></div>';
+    html += '</div>';
+    html += '<div class="form-row">';
+    html += '<div class="form-group"><label>Order Qty <span class="req">*</span></label><input type="number" id="obdMatOrderQty" class="form-input" placeholder="0" min="1"></div>';
+    html += '<div class="form-group"><label>Pick Qty <span class="req">*</span></label><input type="number" id="obdMatPickQty" class="form-input" placeholder="0" min="1"></div>';
+    html += '<div class="form-group" style="display:flex;align-items:flex-end"><button class="btn btn-secondary" onclick="addOBDTempMaterial()"><i class="bx bx-plus"></i> Add Material</button></div>';
+    html += '</div></div>';
+
+    html += '<div id="obdMatList"></div>';
+    html += '<div class="form-actions"><button class="btn btn-primary" onclick="submitOBD()"><i class="bx bx-check-circle"></i> Save OBD</button></div>';
+    html += '</div>';
+
+    // Recent OBDs table
+    var obds = DB.get('obd_data').slice().reverse();
+    html += '<div class="card" style="margin-top:20px"><div class="card-title">Recent OBDs (' + obds.length + ')</div>';
+    html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Customer</th><th>Materials</th><th>Total Pick Qty</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
+    if (obds.length === 0) {
+        html += '<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:30px">No OBDs created yet</td></tr>';
+    } else {
+        for (var j = 0; j < obds.length; j++) {
+            var o = obds[j];
+            var totalPickQty = 0;
+            var matCount = (o.materials || []).length;
+            for (var mq = 0; mq < (o.materials || []).length; mq++) {
+                totalPickQty += getMatQty(o.materials[mq]).pickQty;
+            }
+            var statusClass = o.status === 'Open' ? 'badge-accent' : o.status === 'Completed' ? 'badge-success' : o.status === 'Cancelled' ? 'badge-danger' : 'badge-warning';
+            html += '<tr><td><strong style="color:var(--accent)">' + escapeHtml(o.obdNo) + '</strong></td>';
+            html += '<td>' + escapeHtml(o.customer || '-') + '</td>';
+            html += '<td>' + matCount + '</td><td>' + totalPickQty + '</td>';
+            html += '<td><span class="badge ' + statusClass + '">' + escapeHtml(o.status || 'Open') + '</span></td>';
+            html += '<td style="font-size:12px;color:var(--text-muted)">' + formatDateTime(o.createdAt) + '</td>';
+            html += '<td class="table-actions">';
+            html += '<button class="btn-icon" title="View" onclick="viewOBDDetail(\'' + o.id + '\')"><i class="bx bx-show"></i></button>';
+            if (o.status === 'Open') {
+                html += '<button class="btn-icon danger" title="Delete" onclick="deleteOBD(\'' + o.id + '\')"><i class="bx bx-trash"></i></button>';
+            }
+            html += '</td></tr>';
+        }
+    }
+    html += '</tbody></table></div></div>';
+
+    document.getElementById('section-picking').innerHTML = html;
 }
 
-function processOBDUpload(input) {
-    if (!input.files[0]) return;
+function addOBDTempMaterial() {
+    var material = document.getElementById('obdMatName').value.trim();
+    var description = document.getElementById('obdMatDesc').value.trim();
+    var ean = document.getElementById('obdMatEan').value.trim();
+    var orderQty = parseInt(document.getElementById('obdMatOrderQty').value) || 0;
+    var pickQty = parseInt(document.getElementById('obdMatPickQty').value) || 0;
+
+    if (!material) { showToast('Enter material name', 'error'); return; }
+    if (orderQty <= 0) { showToast('Enter valid Order Qty', 'error'); return; }
+    if (pickQty <= 0) { showToast('Enter valid Pick Qty', 'error'); return; }
+
+    for (var i = 0; i < _obdTempMaterials.length; i++) {
+        if (_obdTempMaterials[i].material.toLowerCase() === material.toLowerCase()) {
+            showToast('Material already added', 'warning'); return;
+        }
+    }
+
+    _obdTempMaterials.push({ material: material, description: description, ean: ean, orderQty: orderQty, pickQty: pickQty });
+
+    document.getElementById('obdMatName').value = '';
+    document.getElementById('obdMatDesc').value = '';
+    document.getElementById('obdMatEan').value = '';
+    document.getElementById('obdMatOrderQty').value = '';
+    document.getElementById('obdMatPickQty').value = '';
+    document.getElementById('obdMatName').focus();
+
+    renderOBDTempMaterials();
+}
+
+function removeOBDTempMaterial(idx) {
+    _obdTempMaterials.splice(idx, 1);
+    renderOBDTempMaterials();
+}
+
+function renderOBDTempMaterials() {
+    var el = document.getElementById('obdMatList');
+    if (!el) return;
+    if (_obdTempMaterials.length === 0) { el.innerHTML = ''; return; }
+    var h = '<div class="table-wrapper" style="margin-bottom:12px"><table class="data-table"><thead><tr><th>#</th><th>Material</th><th>Description</th><th>EAN</th><th>Order Qty</th><th>Pick Qty</th><th></th></tr></thead><tbody>';
+    for (var i = 0; i < _obdTempMaterials.length; i++) {
+        var m = _obdTempMaterials[i];
+        h += '<tr><td>' + (i + 1) + '</td><td>' + escapeHtml(m.material) + '</td><td>' + escapeHtml(m.description || '-') + '</td>';
+        h += '<td>' + escapeHtml(m.ean || '-') + '</td><td>' + m.orderQty + '</td><td>' + m.pickQty + '</td>';
+        h += '<td><button class="btn-icon danger" onclick="removeOBDTempMaterial(' + i + ')"><i class="bx bx-trash"></i></button></td></tr>';
+    }
+    h += '</tbody></table></div>';
+    el.innerHTML = h;
+}
+
+function submitOBD() {
+    var obdNo = document.getElementById('obdNo').value.trim();
+    var customer = document.getElementById('obdCustomer').value.trim();
+    var date = document.getElementById('obdDate').value;
+    if (!obdNo || !customer) { showToast('OBD No and Customer are required', 'error'); return; }
+    if (_obdTempMaterials.length === 0) { showToast('Add at least one material', 'error'); return; }
+
+    DB.add('obd_data', {
+        obdNo: obdNo, customer: customer, date: date, status: 'Open',
+        materials: JSON.parse(JSON.stringify(_obdTempMaterials))
+    });
+
+    logAction('Picking', 'OBD_CREATED', 'OBD ' + obdNo + ' created with ' + _obdTempMaterials.length + ' materials');
+    showToast('OBD ' + obdNo + ' created successfully!', 'success');
+    _obdTempMaterials = [];
+    renderOBDUpload();
+}
+
+// Excel Upload — exact 7-column format, no Location column
+function showOBDExcelUpload() {
+    var h = '<div class="form-group"><label>Upload OBD Excel</label>' +
+        '<label class="btn btn-warning btn-sm" style="cursor:pointer"><i class="bx bx-upload"></i> Choose File' +
+        '<input type="file" id="obdExcelFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="document.getElementById(\'obdExcelName\').innerText=this.files[0].name"></label>' +
+        '<div id="obdExcelName" style="font-size:12px;color:var(--text-muted);margin-top:5px">No file chosen</div></div>' +
+        '<div style="background:var(--bg-secondary);padding:12px;border-radius:6px;font-size:12px;color:var(--text-muted);border:1px dashed var(--warning)">' +
+        '<strong style="color:var(--warning)">Exact Column Order (Row 1 = Header):</strong><br>' +
+        'OBD No | Material | Material Description | EAN | Order Qty | Pick Qty | Customer<br>' +
+        '<span style="color:var(--danger)">Do NOT include a Location column.</span></div>';
+    showModal('Bulk OBD Upload', h, 'sm',
+        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+        '<button class="btn btn-primary" onclick="processOBDExcelUpload()"><i class="bx bx-check-double"></i> Upload</button>');
+}
+
+function processOBDExcelUpload() {
+    var fileInput = document.getElementById('obdExcelFile');
+    if (!fileInput || !fileInput.files[0]) { showToast('Select a file', 'error'); return; }
     var reader = new FileReader();
     reader.onload = function(e) {
         try {
@@ -3834,944 +3966,1368 @@ function processOBDUpload(input) {
             var ws = wb.Sheets[wb.SheetNames[0]];
             var data = XLSX.utils.sheet_to_json(ws, { header: 1 });
             if (data.length === 0) { showToast('Empty file', 'error'); return; }
-            var startRow = (String(data[0][0] || '').toLowerCase().indexOf('obd') > -1) ? 1 : 0;
 
-            // Group by OBD No
+            var startRow = 0;
+            var firstCell = String(data[0][0] || '').toLowerCase();
+            if (firstCell.indexOf('obd') > -1) startRow = 1;
+
             var obdMap = {};
+            var rowCount = 0;
             for (var k = startRow; k < data.length; k++) {
-                var r = data[k]; if (!r || !r[0]) continue;
+                var r = data[k];
+                if (!r || !r[0]) continue;
+
                 var obdNo = String(r[0] || '').trim();
                 var material = String(r[1] || '').trim();
-                var desc = String(r[2] || '').trim();
+                var description = String(r[2] || '').trim();
                 var ean = String(r[3] || '').trim();
                 var orderQty = parseInt(r[4]) || 0;
-                var pickingQty = parseInt(r[5]) || 0;
+                var pickQty = parseInt(r[5]) || 0;
                 var customer = String(r[6] || '').trim();
-                if (pickingQty === 0) pickingQty = orderQty;
 
-                if (!obdMap[obdNo]) { obdMap[obdNo] = { obdNo: obdNo, customer: customer, materials: [] }; }
-                obdMap[obdNo].materials.push({ material: material, description: desc, ean: ean, orderQty: orderQty, pickingQty: pickingQty });
+                if (!obdNo || !material) continue;
+                if (orderQty <= 0) orderQty = pickQty > 0 ? 0 : 0;
+                if (pickQty <= 0) pickQty = orderQty;
+                if (pickQty <= 0 && orderQty <= 0) continue;
+                if (pickQty <= 0) pickQty = orderQty;
+
+                if (!obdMap[obdNo]) { obdMap[obdNo] = { customer: customer, materials: [] }; }
+                obdMap[obdNo].materials.push({
+                    material: material, description: description, ean: ean,
+                    orderQty: orderQty, pickQty: pickQty
+                });
+                rowCount++;
             }
 
-            // Assign locations from bin master
-            var binMaster = DB.get('location_master');
-            var obdCount = 0, matCount = 0;
-            for (var key in obdMap) {
-                var obd = obdMap[key];
-                for (var mi = 0; mi < obd.materials.length; mi++) {
-                    var mat = obd.materials[mi];
-                    var locations = [];
-                    var totalAvail = 0;
-                    for (var bi = 0; bi < binMaster.length; bi++) {
-                        if (binMaster[bi].material === mat.material || binMaster[bi].ean === mat.ean) {
-                            locations.push({ rack: binMaster[bi].rack, availableQty: binMaster[bi].quantity, ean: binMaster[bi].ean });
-                            totalAvail += binMaster[bi].quantity;
-                        }
-                    }
-                    mat.locations = locations;
-                    mat.totalAvailable = totalAvail;
-                    mat.locationStatus = totalAvail >= mat.pickingQty ? 'Sufficient' : 'Insufficient';
-                    matCount++;
-                }
-                DB.add('obd_data', { obdNo: obd.obdNo, customer: obd.customer, materials: obd.materials, status: 'Pending', assignedPicker: '', assignedLoader: '', pickedItems: [], loadedItems: [], loadingNo: '', vehicleNo: '', securityName: '' });
-                obdCount++;
+            var keys = Object.keys(obdMap);
+            if (keys.length === 0) { showToast('No valid data found in file', 'error'); return; }
+
+            for (var i = 0; i < keys.length; i++) {
+                DB.add('obd_data', {
+                    obdNo: keys[i], customer: obdMap[keys[i]].customer, date: today(), status: 'Open',
+                    materials: obdMap[keys[i]].materials
+                });
             }
-            logAction('Picking', 'OBD_UPLOAD', 'Uploaded ' + obdCount + ' OBDs, ' + matCount + ' materials');
-            showToast('Success! ' + obdCount + ' OBDs uploaded with location reports.', 'success');
-            renderPicking('obd-upload');
-        } catch(err) { showToast('Error: ' + err.message, 'error'); }
+
+            var totalMats = 0;
+            for (var m = 0; m < keys.length; m++) { totalMats += obdMap[keys[m]].materials.length; }
+            logAction('Picking', 'OBD_BULK_UPLOAD', keys.length + ' OBDs, ' + totalMats + ' materials uploaded');
+            showToast(keys.length + ' OBDs uploaded with ' + totalMats + ' materials!', 'success');
+            closeModal();
+            renderOBDUpload();
+        } catch (err) { showToast('Error reading file: ' + err.message, 'error'); }
     };
-    reader.readAsArrayBuffer(input.files[0]);
-    input.value = '';
+    reader.readAsArrayBuffer(fileInput.files[0]);
 }
 
-function viewOBDReport(obdId) {
+function viewOBDDetail(obdId) {
     var obd = DB.find('obd_data', obdId);
     if (!obd) return;
-    var html = '<div style="background:var(--accent-dim);padding:12px;border-radius:8px;margin-bottom:16px;border-left:4px solid var(--accent)">';
-    html += '<strong style="font-family:var(--font-display);font-size:16px;color:var(--accent)">' + escapeHtml(obd.obdNo) + '</strong><br>';
-    html += '<span style="color:var(--text-muted)">Customer: ' + escapeHtml(obd.customer || '-') + ' | Status: <span class="badge badge-warning">' + escapeHtml(obd.status) + '</span></span></div>';
-
-    html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>Material</th><th>Description</th><th>EAN</th><th>Order Qty</th><th>Picking Qty</th><th>Locations Available</th><th>Total Avail</th><th>Status</th></tr></thead><tbody>';
-    if (obd.materials) {
-        for (var i = 0; i < obd.materials.length; i++) {
-            var m = obd.materials[i];
-            var locStr = '';
-            if (m.locations && m.locations.length > 0) {
-                locStr = m.locations.map(function(l) { return escapeHtml(l.rack) + '(' + l.availableQty + ')'; }).join(', ');
-            } else {
-                locStr = '<span style="color:var(--danger)">No location found</span>';
-            }
-            html += '<tr><td>' + (i + 1) + '</td><td>' + escapeHtml(m.material) + '</td><td style="font-size:12px;color:var(--text-secondary)">' + escapeHtml(m.description) + '</td>';
-            html += '<td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(m.ean) + '</td>';
-            html += '<td>' + m.orderQty + '</td><td><strong>' + m.pickingQty + '</strong></td>';
-            html += '<td style="font-size:11px">' + locStr + '</td>';
-            html += '<td>' + (m.totalAvailable || 0) + '</td>';
-            html += '<td><span class="badge ' + (m.locationStatus === 'Sufficient' ? 'badge-success' : 'badge-danger') + '">' + escapeHtml(m.locationStatus || '-') + '</span></td></tr>';
-        }
+    var h = '<div class="form-row"><div class="form-group"><label>OBD No</label><div class="form-input" style="color:var(--accent);font-weight:700">' + escapeHtml(obd.obdNo) + '</div></div>';
+    h += '<div class="form-group"><label>Customer</label><div class="form-input">' + escapeHtml(obd.customer || '-') + '</div></div>';
+    h += '<div class="form-group"><label>Status</label><div class="form-input"><span class="badge badge-accent">' + escapeHtml(obd.status) + '</span></div></div></div>';
+    h += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>Material</th><th>Description</th><th>EAN</th><th>Order Qty</th><th>Pick Qty</th></tr></thead><tbody>';
+    var mats = obd.materials || [];
+    for (var i = 0; i < mats.length; i++) {
+        var qty = getMatQty(mats[i]);
+        h += '<tr><td>' + (i + 1) + '</td><td>' + escapeHtml(mats[i].material) + '</td>';
+        h += '<td>' + escapeHtml(mats[i].description || '-') + '</td><td>' + escapeHtml(mats[i].ean || '-') + '</td>';
+        h += '<td>' + qty.orderQty + '</td><td>' + qty.pickQty + '</td></tr>';
     }
-    html += '</tbody></table></div>';
-
-    // Show picked items if any
-    if (obd.pickedItems && obd.pickedItems.length > 0) {
-        html += '<hr class="cyber-line"><div class="card-title" style="color:var(--info)">Picked Items</div>';
-        html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>Location</th><th>Expected</th><th>Picked</th><th>Reason</th></tr></thead><tbody>';
-        for (var p = 0; p < obd.pickedItems.length; p++) {
-            var pi = obd.pickedItems[p];
-            html += '<tr><td>' + escapeHtml(pi.material) + '</td><td>' + escapeHtml(pi.location) + '</td>';
-            html += '<td>' + pi.expectedQty + '</td><td class="' + (pi.pickedQty < pi.expectedQty ? 'qty-mismatch' : 'qty-match') + '">' + pi.pickedQty + '</td>';
-            html += '<td>' + (pi.reason ? '<span class="badge badge-danger">' + escapeHtml(pi.reason) + '</span>' : '<span class="badge badge-success">OK</span>') + '</td></tr>';
-        }
-        html += '</tbody></table></div>';
-    }
-
-    // Show loaded items if any
-    if (obd.loadedItems && obd.loadedItems.length > 0) {
-        html += '<hr class="cyber-line"><div class="card-title" style="color:var(--success)">Loaded Items</div>';
-        html += '<div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Vehicle: ' + escapeHtml(obd.vehicleNo || '-') + ' | Security: ' + escapeHtml(obd.securityName || '-') + ' | Loading No: <span style="font-family:var(--font-display);color:var(--accent)">' + escapeHtml(obd.loadingNo || '-') + '</span></div>';
-        html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>EAN</th><th>Qty Loaded</th><th>In OBD</th></tr></thead><tbody>';
-        for (var li = 0; li < obd.loadedItems.length; li++) {
-            var ldi = obd.loadedItems[li];
-            html += '<tr><td>' + escapeHtml(ldi.material) + '</td><td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(ldi.ean) + '</td>';
-            html += '<td><strong>' + ldi.qty + '</strong></td>';
-            html += '<td>' + (ldi.inOBD ? '<span class="badge badge-success">Yes</span>' : '<span class="badge badge-danger">No</span>') + '</td></tr>';
-        }
-        html += '</tbody></table></div>';
-    }
-
-    showModal('OBD Report: ' + obd.obdNo, html, 'lg',
-        '<button class="btn btn-secondary" onclick="closeModal()">Close</button>' +
-        '<button class="btn btn-primary" onclick="exportOBDReport(\'' + obdId + '\')"><i class="bx bx-download"></i> Export PDF</button>');
-}
-
-function exportOBDReport(obdId) {
-    try {
-        var obd = DB.find('obd_data', obdId);
-        if (!obd) return;
-        var doc = new jspdf.jsPDF();
-        doc.setFontSize(16); doc.text('VIP INDUSTRIES LIMITED (MD20)', 14, 20);
-        doc.setFontSize(12); doc.text('OBD Picking Report', 14, 28);
-        doc.setFontSize(10);
-        doc.text('OBD No: ' + obd.obdNo, 14, 38);
-        doc.text('Customer: ' + (obd.customer || '-'), 14, 44);
-        doc.text('Status: ' + (obd.status || '-'), 14, 50);
-
-        var tableData = [];
-        if (obd.materials) {
-            for (var i = 0; i < obd.materials.length; i++) {
-                var m = obd.materials[i];
-                var locStr = '';
-                if (m.locations) locStr = m.locations.map(function(l) { return l.rack + '(' + l.availableQty + ')'; }).join(', ');
-                tableData.push([m.material, m.ean, m.orderQty, m.pickingQty, locStr, m.totalAvailable || 0, m.locationStatus || '-']);
-            }
-        }
-        doc.autoTable({
-            head: [['Material', 'EAN', 'Order Qty', 'Pick Qty', 'Locations', 'Avail', 'Status']],
-            body: tableData, startY: 58, styles: { fontSize: 7 },
-            headStyles: { fillColor: [0, 229, 160] }
-        });
-
-        if (obd.pickedItems && obd.pickedItems.length > 0) {
-            var pickData = [];
-            for (var p = 0; p < obd.pickedItems.length; p++) {
-                var pi = obd.pickedItems[p];
-                pickData.push([pi.material, pi.location, pi.expectedQty, pi.pickedQty, pi.reason || 'OK']);
-            }
-            doc.autoTable({
-                head: [['Material', 'Location', 'Expected', 'Picked', 'Reason']],
-                body: pickData, startY: doc.lastAutoTable.finalY + 10,
-                styles: { fontSize: 7 }, headStyles: { fillColor: [59, 130, 246] }
-            });
-        }
-        doc.save('OBD_' + obd.obdNo + '.pdf');
-        showToast('PDF exported!', 'success');
-    } catch(e) { showToast('Export failed: ' + e.message, 'error'); }
+    h += '</tbody></table></div>';
+    showModal('OBD Detail — ' + obd.obdNo, h, 'lg');
 }
 
 function deleteOBD(obdId) {
-    if (!confirm('Delete this OBD?')) return;
+    var obd = DB.find('obd_data', obdId);
+    if (!obd || obd.status !== 'Open') { showToast('Cannot delete this OBD', 'error'); return; }
+    showModal('Confirm Delete', '<p>Are you sure you want to delete <strong>' + escapeHtml(obd.obdNo) + '</strong>?</p>', 'sm',
+        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+        '<button class="btn btn-danger" onclick="confirmDeleteOBD(\'' + obdId + '\')"><i class="bx bx-trash"></i> Delete</button>');
+}
+
+function confirmDeleteOBD(obdId) {
     DB.remove('obd_data', obdId);
-    logAction('Picking', 'DELETE_OBD', 'Deleted OBD');
-    showToast('OBD deleted', 'info');
-    renderPicking('obd-upload');
+    logAction('Picking', 'OBD_DELETED', 'OBD deleted');
+    showToast('OBD deleted', 'success');
+    closeModal();
+    renderOBDUpload();
 }
 
-// --- PICKING ASSIGN ---
+// ==================== PICKING ASSIGN ====================
 function renderPickingAssign() {
-    var pendingObds = DB.filter('obd_data', function(o) { return o.status === 'Pending' || o.status === 'Assigned'; });
-    var html = '<div class="section-header"><h2><i class="bx bx-user-plus"></i> Picking Assign</h2></div>';
+    var sec = document.getElementById('section-picking');
+    var pendingReqs = DB.filter('location_requests', function(r) { return r.status === 'Pending'; });
 
-    html += '<div class="card" style="margin-bottom:16px"><div class="card-title">Assign OBD to Picker</div>';
-    html += '<div class="form-row">';
-    html += '<div class="form-group"><label>Select OBD <span class="req">*</span></label><select id="pickingAssignObd" class="form-input"><option value="">-- Select OBD --</option>';
-    for (var i = 0; i < pendingObds.length; i++) {
-        html += '<option value="' + pendingObds[i].id + '">' + escapeHtml(pendingObds[i].obdNo) + ' — ' + escapeHtml(pendingObds[i].customer || '') + ' [' + pendingObds[i].status + ']</option>';
-    }
-    html += '</select></div>';
-    html += '<div class="form-group"><label>Picker Username <span class="req">*</span></label><input type="text" id="pickingAssignUser" class="form-input" placeholder="e.g. picker"></div>';
+    var html = '<div class="section-header"><h2><i class="bx bxs-user-check"></i> Picking Assignment</h2></div>';
+    html += '<div class="tab-bar">';
+    html += '<button class="tab-btn active" onclick="switchPickingAssignTab(\'assign\',this)">Assign OBD</button>';
+    html += '<button class="tab-btn" onclick="switchPickingAssignTab(\'requests\',this)">Location Requests ' + (pendingReqs.length > 0 ? '<span class="badge badge-danger" style="margin-left:6px">' + pendingReqs.length + '</span>' : '') + '</button>';
     html += '</div>';
-    html += '<div class="form-actions">';
-    html += '<button class="btn btn-primary" onclick="assignPickingToUser()"><i class="bx bx-send"></i> Send Picking Report</button>';
-    html += '<button class="btn btn-secondary" onclick="assignAllPickingToUser()"><i class="bx bx-send"></i> Send All Pending</button>';
-    html += '</div></div>';
+    html += '<div id="pickingAssignTabContent"></div>';
+    sec.innerHTML = html;
+    switchPickingAssignTab('assign');
+}
 
-    // Assigned list
-    var assignedObds = DB.filter('obd_data', function(o) { return o.status === 'Assigned' && o.assignedPicker; });
-    if (assignedObds.length > 0) {
-        html += '<div class="card"><div class="card-title">Currently Assigned</div>';
-        html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Customer</th><th>Assigned To</th><th>Action</th></tr></thead><tbody>';
-        for (var j = 0; j < assignedObds.length; j++) {
-            var a = assignedObds[j];
-            html += '<tr><td style="font-family:var(--font-display);color:var(--accent)">' + escapeHtml(a.obdNo) + '</td>';
-            html += '<td>' + escapeHtml(a.customer || '-') + '</td><td><strong>' + escapeHtml(a.assignedPicker) + '</strong></td>';
-            html += '<td><button class="btn btn-danger btn-sm" onclick="unassignPicking(\'' + a.id + '\')"><i class="bx bx-x"></i> Unassign</button></td></tr>';
+function switchPickingAssignTab(tab, btn) {
+    if (btn) {
+        var tabs = btn.parentElement.querySelectorAll('.tab-btn');
+        for (var i = 0; i < tabs.length; i++) tabs[i].classList.remove('active');
+        btn.classList.add('active');
+    }
+    var el = document.getElementById('pickingAssignTabContent');
+    if (!el) return;
+    if (tab === 'assign') renderPickingAssignTab(el);
+    else renderLocationRequestsTab(el);
+}
+
+// OBD Search — input only, no dropdown, results shown only after search
+function renderPickingAssignTab(container) {
+    var h = '<div class="card"><div class="card-title">Search OBD to Assign</div>';
+    h += '<div style="display:flex;gap:10px;max-width:500px;margin-bottom:16px">';
+    h += '<input type="text" id="obdSearchInput" class="form-input" placeholder="Type OBD Number..." onkeydown="if(event.key===\'Enter\')searchOBDForAssign()" style="flex:1">';
+    h += '<button class="btn btn-primary" onclick="searchOBDForAssign()"><i class="bx bx-search"></i> Search</button>';
+    h += '</div>';
+    h += '<div id="obdSearchResults"><div style="color:var(--text-muted);font-size:13px;padding:8px">Type an OBD number and click Search to find it.</div></div>';
+    h += '<div id="obdAssignDetail" style="margin-top:20px"></div>';
+    h += '</div>';
+    container.innerHTML = h;
+}
+
+function searchOBDForAssign() {
+    var q = (document.getElementById('obdSearchInput').value || '').trim().toLowerCase();
+    var resultsEl = document.getElementById('obdSearchResults');
+    var detailEl = document.getElementById('obdAssignDetail');
+    detailEl.innerHTML = '';
+
+    if (!q) {
+        resultsEl.innerHTML = '<div style="color:var(--text-muted);font-size:13px;padding:8px">Type an OBD number to search.</div>';
+        return;
+    }
+
+    var obds = DB.filter('obd_data', function(o) {
+        return o.status === 'Open' && o.obdNo.toLowerCase().indexOf(q) > -1;
+    });
+
+    if (obds.length === 0) {
+        resultsEl.innerHTML = '<div style="color:var(--danger);font-size:13px;padding:12px"><i class="bx bx-error-circle"></i> No open OBD found matching "' + escapeHtml(q) + '"</div>';
+        return;
+    }
+
+    var h = '<div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Customer</th><th>Materials</th><th>Total Pick Qty</th><th>Created</th><th>Action</th></tr></thead><tbody>';
+    for (var j = 0; j < obds.length; j++) {
+        var o = obds[j];
+        var totalPickQty = 0;
+        var mats = o.materials || [];
+        for (var mq = 0; mq < mats.length; mq++) {
+            totalPickQty += getMatQty(mats[mq]).pickQty;
         }
-        html += '</tbody></table></div></div>';
+        h += '<tr><td><strong style="color:var(--accent)">' + escapeHtml(o.obdNo) + '</strong></td>';
+        h += '<td>' + escapeHtml(o.customer || '-') + '</td>';
+        h += '<td>' + mats.length + '</td><td>' + totalPickQty + '</td>';
+        h += '<td style="font-size:12px;color:var(--text-muted)">' + formatDateTime(o.createdAt) + '</td>';
+        h += '<td><button class="btn btn-sm btn-primary" onclick="selectOBDForAssign(\'' + o.id + '\')"><i class="bx bx-target-lock"></i> Select</button></td></tr>';
     }
-    return html;
+    h += '</tbody></table></div>';
+    resultsEl.innerHTML = h;
 }
 
-function assignPickingToUser() {
-    var obdId = document.getElementById('pickingAssignObd').value;
-    var username = document.getElementById('pickingAssignUser').value.trim();
-    if (!obdId) { showToast('Select an OBD', 'error'); return; }
-    if (!username) { showToast('Enter username', 'error'); return; }
-    var user = DB.filter('users', function(u) { return u.username === username; });
-    if (user.length === 0) { showToast('Username not found!', 'error'); return; }
+function selectOBDForAssign(obdId) {
+    var obd = DB.find('obd_data', obdId);
+    if (!obd) return;
 
-    DB.update('obd_data', obdId, { status: 'Assigned', assignedPicker: username });
-    addNotification('Picking report assigned: OBD sent to ' + username, 'info', username);
-    logAction('Picking', 'ASSIGN', 'OBD assigned to ' + username);
-    showToast('Picking report sent to ' + username + '!', 'success');
-    renderPicking('picking-assign');
-}
+    var pickers = DB.filter('users', function(u) {
+        return u.permissions && u.permissions.actions && u.permissions.actions.canPick === true;
+    });
+    var mats = obd.materials || [];
 
-function assignAllPickingToUser() {
-    var username = document.getElementById('pickingAssignUser').value.trim();
-    if (!username) { showToast('Enter username first', 'error'); return; }
-    var user = DB.filter('users', function(u) { return u.username === username; });
-    if (user.length === 0) { showToast('Username not found!', 'error'); return; }
-    var pending = DB.filter('obd_data', function(o) { return o.status === 'Pending'; });
-    if (pending.length === 0) { showToast('No pending OBDs', 'error'); return; }
-    for (var i = 0; i < pending.length; i++) {
-        DB.update('obd_data', pending[i].id, { status: 'Assigned', assignedPicker: username });
+    // Smart allocation — only minimum locations needed
+    var allocationMap = {};
+    var canFulfill = true;
+    for (var m = 0; m < mats.length; m++) {
+        var qty = getMatQty(mats[m]);
+        var result = getSmartLocations(mats[m].material, qty.pickQty, null);
+        allocationMap[mats[m].material] = result;
+        if (result.shortfall > 0) canFulfill = false;
     }
-    addNotification(pending.length + ' OBD picking reports assigned to you', 'info', username);
-    logAction('Picking', 'ASSIGN_ALL', pending.length + ' OBDs assigned to ' + username);
-    showToast(pending.length + ' OBDs sent to ' + username + '!', 'success');
-    renderPicking('picking-assign');
+
+    var h = '<div class="card" style="border-color:var(--accent);box-shadow:var(--glow)">';
+    h += '<div class="card-title" style="color:var(--accent)">OBD: ' + escapeHtml(obd.obdNo) + ' — ' + escapeHtml(obd.customer || '') + '</div>';
+
+    // Picker select
+    h += '<div class="form-group" style="max-width:300px;margin-bottom:16px"><label>Select Picker <span class="req">*</span></label>';
+    h += '<select id="assignPickerSelect" class="form-input"><option value="">-- Choose Picker --</option>';
+    for (var p = 0; p < pickers.length; p++) {
+        h += '<option value="' + pickers[p].id + '">' + escapeHtml(pickers[p].name) + ' (' + escapeHtml(pickers[p].username) + ')</option>';
+    }
+    h += '</select></div>';
+
+    // Materials — text display, no dropdowns
+    h += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>Description</th><th>EAN</th><th>Order Qty</th><th>Pick Qty</th><th>Required Locations</th><th>Allocated Qty</th><th>Status</th></tr></thead><tbody>';
+    for (var m2 = 0; m2 < mats.length; m2++) {
+        var mat = mats[m2];
+        var qty = getMatQty(mat);
+        var alloc = allocationMap[mat.material];
+        var totalAlloc = 0;
+        var locNames = [];
+        for (var l = 0; l < alloc.allocated.length; l++) {
+            totalAlloc += alloc.allocated[l].assignedQty;
+            locNames.push(alloc.allocated[l].rack + '(' + alloc.allocated[l].assignedQty + ')');
+        }
+        var statusBadge = alloc.shortfall > 0
+            ? '<span class="badge badge-danger">Short ' + alloc.shortfall + '</span>'
+            : '<span class="badge badge-success">Fulfilled</span>';
+        h += '<tr><td>' + escapeHtml(mat.material) + '</td>';
+        h += '<td style="font-size:12px">' + escapeHtml(mat.description || '-') + '</td>';
+        h += '<td>' + escapeHtml(mat.ean || '-') + '</td>';
+        h += '<td>' + qty.orderQty + '</td><td>' + qty.pickQty + '</td>';
+        h += '<td style="font-size:12px">' + (locNames.length > 0 ? escapeHtml(locNames.join(', ')) : '<span style="color:var(--text-muted)">None</span>') + '</td>';
+        h += '<td>' + totalAlloc + '</td><td>' + statusBadge + '</td></tr>';
+    }
+    h += '</tbody></table></div>';
+
+    h += '<div class="form-actions" style="margin-top:16px">';
+    h += '<button class="btn btn-primary" onclick="confirmPickingAssignment(\'' + obdId + '\')"><i class="bx bx-check-circle"></i> Confirm Assignment</button>';
+    h += '<button class="btn btn-secondary" onclick="document.getElementById(\'obdAssignDetail\').innerHTML=\'\'"><i class="bx bx-x"></i> Cancel</button>';
+    if (!canFulfill) {
+        h += '<span style="color:var(--warning);font-size:12px;margin-left:12px"><i class="bx bx-error"></i> Some materials have insufficient stock.</span>';
+    }
+    h += '</div></div>';
+
+    document.getElementById('obdAssignDetail').innerHTML = h;
 }
 
-function unassignPicking(obdId) {
-    DB.update('obd_data', obdId, { status: 'Pending', assignedPicker: '' });
-    showToast('Unassigned', 'info');
-    renderPicking('picking-assign');
+function confirmPickingAssignment(obdId) {
+    var obd = DB.find('obd_data', obdId);
+    if (!obd) return;
+    var pickerId = document.getElementById('assignPickerSelect').value;
+    if (!pickerId) { showToast('Select a picker', 'error'); return; }
+    var picker = DB.find('users', pickerId);
+    if (!picker) return;
+
+    var mats = obd.materials || [];
+    var allocationMap = {};
+    for (var m = 0; m < mats.length; m++) {
+        var qty = getMatQty(mats[m]);
+        allocationMap[mats[m].material] = getSmartLocations(mats[m].material, qty.pickQty, null);
+    }
+
+    if (!validateAssignmentQty(mats, allocationMap)) {
+        showToast('Quantity validation failed!', 'error'); return;
+    }
+
+    var assignment = DB.add('picking_assignments', {
+        obdNo: obd.obdNo, obdId: obdId, pickerId: pickerId, pickerName: picker.name, status: 'Assigned'
+    });
+
+    for (var m2 = 0; m2 < mats.length; m2++) {
+        var mat = mats[m2];
+        var qty = getMatQty(mat);
+        var alloc = allocationMap[mat.material];
+        var totalAssigned = 0;
+        for (var l = 0; l < alloc.allocated.length; l++) { totalAssigned += alloc.allocated[l].assignedQty; }
+
+        var report = DB.add('picking_reports', {
+            assignmentId: assignment.id, obdNo: obd.obdNo, pickerId: pickerId, pickerName: picker.name,
+            material: mat.material, ean: mat.ean || '', description: mat.description || '',
+            orderQty: qty.orderQty, pickQty: qty.pickQty,
+            totalAssigned: totalAssigned, totalPicked: 0, status: 'Pending'
+        });
+
+        for (var l2 = 0; l2 < alloc.allocated.length; l2++) {
+            var loc = alloc.allocated[l2];
+            DB.add('picking_done', {
+                reportId: report.id, assignmentId: assignment.id, obdNo: obd.obdNo,
+                pickerId: pickerId, pickerName: picker.name,
+                material: mat.material, ean: mat.ean || '', description: mat.description || '',
+                locationId: loc.locationId, rack: loc.rack,
+                assignedQty: loc.assignedQty, availableQty: loc.availableQty, pickedQty: 0,
+                status: 'Pending'
+            });
+        }
+    }
+
+    DB.update('obd_data', obdId, { status: 'Assigned' });
+    addNotification('OBD ' + obd.obdNo + ' assigned to ' + picker.name, 'info', pickerId);
+    logAction('Picking', 'ASSIGNED', 'OBD ' + obd.obdNo + ' assigned to ' + picker.name);
+    showToast('OBD ' + obd.obdNo + ' assigned to ' + picker.name + '!', 'success');
+    renderPickingAssign();
 }
 
-// --- START PICKING (Picker's View) ---
+// ==================== LOCATION REQUESTS (Admin) ====================
+function renderLocationRequestsTab(container) {
+    var requests = DB.filter('location_requests', function(r) { return r.status === 'Pending'; }).slice().reverse();
+    var resolved = DB.filter('location_requests', function(r) { return r.status !== 'Pending'; }).slice().reverse().slice(0, 20);
+
+    var h = '';
+    if (requests.length === 0 && resolved.length === 0) {
+        h = '<div class="card"><div class="empty-state"><i class="bx bx-check-circle"></i><p>No location requests</p></div></div>';
+    } else {
+        if (requests.length > 0) {
+            h += '<div class="card" style="margin-bottom:20px"><div class="card-title" style="color:var(--warning)">Pending Requests (' + requests.length + ')</div>';
+            h += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD</th><th>Material</th><th>Old Location</th><th>Reason</th><th>Picker</th><th>Time</th><th>Action</th></tr></thead><tbody>';
+            for (var i = 0; i < requests.length; i++) {
+                var r = requests[i];
+                h += '<tr><td><strong style="color:var(--accent)">' + escapeHtml(r.obdNo) + '</strong></td>';
+                h += '<td>' + escapeHtml(r.material) + '</td>';
+                h += '<td>' + escapeHtml(r.oldRack || '-') + '</td>';
+                h += '<td>' + escapeHtml(r.reason || '-') + '</td>';
+                h += '<td>' + escapeHtml(r.pickerName) + '</td>';
+                h += '<td style="font-size:12px;color:var(--text-muted)">' + formatDateTime(r.requestedAt) + '</td>';
+                h += '<td><button class="btn btn-sm btn-primary" onclick="showAdminAssignLocation(\'' + r.id + '\')"><i class="bx bx-map-pin"></i> Assign</button> ';
+                h += '<button class="btn btn-sm btn-danger" onclick="rejectLocationRequest(\'' + r.id + '\')"><i class="bx bx-x"></i></button></td></tr>';
+            }
+            h += '</tbody></table></div></div>';
+        }
+        if (resolved.length > 0) {
+            h += '<div class="card"><div class="card-title">Resolved Requests</div>';
+            h += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD</th><th>Material</th><th>Old Loc</th><th>New Loc</th><th>Status</th><th>Time</th></tr></thead><tbody>';
+            for (var j = 0; j < resolved.length; j++) {
+                var rr = resolved[j];
+                var sBadge = rr.status === 'Assigned' ? 'badge-success' : 'badge-danger';
+                h += '<tr><td>' + escapeHtml(rr.obdNo) + '</td><td>' + escapeHtml(rr.material) + '</td>';
+                h += '<td>' + escapeHtml(rr.oldRack || '-') + '</td><td>' + escapeHtml(rr.newRack || '-') + '</td>';
+                h += '<td><span class="badge ' + sBadge + '">' + escapeHtml(rr.status) + '</span></td>';
+                h += '<td style="font-size:12px;color:var(--text-muted)">' + formatDateTime(rr.resolvedAt) + '</td></tr>';
+            }
+            h += '</tbody></table></div></div>';
+        }
+    }
+    container.innerHTML = h;
+}
+
+function showAdminAssignLocation(reqId) {
+    var req = DB.find('location_requests', reqId);
+    if (!req) return;
+
+    var reports = DB.filter('picking_reports', function(r) {
+        return r.assignmentId === req.assignmentId && r.material === req.material;
+    });
+    var remaining = 0;
+    for (var i = 0; i < reports.length; i++) {
+        remaining = (reports[i].pickQty || reports[i].requiredQty || 0) - (reports[i].totalPicked || 0);
+        break;
+    }
+
+    var availableLocs = DB.filter('location_master', function(loc) {
+        if (loc.material !== req.material || loc.quantity <= 0) return false;
+        if (isLocationLocked(loc.id, req.assignmentId)) return false;
+        var already = DB.filter('picking_done', function(p) {
+            return p.assignmentId === req.assignmentId && p.locationId === loc.id && p.status !== 'Not Found' && p.status !== 'Replaced';
+        });
+        return already.length === 0;
+    });
+
+    var h = '<div style="background:var(--warning-dim);padding:12px;border-radius:6px;margin-bottom:16px;font-size:13px">';
+    h += '<strong>OBD:</strong> ' + escapeHtml(req.obdNo) + ' | <strong>Material:</strong> ' + escapeHtml(req.material) + ' | <strong>Old Location:</strong> ' + escapeHtml(req.oldRack || '-') + ' | <strong>Remaining Needed:</strong> ' + remaining;
+    h += '</div>';
+
+    // Search input for location — no dropdown
+    h += '<div class="form-group"><label>Search Location</label>';
+    h += '<input type="text" id="newLocSearchInput" class="form-input" placeholder="Type rack name to search..." oninput="filterAdminLocSearch()"></div>';
+    h += '<div id="locationSearchResults" style="max-height:200px;overflow-y:auto;margin-bottom:12px"></div>';
+
+    h += '<div class="form-group"><label>Assign Quantity <span class="req">*</span></label>';
+    h += '<input type="number" id="newLocQty" class="form-input" min="1" max="' + remaining + '" placeholder="Enter qty (max ' + remaining + ')"></div>';
+
+    if (availableLocs.length === 0) {
+        h += '<div style="color:var(--danger);font-size:13px"><i class="bx bx-error-circle"></i> No available locations found for this material.</div>';
+    }
+
+    showModal('Assign New Location', h, 'sm',
+        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+        '<button class="btn btn-primary" onclick="confirmAdminAssignLocation(\'' + reqId + '\',' + remaining + ')"' + (availableLocs.length === 0 ? ' disabled' : '') + '><i class="bx bx-check-circle"></i> Assign</button>');
+
+    window._adminLocOptions = availableLocs;
+    renderLocSearchResults(availableLocs);
+}
+
+function filterAdminLocSearch() {
+    var q = (document.getElementById('newLocSearchInput').value || '').toLowerCase();
+    var filtered = [];
+    for (var i = 0; i < (window._adminLocOptions || []).length; i++) {
+        if (window._adminLocOptions[i].rack.toLowerCase().indexOf(q) > -1) filtered.push(window._adminLocOptions[i]);
+    }
+    renderLocSearchResults(filtered);
+}
+
+function renderLocSearchResults(locs) {
+    var el = document.getElementById('locationSearchResults');
+    if (!el) return;
+    if (locs.length === 0) {
+        el.innerHTML = '<div style="color:var(--text-muted);font-size:12px;padding:8px">No locations found</div>';
+        return;
+    }
+    var h = '<div style="display:flex;flex-direction:column;gap:4px">';
+    for (var i = 0; i < locs.length; i++) {
+        var loc = locs[i];
+        h += '<label style="display:flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;transition:all .2s;font-size:13px" onmouseover="this.style.borderColor=\'var(--accent)\'" onmouseout="this.style.borderColor=\'var(--border)\'">';
+        h += '<input type="radio" name="newLocRadio" value="' + loc.id + '" data-rack="' + escapeHtml(loc.rack) + '" data-qty="' + loc.quantity + '" style="accent-color:var(--accent);width:16px;height:16px"> ';
+        h += '<strong>' + escapeHtml(loc.rack) + '</strong> — Available: <span style="color:var(--accent);font-weight:700">' + loc.quantity + '</span>';
+        h += '</label>';
+    }
+    h += '</div>';
+    el.innerHTML = h;
+}
+
+function confirmAdminAssignLocation(reqId, maxQty) {
+    var req = DB.find('location_requests', reqId);
+    if (!req) return;
+    var radio = document.querySelector('input[name="newLocRadio"]:checked');
+    var qty = parseInt(document.getElementById('newLocQty').value) || 0;
+    if (!radio) { showToast('Select a location', 'error'); return; }
+    if (qty <= 0) { showToast('Enter valid quantity', 'error'); return; }
+    if (qty > maxQty) { showToast('Quantity exceeds remaining required ' + maxQty, 'error'); return; }
+
+    var locId = radio.value;
+    var rack = radio.getAttribute('data-rack');
+    var loc = DB.find('location_master', locId);
+    if (!loc || loc.quantity < qty) { showToast('Insufficient stock at location', 'error'); return; }
+    if (isLocationLocked(locId, req.assignmentId)) { showToast('Location is now locked', 'error'); return; }
+
+    DB.update('picking_done', req.pickingDoneId, { status: 'Replaced' });
+
+    DB.add('picking_done', {
+        reportId: req.reportId || '', assignmentId: req.assignmentId, obdNo: req.obdNo,
+        pickerId: req.pickerId, pickerName: req.pickerName,
+        material: req.material, ean: req.ean || '', description: req.description || '',
+        locationId: locId, rack: rack,
+        assignedQty: qty, availableQty: loc.quantity, pickedQty: 0, status: 'Pending'
+    });
+
+    var reports = DB.filter('picking_reports', function(r) {
+        return r.assignmentId === req.assignmentId && r.material === req.material;
+    });
+    if (reports.length > 0) {
+        var allDone = DB.filter('picking_done', function(p) {
+            return p.assignmentId === req.assignmentId && p.material === req.material && p.status !== 'Not Found' && p.status !== 'Replaced';
+        });
+        var newTotal = 0;
+        for (var i = 0; i < allDone.length; i++) newTotal += allDone[i].assignedQty;
+        DB.update('picking_reports', reports[0].id, { totalAssigned: newTotal });
+    }
+
+    DB.update('location_requests', reqId, {
+        status: 'Assigned', newLocationId: locId, newRack: rack, newAssignedQty: qty,
+        resolvedAt: new Date().toISOString(), resolvedBy: APP.currentUser ? APP.currentUser.name : 'Admin'
+    });
+
+    addNotification('New location ' + rack + ' assigned for OBD ' + req.obdNo, 'success', req.pickerId);
+    logAction('Picking', 'LOCATION_ASSIGNED', 'Location ' + rack + ' (qty ' + qty + ') for ' + req.material + ' in OBD ' + req.obdNo);
+    showToast('New location assigned!', 'success');
+    closeModal();
+    renderPickingAssign();
+}
+
+function rejectLocationRequest(reqId) {
+    DB.update('location_requests', reqId, {
+        status: 'Rejected', resolvedAt: new Date().toISOString(), resolvedBy: APP.currentUser ? APP.currentUser.name : 'Admin'
+    });
+    var req = DB.find('location_requests', reqId);
+    if (req) addNotification('Location request rejected for ' + req.material, 'warning', req.pickerId);
+    showToast('Request rejected', 'info');
+    renderPickingAssign();
+}
+
+// ==================== START PICKING (Picker) ====================
 function renderStartPicking() {
-    if (!APP.currentUser) return '<div class="card"><div class="empty-state"><i class="bx bx-lock"></i><p>Not logged in</p></div></div>';
+    var sec = document.getElementById('section-picking');
+    if (!APP.currentUser) { sec.innerHTML = ''; return; }
 
-    var myObds = DB.filter('obd_data', function(o) {
-        return o.assignedPicker === APP.currentUser.username && (o.status === 'Assigned' || o.status === 'Picking In Progress');
-    });
+    var assignments = DB.filter('picking_assignments', function(a) {
+        return a.pickerId === APP.currentUser.id && a.status !== 'Completed' && a.status !== 'Cancelled';
+    }).slice().reverse();
 
-    var html = '<div class="section-header"><h2><i class="bx bx-box"></i> Start Picking</h2>';
-    html += '<div style="color:var(--text-muted);font-size:13px">User: <strong style="color:var(--accent)">' + escapeHtml(APP.currentUser.name) + '</strong> | Assigned OBDs: ' + myObds.length + '</div></div>';
+    var html = '<div class="section-header"><h2><i class="bx bxs-box"></i> My Picking Tasks</h2></div>';
 
-    if (myObds.length === 0) {
-        html += '<div class="card"><div class="empty-state"><i class="bx bx-inbox"></i><p>No OBDs assigned to you</p><small style="color:var(--text-muted)">Contact admin for picking assignment</small></div></div>';
-        return html;
-    }
-
-    html += '<div class="card"><div class="card-title">Your Assigned OBDs</div>';
-    html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Customer</th><th>Materials</th><th>Total Pick Qty</th><th>Status</th><th>Action</th></tr></thead><tbody>';
-    for (var i = 0; i < myObds.length; i++) {
-        var obd = myObds[i];
-        var totalPick = 0;
-        if (obd.materials) { for (var m = 0; m < obd.materials.length; m++) { totalPick += obd.materials[m].pickingQty; } }
-        html += '<tr><td style="font-family:var(--font-display);color:var(--accent)">' + escapeHtml(obd.obdNo) + '</td>';
-        html += '<td>' + escapeHtml(obd.customer || '-') + '</td><td>' + (obd.materials ? obd.materials.length : 0) + '</td>';
-        html += '<td><strong>' + totalPick + '</strong></td>';
-        html += '<td><span class="badge badge-warning">' + escapeHtml(obd.status) + '</span></td>';
-        html += '<td><button class="btn btn-primary btn-sm" onclick="openPickingSession(\'' + obd.id + '\')"><i class="bx bx-play"></i> Start Picking</button></td></tr>';
-    }
-    html += '</tbody></table></div></div>';
-
-    // Active picking session area
-    html += '<div id="pickingSessionArea"></div>';
-    return html;
-}
-
-function openPickingSession(obdId) {
-    var obd = DB.find('obd_data', obdId);
-    if (!obd) return;
-    DB.update('obd_data', obdId, { status: 'Picking In Progress' });
-    logAction('Picking', 'START', 'Started picking OBD ' + obd.obdNo);
-
-    // Initialize session
-    currentPickingSession = { obdId: obdId, items: [] };
-    if (obd.pickedItems && obd.pickedItems.length > 0) {
-        currentPickingSession.items = obd.pickedItems.map(function(pi) { return Object.assign({}, pi); });
-    } else if (obd.materials) {
-        for (var i = 0; i < obd.materials.length; i++) {
-            var m = obd.materials[i];
-            var locStr = '';
-            if (m.locations && m.locations.length > 0) {
-                locStr = m.locations[0].rack;
+    if (assignments.length === 0) {
+        html += '<div class="card"><div class="empty-state"><i class="bx bxs-box"></i><p>No picking tasks assigned to you</p></div></div>';
+    } else {
+        html += '<div class="card"><div class="card-title">Assigned OBDs</div>';
+        html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Status</th><th>Materials</th><th>Progress</th><th>Assigned At</th><th>Action</th></tr></thead><tbody>';
+        for (var i = 0; i < assignments.length; i++) {
+            var a = assignments[i];
+            var reports = DB.filter('picking_reports', function(r) { return r.assignmentId === a.id; });
+            var doneCount = 0, totalPicked = 0, totalPickQty = 0;
+            for (var r = 0; r < reports.length; r++) {
+                if (reports[r].status === 'Completed' || reports[r].status === 'Short') doneCount++;
+                totalPicked += (reports[r].totalPicked || 0);
+                totalPickQty += (reports[r].pickQty || reports[r].requiredQty || 0);
             }
-            currentPickingSession.items.push({
-                id: DB.uid(), material: m.material, ean: m.ean, description: m.description,
-                location: locStr, expectedQty: m.pickingQty, pickedQty: m.pickingQty,
-                reason: '', reasonDetail: ''
-            });
-        }
-    }
-
-    renderPickingSessionUI();
-}
-
-function renderPickingSessionUI() {
-    var area = document.getElementById('pickingSessionArea');
-    if (!area || !currentPickingSession) return;
-    var obd = DB.find('obd_data', currentPickingSession.obdId);
-
-    var html = '<div class="card" style="border:2px solid var(--info);margin-top:16px">';
-    html += '<div class="card-title" style="color:var(--info)"><i class="bx bx-clipboard"></i> Picking Report — ' + escapeHtml(obd.obdNo) + ' | Customer: ' + escapeHtml(obd.customer || '-') + '</div>';
-
-    html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>Material</th><th>EAN</th><th>Location</th><th>Expected Qty</th><th>Picked Qty</th><th>Reason</th><th>Actions</th></tr></thead><tbody>';
-    for (var i = 0; i < currentPickingSession.items.length; i++) {
-        var item = currentPickingSession.items[i];
-        var hasReason = item.reason && item.reason !== '';
-        var rowStyle = hasReason ? 'style="background:var(--danger-dim)"' : '';
-        html += '<tr ' + rowStyle + '><td>' + (i + 1) + '</td>';
-        html += '<td>' + escapeHtml(item.material) + '</td>';
-        html += '<td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(item.ean) + '</td>';
-        html += '<td><span class="badge badge-accent">' + escapeHtml(item.location) + '</span></td>';
-        html += '<td>' + item.expectedQty + '</td>';
-        html += '<td id="pickQty_' + item.id + '" class="' + (item.pickedQty < item.expectedQty ? 'qty-mismatch' : 'qty-match') + '"><strong>' + item.pickedQty + '</strong></td>';
-        html += '<td>' + (hasReason ? '<span class="badge badge-danger">' + escapeHtml(item.reason) + '</span>' : '<span class="badge badge-success">OK</span>') + '</td>';
-        html += '<td><div class="table-actions">';
-        html += '<button class="btn btn-secondary btn-sm" onclick="editPickedQty(\'' + item.id + '\')"><i class="bx bx-pencil"></i> Edit</button>';
-        html += '<button class="btn btn-warning btn-sm" onclick="givePickingReason(\'' + item.id + '\')"><i class="bx bx-error"></i> Reason</button>';
-        html += '</div></td></tr>';
-    }
-    html += '</tbody></table></div>';
-
-    html += '<hr class="cyber-line">';
-    html += '<div class="form-actions">';
-    html += '<button class="btn btn-danger" onclick="cancelPickingSession()"><i class="bx bx-x"></i> Cancel</button>';
-    html += '<button class="btn btn-primary" onclick="submitPicking()"><i class="bx bx-check-double"></i> Submit Picking</button>';
-    html += '</div></div>';
-
-    area.innerHTML = html;
-}
-
-function editPickedQty(itemId) {
-    var item = null;
-    for (var i = 0; i < currentPickingSession.items.length; i++) {
-        if (currentPickingSession.items[i].id === itemId) { item = currentPickingSession.items[i]; break; }
-    }
-    if (!item) return;
-    var html = '<div class="form-group"><label>Material</label><div class="form-input" style="background:var(--bg-secondary)">' + escapeHtml(item.material) + '</div></div>';
-    html += '<div class="form-group"><label>Location</label><div class="form-input" style="background:var(--bg-secondary)">' + escapeHtml(item.location) + '</div></div>';
-    html += '<div class="form-group"><label>Expected Qty</label><div class="form-input" style="background:var(--bg-secondary)">' + item.expectedQty + '</div></div>';
-    html += '<div class="form-group"><label>Picked Qty <span class="req">*</span></label><input type="number" id="editPickedQtyVal" class="form-input" value="' + item.pickedQty + '" min="0" max="' + item.expectedQty + '"></div>';
-    showModal('Edit Picked Qty', html, 'sm',
-        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-        '<button class="btn btn-primary" onclick="savePickedQty(\'' + itemId + '\')"><i class="bx bx-check"></i> Save</button>');
-}
-
-function savePickedQty(itemId) {
-    var newQty = parseInt(document.getElementById('editPickedQtyVal').value) || 0;
-    for (var i = 0; i < currentPickingSession.items.length; i++) {
-        if (currentPickingSession.items[i].id === itemId) {
-            currentPickingSession.items[i].pickedQty = newQty;
-            if (newQty < currentPickingSession.items[i].expectedQty && !currentPickingSession.items[i].reason) {
-                currentPickingSession.items[i].reason = 'Short quantity';
-            }
-            break;
-        }
-    }
-    closeModal();
-    renderPickingSessionUI();
-}
-
-function givePickingReason(itemId) {
-    var item = null;
-    for (var i = 0; i < currentPickingSession.items.length; i++) {
-        if (currentPickingSession.items[i].id === itemId) { item = currentPickingSession.items[i]; break; }
-    }
-    if (!item) return;
-    var html = '<div class="form-group"><label>Material</label><div class="form-input" style="background:var(--bg-secondary)">' + escapeHtml(item.material) + '</div></div>';
-    html += '<div class="form-group"><label>Location</label><div class="form-input" style="background:var(--bg-secondary)">' + escapeHtml(item.location) + '</div></div>';
-    html += '<div class="form-group"><label>Expected: ' + item.expectedQty + ' | Picked: ' + item.pickedQty + '</label></div>';
-    html += '<div class="form-group"><label>Reason <span class="req">*</span></label>';
-    html += '<select id="pickReasonSelect" class="form-input"><option value="">-- Select Reason --</option>';
-    html += '<option value="Material not found at location">Material not found at location</option>';
-    html += '<option value="Damaged material">Damaged material</option>';
-    html += '<option value="Wrong material at location">Wrong material at location</option>';
-    html += '<option value="Short quantity">Short quantity</option>';
-    html += '<option value="Other">Other</option>';
-    html += '</select></div>';
-    html += '<div class="form-group"><label>Additional Detail</label><input type="text" id="pickReasonDetail" class="form-input" placeholder="Any extra detail..."></div>';
-    showModal('Give Reason', html, 'sm',
-        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-        '<button class="btn btn-warning" onclick="savePickingReason(\'' + itemId + '\')"><i class="bx bx-check"></i> Save Reason</button>');
-}
-
-function savePickingReason(itemId) {
-    var reason = document.getElementById('pickReasonSelect').value;
-    var detail = document.getElementById('pickReasonDetail').value.trim();
-    if (!reason) { showToast('Select a reason', 'error'); return; }
-    for (var i = 0; i < currentPickingSession.items.length; i++) {
-        if (currentPickingSession.items[i].id === itemId) {
-            currentPickingSession.items[i].reason = reason;
-            currentPickingSession.items[i].reasonDetail = detail;
-            // Auto reduce picked qty if reason is "not found"
-            if (reason === 'Material not found at location') {
-                currentPickingSession.items[i].pickedQty = 0;
-            }
-            break;
-        }
-    }
-    closeModal();
-    renderPickingSessionUI();
-}
-
-function cancelPickingSession() {
-    if (currentPickingSession && currentPickingSession.items.some(function(it) { return it.pickedQty < it.expectedQty; })) {
-        if (!confirm('You have uncommitted changes. Cancel anyway?')) return;
-    }
-    if (currentPickingSession) {
-        DB.update('obd_data', currentPickingSession.obdId, { status: 'Assigned' });
-    }
-    currentPickingSession = null;
-    document.getElementById('pickingSessionArea').innerHTML = '';
-    renderPicking('start-picking');
-}
-
-function submitPicking() {
-    if (!currentPickingSession) return;
-    var obd = DB.find('obd_data', currentPickingSession.obdId);
-
-    // Save picked items to OBD
-    var pickedItems = currentPickingSession.items.map(function(item) {
-        return {
-            id: DB.uid(), material: item.material, ean: item.ean, description: item.description,
-            location: item.location, expectedQty: item.expectedQty, pickedQty: item.pickedQty,
-            reason: item.reason || '', reasonDetail: item.reasonDetail || '',
-            pickerName: APP.currentUser.name, pickedAt: new Date().toISOString()
-        };
-    });
-
-    DB.update('obd_data', currentPickingSession.obdId, { status: 'Picked', pickedItems: pickedItems });
-
-    // Create difference reports for items with reasons
-    for (var i = 0; i < pickedItems.length; i++) {
-        if (pickedItems[i].reason) {
-            DB.add('difference_reports', {
-                obdNo: obd.obdNo, pickerName: APP.currentUser.name, material: pickedItems[i].material,
-                location: pickedItems[i].location, reason: pickedItems[i].reason,
-                reasonDetail: pickedItems[i].reasonDetail, expectedQty: pickedItems[i].expectedQty,
-                pickedQty: pickedItems[i].pickedQty, dateTime: new Date().toISOString()
-            });
-        }
-    }
-
-    logAction('Picking', 'SUBMIT', 'Picking completed for OBD ' + obd.obdNo + '. Items: ' + pickedItems.length);
-    addNotification('Picking completed for OBD ' + obd.obdNo, 'success');
-    showToast('Picking submitted! OBD moved to Picking Done.', 'success');
-    currentPickingSession = null;
-    renderPicking('start-picking');
-}
-
-// --- PICKING DONE ---
-function renderPickingDone() {
-    var doneObds = DB.filter('obd_data', function(o) { return o.status === 'Picked'; });
-    var html = '<div class="section-header"><h2><i class="bx bx-check-circle"></i> Picking Done</h2>';
-    html += '<div style="color:var(--text-muted);font-size:13px">' + doneObds.length + ' OBDs ready for loading</div></div>';
-
-    if (doneObds.length === 0) {
-        html += '<div class="card"><div class="empty-state"><i class="bx bx-inbox"></i><p>No completed pickings yet</p></div></div>';
-        return html;
-    }
-
-    html += '<div class="card"><div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Customer</th><th>Picker</th><th>Materials</th><th>Picked Qty</th><th>Differences</th><th>Actions</th></tr></thead><tbody>';
-    for (var i = 0; i < doneObds.length; i++) {
-        var obd = doneObds[i];
-        var totalPicked = 0, diffCount = 0;
-        if (obd.pickedItems) {
-            for (var p = 0; p < obd.pickedItems.length; p++) {
-                totalPicked += obd.pickedItems[p].pickedQty;
-                if (obd.pickedItems[p].reason) diffCount++;
-            }
-        }
-        html += '<tr><td style="font-family:var(--font-display);color:var(--accent)">' + escapeHtml(obd.obdNo) + '</td>';
-        html += '<td>' + escapeHtml(obd.customer || '-') + '</td>';
-        html += '<td>' + escapeHtml(obd.assignedPicker || '-') + '</td>';
-        html += '<td>' + (obd.pickedItems ? obd.pickedItems.length : 0) + '</td>';
-        html += '<td><strong>' + totalPicked + '</strong></td>';
-        html += '<td>' + (diffCount > 0 ? '<span class="badge badge-danger">' + diffCount + ' diffs</span>' : '<span class="badge badge-success">None</span>') + '</td>';
-        html += '<td><div class="table-actions">';
-        html += '<button class="btn btn-secondary btn-sm" onclick="viewOBDReport(\'' + obd.id + '\')"><i class="bx bx-show"></i> View</button>';
-        html += '<button class="btn btn-primary btn-sm" onclick="exportOBDReport(\'' + obd.id + '\')"><i class="bx bx-download"></i> PDF</button>';
-        html += '</div></td></tr>';
-    }
-    html += '</tbody></table></div></div>';
-    return html;
-}
-
-
-// ==================== LOADING MODULE ====================
-function renderLoading(sub) {
-    var sec = document.getElementById('section-loading');
-    if (!sec) return;
-    if (!sub) {
-        var allSubs = ['loading-assign', 'start-loading', 'loading-done', 'qty-mismatch'];
-        for (var i = 0; i < allSubs.length; i++) { if (checkPermission(allSubs[i])) { sub = allSubs[i]; break; } }
-        if (!sub) sub = 'loading-assign';
-    }
-    var allowedSubs = [
-        { id: 'loading-assign', label: 'Loading Assign' },
-        { id: 'start-loading', label: 'Start Loading' },
-        { id: 'loading-done', label: 'Loaded Vehicles' },
-        { id: 'qty-mismatch', label: 'Qty Mismatch' }
-    ].filter(function(s) { return checkPermission(s.id); });
-
-    var tabBtns = '<div class="tab-bar">';
-    for (var t = 0; t < allowedSubs.length; t++) {
-        tabBtns += '<button class="tab-btn ' + (sub === allowedSubs[t].id ? 'active' : '') + '" onclick="navigateTo(\'loading\',\'' + allowedSubs[t].id + '\')">' + allowedSubs[t].label + '</button>';
-    }
-    tabBtns += '</div>';
-
-    var content = '';
-    if (sub === 'loading-assign') content = renderLoadingAssign();
-    else if (sub === 'start-loading') content = renderStartLoading();
-    else if (sub === 'loading-done') content = renderLoadedVehicles();
-    else if (sub === 'qty-mismatch') content = renderQtyMismatch();
-    else content = '<div class="card"><div class="empty-state"><i class="bx bx-error-circle"></i><p>Access Denied</p></div></div>';
-    sec.innerHTML = tabBtns + content;
-}
-
-// --- LOADING ASSIGN ---
-function renderLoadingAssign() {
-    var pickedObds = DB.filter('obd_data', function(o) { return o.status === 'Picked'; });
-    var html = '<div class="section-header"><h2><i class="bx bx-user-plus"></i> Loading Assign</h2></div>';
-
-    html += '<div class="card" style="margin-bottom:16px"><div class="card-title">Assign OBD to Loader</div>';
-    html += '<div class="form-row">';
-    html += '<div class="form-group"><label>Select OBD <span class="req">*</span></label><select id="loadingAssignObd" class="form-input"><option value="">-- Select OBD --</option>';
-    for (var i = 0; i < pickedObds.length; i++) {
-        var totalPicked = 0;
-        if (pickedObds[i].pickedItems) { for (var p = 0; p < pickedObds[i].pickedItems.length; p++) { totalPicked += pickedObds[i].pickedItems[p].pickedQty; } }
-        html += '<option value="' + pickedObds[i].id + '">' + escapeHtml(pickedObds[i].obdNo) + ' — ' + escapeHtml(pickedObds[i].customer || '') + ' (Picked: ' + totalPicked + ')</option>';
-    }
-    html += '</select></div>';
-    html += '<div class="form-group"><label>Loader Username <span class="req">*</span></label><input type="text" id="loadingAssignUser" class="form-input" placeholder="e.g. loader"></div>';
-    html += '</div>';
-    html += '<div class="form-actions">';
-    html += '<button class="btn btn-primary" onclick="assignLoadingToUser()"><i class="bx bx-send"></i> Send Loading Report</button>';
-    html += '<button class="btn btn-secondary" onclick="assignAllLoadingToUser()"><i class="bx bx-send"></i> Send All Picked</button>';
-    html += '</div></div>';
-
-    // Assigned list
-    var assignedObds = DB.filter('obd_data', function(o) { return o.status === 'Loading Assigned' && o.assignedLoader; });
-    if (assignedObds.length > 0) {
-        html += '<div class="card"><div class="card-title">Currently Assigned for Loading</div>';
-        html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Customer</th><th>Assigned Loader</th><th>Action</th></tr></thead><tbody>';
-        for (var j = 0; j < assignedObds.length; j++) {
-            var a = assignedObds[j];
-            html += '<tr><td style="font-family:var(--font-display);color:var(--accent)">' + escapeHtml(a.obdNo) + '</td>';
-            html += '<td>' + escapeHtml(a.customer || '-') + '</td><td><strong>' + escapeHtml(a.assignedLoader) + '</strong></td>';
-            html += '<td><button class="btn btn-danger btn-sm" onclick="unassignLoading(\'' + a.id + '\')"><i class="bx bx-x"></i> Unassign</button></td></tr>';
+            var pct = totalPickQty > 0 ? Math.round((totalPicked / totalPickQty) * 100) : 0;
+            var statusBadge = a.status === 'Assigned' ? 'badge-accent' : 'badge-warning';
+            html += '<tr><td><strong style="color:var(--accent)">' + escapeHtml(a.obdNo) + '</strong></td>';
+            html += '<td><span class="badge ' + statusBadge + '">' + escapeHtml(a.status) + '</span></td>';
+            html += '<td>' + doneCount + '/' + reports.length + '</td>';
+            html += '<td><div style="display:flex;align-items:center;gap:8px"><div style="flex:1;height:6px;background:var(--bg-secondary);border-radius:3px;overflow:hidden"><div style="height:100%;width:' + pct + '%;background:var(--accent);border-radius:3px;transition:width .3s"></div></div><span style="font-size:12px;font-weight:700;color:var(--accent)">' + pct + '%</span></div></td>';
+            html += '<td style="font-size:12px;color:var(--text-muted)">' + formatDateTime(a.createdAt) + '</td>';
+            html += '<td><button class="btn btn-sm btn-primary" onclick="openPickingReport(\'' + a.id + '\')"><i class="bx bx-clipboard"></i> Report</button></td></tr>';
         }
         html += '</tbody></table></div></div>';
     }
-    return html;
+
+    sec.innerHTML = html;
 }
 
-function assignLoadingToUser() {
-    var obdId = document.getElementById('loadingAssignObd').value;
-    var username = document.getElementById('loadingAssignUser').value.trim();
-    if (!obdId) { showToast('Select an OBD', 'error'); return; }
-    if (!username) { showToast('Enter username', 'error'); return; }
-    var user = DB.filter('users', function(u) { return u.username === username; });
-    if (user.length === 0) { showToast('Username not found!', 'error'); return; }
-    DB.update('obd_data', obdId, { status: 'Loading Assigned', assignedLoader: username });
-    addNotification('Loading report assigned: OBD sent to ' + username, 'info', username);
-    logAction('Loading', 'ASSIGN', 'OBD assigned for loading to ' + username);
-    showToast('Loading report sent to ' + username + '!', 'success');
-    renderLoading('loading-assign');
-}
-
-function assignAllLoadingToUser() {
-    var username = document.getElementById('loadingAssignUser').value.trim();
-    if (!username) { showToast('Enter username first', 'error'); return; }
-    var user = DB.filter('users', function(u) { return u.username === username; });
-    if (user.length === 0) { showToast('Username not found!', 'error'); return; }
-    var picked = DB.filter('obd_data', function(o) { return o.status === 'Picked'; });
-    if (picked.length === 0) { showToast('No picked OBDs', 'error'); return; }
-    for (var i = 0; i < picked.length; i++) {
-        DB.update('obd_data', picked[i].id, { status: 'Loading Assigned', assignedLoader: username });
+/// Picking Report — with Edit working + Submit button
+function openPickingReport(assignmentId) {
+    var assignment = DB.find('picking_assignments', assignmentId);
+    if (!assignment) return;
+    if (assignment.status === 'Assigned') {
+        DB.update('picking_assignments', assignmentId, { status: 'In Progress' });
     }
-    addNotification(picked.length + ' OBD loading reports assigned to you', 'info', username);
-    logAction('Loading', 'ASSIGN_ALL', picked.length + ' OBDs assigned for loading to ' + username);
-    showToast(picked.length + ' OBDs sent to ' + username + '!', 'success');
-    renderLoading('loading-assign');
-}
+    var reports = DB.filter('picking_reports', function(r) { return r.assignmentId === assignmentId; });
+    var sec = document.getElementById('section-picking');
+    var html = '<div class="section-header"><h2><i class="bx bxs-clipboard"></i> Picking Report — ' + escapeHtml(assignment.obdNo) + '</h2>';
+    html += '<button class="btn btn-secondary" onclick="renderStartPicking()"><i class="bx bx-arrow-back"></i> Back</button></div>';
 
-function unassignLoading(obdId) {
-    DB.update('obd_data', obdId, { status: 'Picked', assignedLoader: '' });
-    showToast('Unassigned', 'info');
-    renderLoading('loading-assign');
-}
+    for (var i = 0; i < reports.length; i++) {
+        var rep = reports[i];
+        var lines = DB.filter('picking_done', function(p) { return p.reportId === rep.id && p.status !== 'Replaced'; });
+        var repStatusBadge = rep.status === 'Completed' ? 'badge-success' : rep.status === 'Short' ? 'badge-warning' : 'badge-accent';
+        html += '<div class="card" style="margin-bottom:16px">';
+        html += '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;flex-wrap:wrap;gap:8px">';
+        html += '<div><div style="font-weight:700;font-size:15px;margin-bottom:2px">' + escapeHtml(rep.material) + '</div>';
+        html += '<div style="font-size:12px;color:var(--text-muted)">' + escapeHtml(rep.description || '-') + '</div></div>';
+        html += '<span class="badge ' + repStatusBadge + '">' + escapeHtml(rep.status) + '</span></div>';
+        html += '<div style="display:flex;gap:20px;margin-bottom:12px;flex-wrap:wrap;font-size:13px">';
+        html += '<div><span style="color:var(--text-muted)">EAN:</span> <strong>' + escapeHtml(rep.ean || '-') + '</strong></div>';
+        html += '<div><span style="color:var(--text-muted)">Order Qty:</span> <strong>' + (rep.orderQty || rep.requiredQty || 0) + '</strong></div>';
+        html += '<div><span style="color:var(--text-muted)">Pick Qty:</span> <strong style="color:var(--accent)">' + (rep.pickQty || rep.requiredQty || 0) + '</strong></div>';
+        html += '<div><span style="color:var(--text-muted)">Picked:</span> <strong>' + (rep.totalPicked || 0) + '</strong></div></div>';
 
-// --- START LOADING (Loader's View) ---
-function renderStartLoading() {
-    if (!APP.currentUser) return '<div class="card"><div class="empty-state"><i class="bx bx-lock"></i><p>Not logged in</p></div></div>';
-
-    var myObds = DB.filter('obd_data', function(o) {
-        return o.assignedLoader === APP.currentUser.username && (o.status === 'Loading Assigned' || o.status === 'Loading In Progress');
-    });
-
-    var html = '<div class="section-header"><h2><i class="bx bxs-truck"></i> Start Loading</h2>';
-    html += '<div style="color:var(--text-muted);font-size:13px">User: <strong style="color:var(--accent)">' + escapeHtml(APP.currentUser.name) + '</strong> | Assigned OBDs: ' + myObds.length + '</div></div>';
-
-    if (myObds.length === 0) {
-        html += '<div class="card"><div class="empty-state"><i class="bx bx-inbox"></i><p>No OBDs assigned for loading</p><small style="color:var(--text-muted)">Contact admin for loading assignment</small></div></div>';
-        return html;
-    }
-
-    html += '<div class="card"><div class="card-title">Your Loading Assignments</div>';
-    html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Customer</th><th>Materials</th><th>Picked Qty</th><th>Status</th><th>Action</th></tr></thead><tbody>';
-    for (var i = 0; i < myObds.length; i++) {
-        var obd = myObds[i];
-        var totalPicked = 0;
-        if (obd.pickedItems) { for (var p = 0; p < obd.pickedItems.length; p++) { totalPicked += obd.pickedItems[p].pickedQty; } }
-        html += '<tr><td style="font-family:var(--font-display);color:var(--accent)">' + escapeHtml(obd.obdNo) + '</td>';
-        html += '<td>' + escapeHtml(obd.customer || '-') + '</td><td>' + (obd.pickedItems ? obd.pickedItems.length : 0) + '</td>';
-        html += '<td><strong>' + totalPicked + '</strong></td>';
-        html += '<td><span class="badge badge-warning">' + escapeHtml(obd.status) + '</span></td>';
-        html += '<td><button class="btn btn-primary btn-sm" onclick="showLoadingSecurityPrompt(\'' + obd.id + '\')"><i class="bx bxs-truck"></i> Start Loading</button></td></tr>';
-    }
-    html += '</tbody></table></div></div>';
-
-    html += '<div id="loadingSessionArea"></div>';
-    return html;
-}
-
-function showLoadingSecurityPrompt(obdId) {
-    var obd = DB.find('obd_data', obdId);
-    if (!obd) return;
-    var html = '<div style="background:var(--warning-dim);padding:12px;border-radius:8px;margin-bottom:16px;border-left:4px solid var(--warning)">';
-    html += '<strong>OBD: ' + escapeHtml(obd.obdNo) + '</strong> | Customer: ' + escapeHtml(obd.customer || '') + '</div>';
-    html += '<div class="form-group"><label>Vehicle Number <span class="req">*</span></label><input type="text" id="loadingVehicleNo" class="form-input" placeholder="e.g. MH-12-AB-1234" style="text-transform:uppercase"></div>';
-    html += '<div class="form-group"><label>Security Guard Name <span class="req">*</span></label><input type="text" id="loadingSecurityName" class="form-input" placeholder="Security guard name with you"></div>';
-    showModal('Start Loading — Security Check', html, 'sm',
-        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-        '<button class="btn btn-primary" onclick="beginLoadingSession(\'' + obdId + '\')"><i class="bx bxs-truck"></i> Submit & Start Scanning</button>');
-}
-
-function beginLoadingSession(obdId) {
-    var vehicleNo = document.getElementById('loadingVehicleNo').value.trim().toUpperCase();
-    var securityName = document.getElementById('loadingSecurityName').value.trim();
-    if (!vehicleNo) { showToast('Enter vehicle number', 'error'); return; }
-    if (!securityName) { showToast('Enter security guard name', 'error'); return; }
-
-    DB.update('obd_data', obdId, { status: 'Loading In Progress', vehicleNo: vehicleNo, securityName: securityName });
-    currentLoadingSession = { obdId: obdId, vehicleNo: vehicleNo, securityName: securityName, scannedItems: [] };
-    logAction('Loading', 'START', 'Loading started for OBD. Vehicle: ' + vehicleNo + ', Security: ' + securityName);
-    closeModal();
-    renderLoadingSessionUI();
-}
-
-function renderLoadingSessionUI() {
-    var area = document.getElementById('loadingSessionArea');
-    if (!area || !currentLoadingSession) return;
-    var obd = DB.find('obd_data', currentLoadingSession.obdId);
-
-    // Build OBD material map for quick lookup
-    var obdMaterials = {};
-    if (obd.pickedItems) {
-        for (var p = 0; p < obd.pickedItems.length; p++) {
-            obdMaterials[obd.pickedItems[p].material] = obd.pickedItems[p].pickedQty;
-        }
-    }
-
-    var html = '<div class="card" style="border:2px solid var(--success);margin-top:16px">';
-    html += '<div class="card-title" style="color:var(--success)"><i class="bx bxs-truck"></i> Loading Scan — ' + escapeHtml(obd.obdNo) + '</div>';
-    html += '<div style="background:var(--bg-secondary);padding:8px 12px;border-radius:6px;margin-bottom:12px;font-size:12px">';
-    html += '<strong>Vehicle:</strong> ' + escapeHtml(currentLoadingSession.vehicleNo) + ' | <strong>Security:</strong> ' + escapeHtml(currentLoadingSession.securityName);
-    html += '</div>';
-
-    // Scan form
-    html += '<div class="form-row" style="margin-bottom:12px">';
-    html += '<div class="form-group"><label>EAN / Barcode <span class="req">*</span></label>';
-    html += '<div style="display:flex;gap:6px"><input type="text" id="loadScanEan" class="form-input" placeholder="Scan EAN..." style="flex:1" onkeydown="if(event.key===\'Enter\')addLoadingScan()">';
-    html += '<button class="btn btn-primary btn-sm" onclick="addLoadingScan()"><i class="bx bx-plus"></i></button>';
-    html += '<button class="btn btn-secondary btn-sm scan-btn" onclick="openScannerModal(function(code){document.getElementById(\'loadScanEan\').value=code;addLoadingScan()})"><i class="bx bx-qr"></i></button></div></div>';
-    html += '<div class="form-group"><label>Material (Auto/Manual)</label><input type="text" id="loadScanMaterial" class="form-input" placeholder="Auto from scan"></div>';
-    html += '<div class="form-group"><label>Description</label><input type="text" id="loadScanDesc" class="form-input" placeholder="Auto from scan"></div>';
-    html += '</div>';
-
-    // Live comparison summary
-    var scannedMap = {};
-    for (var s = 0; s < currentLoadingSession.scannedItems.length; s++) {
-        var si = currentLoadingSession.scannedItems[s];
-        scannedMap[si.material] = (scannedMap[si.material] || 0) + si.qty;
-    }
-    html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;margin-bottom:12px">';
-    var allMatched = true;
-    for (var matKey in obdMaterials) {
-        var expected = obdMaterials[matKey];
-        var scanned = scannedMap[matKey] || 0;
-        var matched = scanned >= expected;
-        if (!matched) allMatched = false;
-        var clr = matched ? 'var(--success)' : 'var(--danger)';
-        html += '<div style="padding:8px;border-radius:6px;border:1px solid ' + clr + ';background:' + (matched ? 'rgba(16,185,129,.08)' : 'rgba(239,68,68,.08)') + ';font-size:12px">';
-        html += '<div style="color:var(--text-muted)">' + escapeHtml(matKey) + '</div>';
-        html += '<div><span style="color:' + clr + ';font-weight:700">' + scanned + '</span> / ' + expected + '</div></div>';
-    }
-    html += '</div>';
-
-    // Scanned items table
-    html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>EAN</th><th>Material</th><th>Description</th><th>Qty</th><th>In OBD</th><th>Action</th></tr></thead><tbody>';
-    if (currentLoadingSession.scannedItems.length === 0) {
-        html += '<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:20px">No items scanned yet</td></tr>';
-    } else {
-        for (var i = 0; i < currentLoadingSession.scannedItems.length; i++) {
-            var item = currentLoadingSession.scannedItems[i];
-            var rowStyle = item.inOBD ? '' : 'style="background:var(--danger-dim)"';
-            html += '<tr ' + rowStyle + '><td>' + (i + 1) + '</td>';
-            html += '<td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(item.ean) + '</td>';
-            html += '<td>' + escapeHtml(item.material) + '</td><td style="font-size:12px">' + escapeHtml(item.description) + '</td>';
-            html += '<td><strong>' + item.qty + '</strong></td>';
-            html += '<td>' + (item.inOBD ? '<span class="badge badge-success"><i class="bx bx-check"></i> Yes</span>' : '<span class="badge badge-danger"><i class="bx bx-x"></i> NO</span>') + '</td>';
-            html += '<td><button class="btn btn-danger btn-sm" onclick="removeLoadingScan(\'' + item.id + '\')"><i class="bx bx-trash"></i> Delete</button></td></tr>';
-        }
-    }
-    html += '</tbody></table></div>';
-
-    html += '<hr class="cyber-line">';
-    html += '<div class="form-actions">';
-    html += '<button class="btn btn-danger" onclick="cancelLoadingSession()"><i class="bx bx-x"></i> Cancel</button>';
-    html += '<button class="btn btn-primary" onclick="submitLoading()"><i class="bx bxs-truck"></i> Submit Loading</button>';
-    html += '</div></div>';
-
-    area.innerHTML = html;
-    document.getElementById('loadScanEan').focus();
-}
-
-function addLoadingScan() {
-    var ean = document.getElementById('loadScanEan').value.trim();
-    if (!ean) { showToast('Scan or enter EAN', 'error'); return; }
-
-    var material = document.getElementById('loadScanMaterial').value.trim();
-    var desc = document.getElementById('loadScanDesc').value.trim();
-
-    // Auto-fill from master
-    if (!material || !desc) {
-        var matMaster = DB.get('material_master');
-        for (var i = 0; i < matMaster.length; i++) {
-            if (matMaster[i].ean === ean || matMaster[i].material.toUpperCase() === ean.toUpperCase()) {
-                material = material || matMaster[i].material;
-                desc = desc || matMaster[i].description;
-                ean = matMaster[i].ean || ean;
-                break;
-            }
-        }
-    }
-
-    // Check if in OBD
-    var obd = DB.find('obd_data', currentLoadingSession.obdId);
-    var inOBD = false;
-    if (obd && obd.pickedItems) {
-        for (var p = 0; p < obd.pickedItems.length; p++) {
-            if (obd.pickedItems[p].ean === ean || obd.pickedItems[p].material.toUpperCase() === (material || '').toUpperCase()) {
-                inOBD = true; break;
-            }
-        }
-    }
-
-    currentLoadingSession.scannedItems.push({
-        id: DB.uid(), ean: ean, material: material || 'UNKNOWN', description: desc || '-',
-        qty: 1, inOBD: inOBD, scanTime: new Date().toISOString()
-    });
-
-    // Clear inputs
-    document.getElementById('loadScanEan').value = '';
-    document.getElementById('loadScanMaterial').value = '';
-    document.getElementById('loadScanDesc').value = '';
-    document.getElementById('loadScanEan').focus();
-
-    renderLoadingSessionUI();
-    if (!inOBD) {
-        showToast('WARNING: This material is NOT in the OBD!', 'warning');
-    } else {
-        showToast('Scanned: ' + (material || ean), 'success');
-    }
-}
-
-function removeLoadingScan(itemId) {
-    currentLoadingSession.scannedItems = currentLoadingSession.scannedItems.filter(function(s) { return s.id !== itemId; });
-    renderLoadingSessionUI();
-}
-
-function cancelLoadingSession() {
-    if (currentLoadingSession) {
-        DB.update('obd_data', currentLoadingSession.obdId, { status: 'Loading Assigned' });
-    }
-    currentLoadingSession = null;
-    document.getElementById('loadingSessionArea').innerHTML = '';
-    renderLoading('start-loading');
-}
-
-function submitLoading() {
-    if (!currentLoadingSession || currentLoadingSession.scannedItems.length === 0) {
-        showToast('No items scanned!', 'error'); return;
-    }
-    var obd = DB.find('obd_data', currentLoadingSession.obdId);
-
-    // Compare scanned qty vs OBD picked qty
-    var obdMaterials = {};
-    if (obd.pickedItems) {
-        for (var p = 0; p < obd.pickedItems.length; p++) {
-            obdMaterials[obd.pickedItems[p].material] = obd.pickedItems[p].pickedQty;
-        }
-    }
-    var scannedMap = {};
-    for (var s = 0; s < currentLoadingSession.scannedItems.length; s++) {
-        var si = currentLoadingSession.scannedItems[s];
-        if (si.inOBD) {
-            scannedMap[si.material] = (scannedMap[si.material] || 0) + si.qty;
-        }
-    }
-
-    var allMatch = true;
-    var matchDetails = [];
-    for (var matKey in obdMaterials) {
-        var expected = obdMaterials[matKey];
-        var actual = scannedMap[matKey] || 0;
-        var matched = actual === expected;
-        if (!matched) allMatch = false;
-        matchDetails.push({ material: matKey, expected: expected, actual: actual, match: matched });
-    }
-    // Check for extra scanned not in OBD
-    for (var sk in scannedMap) {
-        if (!obdMaterials[sk]) {
-            allMatch = false;
-            matchDetails.push({ material: sk, expected: 0, actual: scannedMap[sk], match: false });
-        }
-    }
-
-    var loadingNo = DB.loadNo(obd.obdNo);
-
-    // Save loaded items to OBD
-    DB.update('obd_data', currentLoadingSession.obdId, {
-        loadedItems: currentLoadingSession.scannedItems,
-        loadingNo: loadingNo,
-        vehicleNo: currentLoadingSession.vehicleNo,
-        securityName: currentLoadingSession.securityName,
-        matchDetails: matchDetails,
-        loadedBy: APP.currentUser ? APP.currentUser.name : 'System',
-        loadedAt: new Date().toISOString(),
-        status: allMatch ? 'Loaded' : 'Qty Mismatch'
-    });
-
-    // Create loaded vehicle record
-    DB.add('loaded_vehicles', {
-        obdId: currentLoadingSession.obdId, obdNo: obd.obdNo, loadingNo: loadingNo,
-        vehicleNo: currentLoadingSession.vehicleNo, securityName: currentLoadingSession.securityName,
-        loader: APP.currentUser ? APP.currentUser.name : 'System',
-        scannedItems: currentLoadingSession.scannedItems, matchDetails: matchDetails,
-        allMatch: allMatch, loadedAt: new Date().toISOString(),
-        status: allMatch ? 'Loaded' : 'Qty Mismatch'
-    });
-
-    logAction('Loading', 'SUBMIT', 'Loading ' + (allMatch ? 'DONE' : 'QTY MISMATCH') + ' for OBD ' + obd.obdNo + '. Vehicle: ' + currentLoadingSession.vehicleNo + '. Loading No: ' + loadingNo);
-    addNotification('Vehicle ' + currentLoadingSession.vehicleNo + ' — Loading ' + (allMatch ? 'completed' : 'qty mismatch') + '. ' + loadingNo, allMatch ? 'success' : 'warning');
-    showToast(allMatch ? 'Loading DONE! No: ' + loadingNo : 'Qty MISMATCH! Check Mismatch tab.', allMatch ? 'success' : 'warning');
-
-    currentLoadingSession = null;
-    renderLoading('start-loading');
-}
-
-// --- LOADED VEHICLES ---
-function renderLoadedVehicles() {
-    var loaded = DB.filter('loaded_vehicles', function(v) { return v.allMatch === true; });
-    var html = '<div class="section-header"><h2><i class="bx bx-check-circle"></i> Loaded Vehicles</h2>';
-    html += '<div style="color:var(--text-muted);font-size:13px">' + loaded.length + ' vehicles successfully loaded</div></div>';
-
-    if (loaded.length === 0) {
-        html += '<div class="card"><div class="empty-state"><i class="bx bx-inbox"></i><p>No loaded vehicles yet</p></div></div>';
-        return html;
-    }
-
-    // Group by vehicle
-    var vehicleMap = {};
-    for (var i = 0; i < loaded.length; i++) {
-        var v = loaded[i];
-        if (!vehicleMap[v.vehicleNo]) {
-            vehicleMap[v.vehicleNo] = { vehicleNo: v.vehicleNo, obds: [], totalItems: 0, loader: v.loader, security: v.securityName, loadedAt: v.loadedAt };
-        }
-        vehicleMap[v.vehicleNo].obds.push(v);
-        vehicleMap[v.vehicleNo].totalItems += (v.scannedItems ? v.scannedItems.length : 0);
-    }
-
-    html += '<div class="card"><div class="table-wrapper"><table class="data-table"><thead><tr><th>Vehicle No</th><th>OBDs Loaded</th><th>Total Items</th><th>Loader</th><th>Security</th><th>Loaded At</th><th>Actions</th></tr></thead><tbody>';
-    for (var vk in vehicleMap) {
-        var vg = vehicleMap[vk];
-        var obdStr = vg.obds.map(function(o) { return '<span style="font-family:var(--font-display);font-size:11px;color:var(--accent)">' + escapeHtml(o.obdNo) + '</span>'; }).join(', ');
-        html += '<tr><td><strong>' + escapeHtml(vg.vehicleNo) + '</strong></td>';
-        html += '<td>' + obdStr + '</td><td><strong>' + vg.totalItems + '</strong></td>';
-        html += '<td>' + escapeHtml(vg.loader) + '</td><td>' + escapeHtml(vg.security) + '</td>';
-        html += '<td style="font-size:12px">' + formatDateTime(vg.loadedAt) + '</td>';
-        html += '<td><div class="table-actions">';
-        for (var oi = 0; oi < vg.obds.length; oi++) {
-            html += '<button class="btn btn-secondary btn-sm" onclick="viewOBDReport(\'' + vg.obds[oi].obdId + '\')"><i class="bx bx-show"></i></button>';
-        }
-        html += '</div></td></tr>';
-    }
-    html += '</tbody></table></div></div>';
-    return html;
-}
-
-// --- QTY MISMATCH ---
-function renderQtyMismatch() {
-    var mismatched = DB.filter('loaded_vehicles', function(v) { return v.allMatch === false; });
-    var html = '<div class="section-header"><h2><i class="bx bx-error-circle"></i> Qty Mismatch</h2>';
-    html += '<div style="color:var(--text-muted);font-size:13px">' + mismatched.length + ' vehicles with quantity mismatch</div></div>';
-
-    if (mismatched.length === 0) {
-        html += '<div class="card"><div class="empty-state"><i class="bx bx-check-circle"></i><p>No mismatches! All good.</p></div></div>';
-        return html;
-    }
-
-    for (var i = 0; i < mismatched.length; i++) {
-        var mv = mismatched[i];
-        html += '<div class="card" style="margin-bottom:16px;border:2px solid var(--danger)">';
-        html += '<div style="background:var(--danger-dim);padding:12px;border-radius:8px;margin-bottom:12px;border-left:4px solid var(--danger)">';
-        html += '<strong style="color:var(--danger)">QTY MISMATCH</strong><br>';
-        html += '<span style="font-size:12px">Vehicle: <strong>' + escapeHtml(mv.vehicleNo) + '</strong> | OBD: <span style="font-family:var(--font-display);color:var(--accent)">' + escapeHtml(mv.obdNo) + '</span> | Loading No: <span style="font-family:var(--font-display);color:var(--warning)">' + escapeHtml(mv.loadingNo) + '</span></span><br>';
-        html += '<span style="font-size:12px">Loader: ' + escapeHtml(mv.loader) + ' | Security: ' + escapeHtml(mv.security) + ' | Time: ' + formatDateTime(mv.loadedAt) + '</span>';
-        html += '</div>';
-
-        if (mv.matchDetails && mv.matchDetails.length > 0) {
-            html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>Expected (Picked)</th><th>Actual (Scanned)</th><th>Diff</th><th>Status</th></tr></thead><tbody>';
-            for (var d = 0; d < mv.matchDetails.length; d++) {
-                var det = mv.matchDetails[d];
-                var diff = det.actual - det.expected;
-                html += '<tr><td>' + escapeHtml(det.material) + '</td><td>' + det.expected + '</td>';
-                html += '<td class="' + (diff !== 0 ? 'qty-mismatch' : 'qty-match') + '">' + det.actual + '</td>';
-                html += '<td class="' + (diff !== 0 ? 'qty-mismatch' : 'qty-match') + '">' + (diff > 0 ? '+' : '') + diff + '</td>';
-                html += '<td><span class="badge ' + (det.match ? 'badge-success' : 'badge-danger') + '">' + (det.match ? 'Match' : 'Mismatch') + '</span></td></tr>';
+        if (lines.length === 0) {
+            html += '<div style="text-align:center;color:var(--text-muted);padding:16px;font-size:13px">No active locations</div>';
+        } else {
+            html += '<div style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;text-transform:uppercase;letter-spacing:.3px">Required Locations</div>';
+            html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>Location</th><th>Assigned Qty</th><th>Available Qty</th><th>Picked Qty</th><th>Status</th><th>Action</th></tr></thead><tbody>';
+            for (var j = 0; j < lines.length; j++) {
+                var line = lines[j];
+                var lineStatusBadge = line.status === 'Done' ? 'badge-success' : line.status === 'Not Found' ? 'badge-danger' : 'badge-accent';
+                var actionBtn = '';
+                if (line.status === 'Pending') {
+                    actionBtn = '<button class="btn btn-sm btn-primary pick-edit-btn" data-did="' + line.id + '"><i class="bx bx-edit"></i> Edit</button>';
+                } else if (line.status === 'Done') {
+                    actionBtn = '<span style="color:var(--success);font-size:12px"><i class="bx bx-check-circle"></i> ' + line.pickedQty + ' picked</span>';
+                } else if (line.status === 'Not Found') {
+                    actionBtn = '<span style="color:var(--danger);font-size:12px"><i class="bx bx-error-circle"></i> ' + escapeHtml(line.notFoundReason || 'N/A') + '</span>';
+                }
+                html += '<tr><td><strong>' + escapeHtml(line.rack) + '</strong></td><td>' + line.assignedQty + '</td><td>' + line.availableQty + '</td>';
+                html += '<td style="font-weight:700;color:' + (line.pickedQty > 0 ? 'var(--accent)' : 'var(--text-muted)') + '">' + line.pickedQty + '</td>';
+                html += '<td><span class="badge ' + lineStatusBadge + '">' + escapeHtml(line.status) + '</span></td><td>' + actionBtn + '</td></tr>';
             }
             html += '</tbody></table></div>';
         }
         html += '</div>';
     }
-    return html;
+
+    // Submit button
+    var totalPickedAll = 0, totalPickAll = 0, pendingLines = 0;
+    for (var x = 0; x < reports.length; x++) {
+        totalPickedAll += (reports[x].totalPicked || 0);
+        totalPickAll += (reports[x].pickQty || reports[x].requiredQty || 0);
+        var xLines = DB.filter('picking_done', function(p) { return p.reportId === reports[x].id && p.status === 'Pending'; });
+        pendingLines += xLines.length;
+    }
+    html += '<div class="card" style="border-color:var(--accent);margin-top:8px">';
+    html += '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">';
+    html += '<div><div style="font-size:14px;font-weight:700">Total Picked: <span style="color:var(--accent)">' + totalPickedAll + '</span> / ' + totalPickAll + '</div>';
+    html += '<div style="font-size:12px;color:var(--text-muted);margin-top:2px">Pending lines: ' + pendingLines + '</div></div>';
+    html += '<div style="display:flex;gap:10px;flex-wrap:wrap">';
+    if (pendingLines > 0) {
+        html += '<button class="btn btn-warning" id="submitPickingPendingBtn" data-aid="' + assignmentId + '"><i class="bx bx-check-double"></i> Submit Picking (' + pendingLines + ' pending)</button>';
+    }
+    if (pendingLines === 0) {
+        html += '<button class="btn btn-primary" style="font-size:15px;padding:12px 28px" id="submitPickingFinalBtn" data-aid="' + assignmentId + '"><i class="bx bx-check-circle"></i> Submit Picking</button>';
+    }
+    html += '</div></div></div>';
+    sec.innerHTML = html;
+
+    // Bind Edit buttons via event delegation (no inline onclick — 100% reliable)
+    sec.onclick = function(e) {
+        var editBtn = e.target.closest('.pick-edit-btn');
+        if (editBtn) {
+            e.preventDefault();
+            e.stopPropagation();
+            var did = editBtn.getAttribute('data-did');
+            if (did) editPickingLine(did);
+            return;
+        }
+        var finalBtn = e.target.closest('#submitPickingFinalBtn');
+        if (finalBtn) {
+            e.preventDefault();
+            submitPickingFinal(finalBtn.getAttribute('data-aid'));
+            return;
+        }
+        var pendingBtn = e.target.closest('#submitPickingPendingBtn');
+        if (pendingBtn) {
+            e.preventDefault();
+            submitPickingWithPending(pendingBtn.getAttribute('data-aid'));
+            return;
+        }
+    };
+}
+
+// Edit Picking Line — opens modal
+function editPickingLine(doneId) {
+    var line = DB.find('picking_done', doneId);
+    if (!line) { showToast('Line not found', 'error'); return; }
+    var loc = DB.find('location_master', line.locationId);
+    var currentAvailable = loc ? loc.quantity : 0;
+    var maxPick = Math.min(line.assignedQty, currentAvailable);
+
+    var h = '<div class="form-row">';
+    h += '<div class="form-group"><label>Location</label><div class="form-input" style="font-weight:700;color:var(--accent)">' + escapeHtml(line.rack) + '</div></div>';
+    h += '<div class="form-group"><label>Available Qty</label><div class="form-input" style="font-weight:700">' + currentAvailable + '</div></div>';
+    h += '<div class="form-group"><label>Assigned Qty</label><div class="form-input">' + line.assignedQty + '</div></div>';
+    h += '</div>';
+    h += '<div class="form-group"><label>Picked Qty <span class="req">*</span></label>';
+    h += '<input type="number" id="pickedQtyInput" class="form-input" min="0" max="' + maxPick + '" value="' + line.assignedQty + '"></div>';
+    h += '<input type="hidden" id="editDoneId" value="' + doneId + '">';
+    h += '<input type="hidden" id="editCurrentAvailable" value="' + currentAvailable + '">';
+
+    if (currentAvailable < line.assignedQty) {
+        h += '<div style="background:var(--warning-dim);padding:10px;border-radius:6px;margin-bottom:12px;font-size:12px;color:var(--warning)"><i class="bx bx-error"></i> Available (' + currentAvailable + ') < Assigned (' + line.assignedQty + '). Adjust picked qty.</div>';
+    }
+
+    h += '<div class="form-actions" style="justify-content:space-between;flex-wrap:wrap">';
+    h += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
+    h += '<button class="btn btn-primary" id="donePickBtn"><i class="bx bx-check-circle"></i> Done</button>';
+    h += '<button class="btn btn-danger" id="notFoundBtn"><i class="bx bx-error-circle"></i> Material Not Found</button>';
+    h += '<button class="btn btn-warning" id="anotherLocBtn"><i class="bx bx-map-pin"></i> Give Another Location</button>';
+    h += '</div>';
+    h += '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>';
+    h += '</div>';
+
+    showModal('Pick — ' + line.rack, h, 'sm');
+
+    // Bind modal buttons via event delegation (no inline onclick)
+    setTimeout(function() {
+        var modalBody = document.querySelector('.modal-container');
+        if (modalBody) {
+            modalBody.onclick = function(e) {
+                if (e.target.closest('#donePickBtn')) { e.preventDefault(); donePickingLine(); return; }
+                if (e.target.closest('#notFoundBtn')) { e.preventDefault(); materialNotFoundClick(); return; }
+                if (e.target.closest('#anotherLocBtn')) { e.preventDefault(); requestAnotherLocationClick(); return; }
+            };
+        }
+    }, 100);
+}
+
+// Done — subtract from Location Master
+function donePickingLine() {
+    var doneId = document.getElementById('editDoneId').value;
+    var pickedQty = parseInt(document.getElementById('pickedQtyInput').value) || 0;
+    var line = DB.find('picking_done', doneId);
+    if (!line) return;
+    if (pickedQty <= 0) { showToast('Enter picked quantity', 'error'); return; }
+    if (pickedQty > line.assignedQty) { showToast('Cannot exceed assigned qty (' + line.assignedQty + ')', 'error'); return; }
+
+    var loc = DB.find('location_master', line.locationId);
+    if (!loc) { showToast('Location not found', 'error'); return; }
+    if (pickedQty > loc.quantity) { showToast('Only ' + loc.quantity + ' available now', 'error'); return; }
+
+    var remaining = loc.quantity - pickedQty;
+    DB.update('location_master', line.locationId, { quantity: remaining });
+    DB.update('picking_done', doneId, { pickedQty: pickedQty, status: 'Done', updatedAt: new Date().toISOString() });
+    updatePickingReportTotals(line.reportId);
+    checkAssignmentCompletion(line.assignmentId);
+
+    logAction('Picking', 'PICK_DONE', 'Picked ' + pickedQty + ' of ' + line.material + ' from ' + line.rack + '. Remaining: ' + remaining);
+    showToast('Picked ' + pickedQty + ' from ' + line.rack + '! Remaining: ' + remaining, 'success');
+    closeModal();
+    openPickingReport(line.assignmentId);
+}
+
+function updatePickingReportTotals(reportId) {
+    var report = DB.find('picking_reports', reportId);
+    if (!report) return;
+    var lines = DB.filter('picking_done', function(p) { return p.reportId === reportId && p.status !== 'Replaced'; });
+    var totalPicked = 0, allDone = true, anyNotFound = false;
+    for (var i = 0; i < lines.length; i++) {
+        totalPicked += (lines[i].pickedQty || 0);
+        if (lines[i].status === 'Pending') allDone = false;
+        if (lines[i].status === 'Not Found') anyNotFound = true;
+    }
+    var target = report.pickQty || report.requiredQty || 0;
+    var status = 'Pending';
+    if (allDone && totalPicked >= target) status = 'Completed';
+    else if (allDone && anyNotFound) status = 'Short';
+    else if (totalPicked > 0) status = 'In Progress';
+    DB.update('picking_reports', reportId, { totalPicked: totalPicked, status: status });
+}
+
+function checkAssignmentCompletion(assignmentId) {
+    var reports = DB.filter('picking_reports', function(r) { return r.assignmentId === assignmentId; });
+    var allComplete = true;
+    for (var i = 0; i < reports.length; i++) {
+        if (reports[i].status !== 'Completed' && reports[i].status !== 'Short') { allComplete = false; break; }
+    }
+    if (allComplete) {
+        var assignment = DB.find('picking_assignments', assignmentId);
+        DB.update('picking_assignments', assignmentId, { status: 'Completed', completedAt: new Date().toISOString() });
+        if (assignment && assignment.obdId) DB.update('obd_data', assignment.obdId, { status: 'Completed' });
+        addNotification('Picking completed for OBD ' + (assignment ? assignment.obdNo : ''), 'success');
+        logAction('Picking', 'COMPLETED', 'All picking completed for assignment ' + assignmentId);
+    }
+}
+
+// Material Not Found
+function materialNotFoundClick() {
+    var doneId = document.getElementById('editDoneId').value;
+    var line = DB.find('picking_done', doneId);
+    if (!line) return;
+    var h = '<div style="margin-bottom:16px"><label style="display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:8px;text-transform:uppercase">Reason <span class="req">*</span></label>';
+    var reasons = ['Material Missing', 'Wrong Material', 'Empty Location', 'Damaged', 'Other'];
+    for (var i = 0; i < reasons.length; i++) {
+        h += '<label style="display:flex;align-items:center;gap:8px;padding:8px 12px;margin-bottom:4px;border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;transition:all .2s" onmouseover="this.style.borderColor=\'var(--danger)\'" onmouseout="this.style.borderColor=\'var(--border)\'">';
+        h += '<input type="radio" name="notFoundReason" value="' + reasons[i] + '" style="accent-color:var(--danger);width:16px;height:16px"> ' + escapeHtml(reasons[i]) + '</label>';
+    }
+    h += '</div>';
+    h += '<div class="form-group"><label>Remarks (Optional)</label><textarea id="notFoundRemarks" class="form-input" rows="2" placeholder="Additional details..."></textarea></div>';
+    h += '<input type="hidden" id="notFoundDoneId" value="' + doneId + '">';
+    showModal('Material Not Found — ' + line.rack, h, 'sm',
+        '<button class="btn btn-secondary" onclick="closeModal();editPickingLine(\'' + doneId + '\')"><i class="bx bx-arrow-back"></i> Back</button>' +
+        '<button class="btn btn-danger" id="confirmNotFoundBtn"><i class="bx bx-error-circle"></i> Submit</button>');
+    setTimeout(function() {
+        var mc = document.querySelector('.modal-container');
+        if (mc) mc.onclick = function(e) { if (e.target.closest('#confirmNotFoundBtn')) { e.preventDefault(); submitMaterialNotFound(); } };
+    }, 100);
+}
+
+function submitMaterialNotFound() {
+    var doneId = document.getElementById('notFoundDoneId').value;
+    var reasonEl = document.querySelector('input[name="notFoundReason"]:checked');
+    var remarks = document.getElementById('notFoundRemarks').value.trim();
+    if (!reasonEl) { showToast('Select a reason', 'error'); return; }
+    DB.update('picking_done', doneId, { status: 'Not Found', pickedQty: 0, notFoundReason: reasonEl.value, notFoundRemarks: remarks, updatedAt: new Date().toISOString() });
+    var line = DB.find('picking_done', doneId);
+    if (line) { updatePickingReportTotals(line.reportId); logAction('Picking', 'NOT_FOUND', line.material + ' not found at ' + line.rack + '. Reason: ' + reasonEl.value + ' (OBD: ' + line.obdNo + ')'); }
+    showToast('Marked as Not Found: ' + reasonEl.value, 'warning');
+    closeModal();
+    if (line) openPickingReport(line.assignmentId);
+}
+
+// Request Another Location
+function requestAnotherLocationClick() {
+    var doneId = document.getElementById('editDoneId').value;
+    var line = DB.find('picking_done', doneId);
+    if (!line) return;
+    var existing = DB.filter('location_requests', function(r) { return r.pickingDoneId === doneId && r.status === 'Pending'; });
+    if (existing.length > 0) { showToast('Request already sent. Waiting for admin.', 'warning'); return; }
+    var h = '<div style="background:var(--info-dim);padding:12px;border-radius:6px;margin-bottom:16px;font-size:13px;color:var(--info)"><i class="bx bx-info-circle"></i> Request will be sent to admin with OBD, material, and location details.</div>';
+    h += '<div class="form-group"><label>Reason</label><textarea id="locReqReason" class="form-input" rows="2" placeholder="e.g. Material not found here..."></textarea></div>';
+    h += '<input type="hidden" id="locReqDoneId" value="' + doneId + '">';
+    showModal('Request Another Location', h, 'sm',
+        '<button class="btn btn-secondary" onclick="closeModal();editPickingLine(\'' + doneId + '\')"><i class="bx bx-arrow-back"></i> Back</button>' +
+        '<button class="btn btn-warning" id="sendLocReqBtn"><i class="bx bx-send"></i> Send Request</button>');
+    setTimeout(function() {
+        var mc = document.querySelector('.modal-container');
+        if (mc) mc.onclick = function(e) { if (e.target.closest('#sendLocReqBtn')) { e.preventDefault(); submitLocationRequest(); } };
+    }, 100);
+}
+
+function submitLocationRequest() {
+    var doneId = document.getElementById('locReqDoneId').value;
+    var reason = document.getElementById('locReqReason').value.trim();
+    var line = DB.find('picking_done', doneId);
+    if (!line) return;
+    DB.add('location_requests', {
+        assignmentId: line.assignmentId, obdNo: line.obdNo, pickingDoneId: doneId, reportId: line.reportId,
+        material: line.material, ean: line.ean, description: line.description,
+        oldLocationId: line.locationId, oldRack: line.rack, reason: reason || 'Not specified',
+        pickerId: APP.currentUser ? APP.currentUser.id : '', pickerName: APP.currentUser ? APP.currentUser.name : '',
+        status: 'Pending', requestedAt: new Date().toISOString()
+    });
+    addNotification('Location change request from ' + (APP.currentUser ? APP.currentUser.name : 'Picker') + ' for ' + line.material + ' (OBD: ' + line.obdNo + ')', 'warning');
+    logAction('Picking', 'LOCATION_REQUESTED', 'Picker requested new location for ' + line.material + ' at ' + line.rack);
+    showToast('Request sent to admin!', 'success');
+    closeModal();
+    if (line) openPickingReport(line.assignmentId);
+}
+
+// Submit when all done
+function submitPickingFinal(assignmentId) {
+    var assignment = DB.find('picking_assignments', assignmentId);
+    if (!assignment) return;
+    var reports = DB.filter('picking_reports', function(r) { return r.assignmentId === assignmentId; });
+    for (var i = 0; i < reports.length; i++) {
+        if (reports[i].status !== 'Completed' && reports[i].status !== 'Short') {
+            var target = reports[i].pickQty || reports[i].requiredQty || 0;
+            DB.update('picking_reports', reports[i].id, { status: (reports[i].totalPicked || 0) >= target ? 'Completed' : 'Short' });
+        }
+    }
+    DB.update('picking_assignments', assignmentId, { status: 'Completed', completedAt: new Date().toISOString() });
+    if (assignment.obdId) DB.update('obd_data', assignment.obdId, { status: 'Completed' });
+    addNotification('Picking submitted for OBD ' + assignment.obdNo, 'success');
+    logAction('Picking', 'SUBMITTED', 'Picking submitted for OBD ' + assignment.obdNo);
+    showToast('Picking for OBD ' + assignment.obdNo + ' submitted!', 'success');
+    renderStartPicking();
+}
+
+// Submit with pending
+function submitPickingWithPending(assignmentId) {
+    var assignment = DB.find('picking_assignments', assignmentId);
+    if (!assignment) return;
+    var reports = DB.filter('picking_reports', function(r) { return r.assignmentId === assignmentId; });
+    var totalPickedAll = 0;
+    for (var i = 0; i < reports.length; i++) totalPickedAll += (reports[i].totalPicked || 0);
+    if (totalPickedAll === 0) { showToast('Pick at least one item first', 'error'); return; }
+    showModal('Confirm Partial Submit', '<p>You have <strong style="color:var(--warning)">pending lines</strong>. Only picked items will be submitted.</p><p style="margin-top:8px;font-size:13px;color:var(--text-muted)">Total picked: <strong style="color:var(--accent)">' + totalPickedAll + '</strong></p>', 'sm',
+        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+        '<button class="btn btn-warning" id="confirmPartialBtn" data-aid="' + assignmentId + '"><i class="bx bx-check-double"></i> Submit Anyway</button>');
+    setTimeout(function() {
+        var mc = document.querySelector('.modal-container');
+        if (mc) mc.onclick = function(e) {
+            var btn = e.target.closest('#confirmPartialBtn');
+            if (btn) { e.preventDefault(); confirmPartialSubmit(btn.getAttribute('data-aid')); }
+        };
+    }, 100);
+}
+
+function confirmPartialSubmit(assignmentId) {
+    var assignment = DB.find('picking_assignments', assignmentId);
+    if (!assignment) return;
+    var reports = DB.filter('picking_reports', function(r) { return r.assignmentId === assignmentId; });
+    for (var i = 0; i < reports.length; i++) {
+        if (reports[i].status !== 'Completed' && reports[i].status !== 'Short') {
+            if ((reports[i].totalPicked || 0) > 0) DB.update('picking_reports', reports[i].id, { status: 'Short' });
+        }
+    }
+    DB.update('picking_assignments', assignmentId, { status: 'Completed', completedAt: new Date().toISOString() });
+    if (assignment.obdId) DB.update('obd_data', assignment.obdId, { status: 'Completed' });
+    addNotification('Partial picking submitted for OBD ' + assignment.obdNo, 'warning');
+    logAction('Picking', 'PARTIAL_SUBMIT', 'Partial picking for OBD ' + assignment.obdNo);
+    showToast('Partial picking submitted', 'success');
+    closeModal();
+    renderStartPicking();
+}
+
+// ==================== PICKING DONE ====================
+function renderPickingDone() {
+    var sec = document.getElementById('section-picking');
+    var assignments = DB.filter('picking_assignments', function(a) {
+        return a.status === 'Completed';
+    }).slice().reverse();
+
+    var html = '<div class="section-header"><h2><i class="bx bxs-check-double"></i> Picking Completed</h2>' +
+        '<button class="btn btn-secondary" onclick="exportPickingDoneExcel()"><i class="bx bx-download"></i> Export Excel</button></div>';
+
+    if (assignments.length === 0) {
+        html += '<div class="card"><div class="empty-state"><i class="bx bxs-check-double"></i><p>No completed picking yet</p></div></div>';
+    } else {
+        html += '<div class="kpi-grid" style="margin-bottom:20px">';
+        html += kpiCard('bxs-check-double', assignments.length, 'Completed OBDs');
+        var allReports = DB.filter('picking_reports', function(r) { return r.status === 'Completed' || r.status === 'Short'; });
+        var totalPicked = 0;
+        for (var t = 0; t < allReports.length; t++) totalPicked += (allReports[t].totalPicked || 0);
+        html += kpiCard('bxs-label', allReports.length, 'Materials Picked');
+        html += kpiCard('bxs-package', totalPicked, 'Total Qty Picked');
+        html += '</div>';
+
+        html += '<div class="card"><div class="card-title">Completed Assignments</div>';
+        html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Picker</th><th>Materials</th><th>Total Picked</th><th>Completed At</th><th>Action</th></tr></thead><tbody>';
+        for (var i = 0; i < assignments.length; i++) {
+            var a = assignments[i];
+            var reps = DB.filter('picking_reports', function(r) { return r.assignmentId === a.id; });
+            var tp = 0;
+            for (var r = 0; r < reps.length; r++) tp += (reps[r].totalPicked || 0);
+            html += '<tr><td><strong style="color:var(--accent)">' + escapeHtml(a.obdNo) + '</strong></td>';
+            html += '<td>' + escapeHtml(a.pickerName) + '</td>';
+            html += '<td>' + reps.length + '</td><td>' + tp + '</td>';
+            html += '<td style="font-size:12px;color:var(--text-muted)">' + formatDateTime(a.completedAt) + '</td>';
+            html += '<td><button class="btn btn-sm btn-secondary" onclick="viewCompletedPickingDetail(\'' + a.id + '\')"><i class="bx bx-show"></i> View</button></td></tr>';
+        }
+        html += '</tbody></table></div></div>';
+    }
+    sec.innerHTML = html;
+}
+
+function viewCompletedPickingDetail(assignmentId) {
+    var assignment = DB.find('picking_assignments', assignmentId);
+    if (!assignment) return;
+    var reports = DB.filter('picking_reports', function(r) { return r.assignmentId === assignmentId; });
+
+    var h = '<div style="margin-bottom:16px"><strong>OBD:</strong> ' + escapeHtml(assignment.obdNo) + ' | <strong>Picker:</strong> ' + escapeHtml(assignment.pickerName) + ' | <strong>Completed:</strong> ' + formatDateTime(assignment.completedAt) + '</div>';
+
+    for (var i = 0; i < reports.length; i++) {
+        var rep = reports[i];
+        var lines = DB.filter('picking_done', function(p) { return p.reportId === rep.id && (p.status === 'Done' || p.status === 'Not Found'); });
+        var target = rep.pickQty || rep.requiredQty || 0;
+        h += '<div style="margin-bottom:12px"><strong>' + escapeHtml(rep.material) + '</strong> — Picked: ' + (rep.totalPicked || 0) + '/' + target + ' <span class="badge ' + (rep.status === 'Completed' ? 'badge-success' : 'badge-warning') + '">' + rep.status + '</span></div>';
+        if (lines.length > 0) {
+            h += '<div class="table-wrapper" style="margin-bottom:12px"><table class="data-table"><thead><tr><th>Location</th><th>Picked</th><th>Status</th><th>Reason</th></tr></thead><tbody>';
+            for (var j = 0; j < lines.length; j++) {
+                var l = lines[j];
+                h += '<tr><td>' + escapeHtml(l.rack) + '</td><td>' + l.pickedQty + '</td>';
+                h += '<td><span class="badge ' + (l.status === 'Done' ? 'badge-success' : 'badge-danger') + '">' + l.status + '</span></td>';
+                h += '<td>' + escapeHtml(l.notFoundReason || '-') + '</td></tr>';
+            }
+            h += '</tbody></table></div>';
+        }
+    }
+
+    showModal('Picking Detail — ' + assignment.obdNo, h, 'lg');
+}
+
+function exportPickingDoneExcel() {
+    var assignments = DB.filter('picking_assignments', function(a) { return a.status === 'Completed'; });
+    if (assignments.length === 0) { showToast('No data to export', 'warning'); return; }
+
+    var rows = [];
+    for (var i = 0; i < assignments.length; i++) {
+        var a = assignments[i];
+        var reports = DB.filter('picking_reports', function(r) { return r.assignmentId === a.id; });
+        for (var j = 0; j < reports.length; j++) {
+            var rep = reports[j];
+            var lines = DB.filter('picking_done', function(p) { return p.reportId === rep.id && p.status === 'Done'; });
+            for (var k = 0; k < lines.length; k++) {
+                rows.push({
+                    'OBD No': a.obdNo, 'Picker': a.pickerName, 'Material': rep.material,
+                    'Description': rep.description || '', 'EAN': rep.ean || '',
+                    'Order Qty': rep.orderQty || rep.requiredQty || 0,
+                    'Pick Qty': rep.pickQty || rep.requiredQty || 0,
+                    'Location': lines[k].rack, 'Picked Qty': lines[k].pickedQty,
+                    'Status': rep.status, 'Completed At': formatDateTime(a.completedAt)
+                });
+            }
+        }
+    }
+
+    var ws = XLSX.utils.json_to_sheet(rows);
+    var wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Picking Done');
+    XLSX.writeFile(wb, 'Picking_Done_' + today() + '.xlsx');
+    logAction('Picking', 'EXPORT', 'Picking Done report exported');
+    showToast('Excel exported!', 'success');
+}
+
+// ==================== PICKING DONE ====================
+function renderPickingDone() {
+    var sec = document.getElementById('section-picking');
+    var assignments = DB.filter('picking_assignments', function(a) {
+        return a.status === 'Completed';
+    }).slice().reverse();
+
+    var html = '<div class="section-header"><h2><i class="bx bxs-check-double"></i> Picking Completed</h2>' +
+        '<button class="btn btn-secondary" onclick="exportPickingDoneExcel()"><i class="bx bx-download"></i> Export Excel</button></div>';
+
+    if (assignments.length === 0) {
+        html += '<div class="card"><div class="empty-state"><i class="bx bxs-check-double"></i><p>No completed picking yet</p></div></div>';
+    } else {
+        html += '<div class="kpi-grid" style="margin-bottom:20px">';
+        html += kpiCard('bxs-check-double', assignments.length, 'Completed OBDs');
+        var totalMats = 0, totalPicked = 0;
+        var allReports = DB.filter('picking_reports', function(r) { return r.status === 'Completed' || r.status === 'Short'; });
+        totalMats = allReports.length;
+        for (var t = 0; t < allReports.length; t++) { totalPicked += (allReports[t].totalPicked || 0); }
+        html += kpiCard('bxs-label', totalMats, 'Materials Picked');
+        html += kpiCard('bxs-package', totalPicked, 'Total Qty Picked');
+        html += '</div>';
+
+        html += '<div class="card"><div class="card-title">Completed Assignments</div>';
+        html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Picker</th><th>Materials</th><th>Total Picked</th><th>Completed At</th><th>Action</th></tr></thead><tbody>';
+        for (var i = 0; i < assignments.length; i++) {
+            var a = assignments[i];
+            var reps = DB.filter('picking_reports', function(r) { return r.assignmentId === a.id; });
+            var tp = 0;
+            for (var r = 0; r < reps.length; r++) { tp += (reps[r].totalPicked || 0); }
+            html += '<tr><td><strong style="color:var(--accent)">' + escapeHtml(a.obdNo) + '</strong></td>';
+            html += '<td>' + escapeHtml(a.pickerName) + '</td>';
+            html += '<td>' + reps.length + '</td><td>' + tp + '</td>';
+            html += '<td style="font-size:12px;color:var(--text-muted)">' + formatDateTime(a.completedAt) + '</td>';
+            html += '<td><button class="btn btn-sm btn-secondary" onclick="viewCompletedPickingDetail(\'' + a.id + '\')"><i class="bx bx-show"></i> View</button></td></tr>';
+        }
+        html += '</tbody></table></div></div>';
+    }
+    sec.innerHTML = html;
+}
+
+function viewCompletedPickingDetail(assignmentId) {
+    var assignment = DB.find('picking_assignments', assignmentId);
+    if (!assignment) return;
+    var reports = DB.filter('picking_reports', function(r) { return r.assignmentId === assignmentId; });
+
+    var h = '<div style="margin-bottom:16px"><strong>OBD:</strong> ' + escapeHtml(assignment.obdNo) + ' | <strong>Picker:</strong> ' + escapeHtml(assignment.pickerName) + ' | <strong>Completed:</strong> ' + formatDateTime(assignment.completedAt) + '</div>';
+
+    for (var i = 0; i < reports.length; i++) {
+        var rep = reports[i];
+        var lines = DB.filter('picking_done', function(p) { return p.reportId === rep.id && (p.status === 'Done' || p.status === 'Not Found'); });
+        h += '<div style="margin-bottom:12px"><strong>' + escapeHtml(rep.material) + '</strong> — Picked: ' + rep.totalPicked + '/' + rep.requiredQty + ' <span class="badge ' + (rep.status === 'Completed' ? 'badge-success' : 'badge-warning') + '">' + rep.status + '</span></div>';
+        if (lines.length > 0) {
+            h += '<div class="table-wrapper" style="margin-bottom:12px"><table class="data-table"><thead><tr><th>Location</th><th>Picked</th><th>Status</th><th>Reason</th></tr></thead><tbody>';
+            for (var j = 0; j < lines.length; j++) {
+                var l = lines[j];
+                h += '<tr><td>' + escapeHtml(l.rack) + '</td><td>' + l.pickedQty + '</td>';
+                h += '<td><span class="badge ' + (l.status === 'Done' ? 'badge-success' : 'badge-danger') + '">' + l.status + '</span></td>';
+                h += '<td>' + escapeHtml(l.notFoundReason || '-') + '</td></tr>';
+            }
+            h += '</tbody></table></div>';
+        }
+    }
+
+    showModal('Picking Detail — ' + assignment.obdNo, h, 'lg');
+}
+
+function exportPickingDoneExcel() {
+    var assignments = DB.filter('picking_assignments', function(a) { return a.status === 'Completed'; });
+    if (assignments.length === 0) { showToast('No data to export', 'warning'); return; }
+
+    var rows = [];
+    for (var i = 0; i < assignments.length; i++) {
+        var a = assignments[i];
+        var reports = DB.filter('picking_reports', function(r) { return r.assignmentId === a.id; });
+        for (var j = 0; j < reports.length; j++) {
+            var rep = reports[j];
+            var lines = DB.filter('picking_done', function(p) { return p.reportId === rep.id && p.status === 'Done'; });
+            for (var k = 0; k < lines.length; k++) {
+                rows.push({
+                    'OBD No': a.obdNo, 'Picker': a.pickerName, 'Material': rep.material,
+                    'EAN': rep.ean, 'Required Qty': rep.requiredQty, 'Location': lines[k].rack,
+                    'Picked Qty': lines[k].pickedQty, 'Status': rep.status,
+                    'Completed At': formatDateTime(a.completedAt)
+                });
+            }
+        }
+    }
+
+    var ws = XLSX.utils.json_to_sheet(rows);
+    var wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Picking Done');
+    XLSX.writeFile(wb, 'Picking_Done_' + today() + '.xlsx');
+    logAction('Picking', 'EXPORT', 'Picking Done report exported');
+    showToast('Excel exported!', 'success');
+}
+
+
+/* ============================================================
+   LOADING MODULE — Clean Implementation
+   ============================================================ */
+
+function renderLoading(sub) {
+    var sec = document.getElementById('section-loading');
+    if (!sec) {
+        sec = document.createElement('section');
+        sec.id = 'section-loading';
+        sec.className = 'content-section';
+        document.getElementById('contentArea').appendChild(sec);
+    }
+    switch (sub) {
+        case 'loading-assign': renderLoadingAssign(); break;
+        case 'start-loading': renderStartLoading(); break;
+        case 'loading-done': renderLoadingDone(); break;
+        case 'qty-mismatch': renderQtyMismatch(); break;
+        default:
+            sec.innerHTML = '<div class="section-header"><h2><i class="bx bxs-truck"></i> Loading Module</h2></div>' +
+                '<div class="card"><div class="empty-state"><i class="bx bxs-truck"></i><p>Select a sub-module from sidebar</p></div></div>';
+    }
+}
+
+// ==================== LOADING ====================
+function renderLoading(sub) {
+    if (sub === 'loading-assign') { renderLoadingAssign(); return; }
+    if (sub === 'start-loading') { renderStartLoading(); return; }
+    if (sub === 'loading-done') { renderLoadingDone(); return; }
+    if (sub === 'qty-mismatch') { renderQtyMismatch(); return; }
+    renderLoadingAssign();
+}
+
+// ===== LOADING ASSIGN — Search + Table + Select =====
+var _laT = null, _laP = 1, _laSel = {};
+
+function renderLoadingAssign() {
+    var html = '<div class="section-header"><h2><i class="bx bx-truck"></i> Loading Assign</h2></div>';
+
+    // Top Card
+    html += '<div class="card" style="margin-bottom:16px">';
+    html += '<div class="card-title">ASSIGN OBD TO LOADER</div>';
+    html += '<div class="form-row">';
+    html += '<div class="form-group" style="flex:2"><label>Search OBD / Customer</label>';
+    html += '<div style="position:relative"><i class="bx bx-search" style="position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--text-muted);font-size:16px"></i>';
+    html += '<input type="text" id="_las" class="form-input" style="padding-left:38px" placeholder="Type OBD number or customer name..." oninput="clearTimeout(_laT);_laT=setTimeout(function(){_laP=1;_loadLAOBDs()},300)"></div></div>';
+    html += '<div class="form-group" style="flex:1"><label>Loader Username <span class="req">*</span></label>';
+    html += '<input type="text" id="_lauser" class="form-input" placeholder="e.g. loader"></div>';
+    html += '</div>';
+    html += '<div class="form-actions" style="margin-top:12px">';
+    html += '<button class="btn btn-primary" onclick="_assignSelectedOBDs()"><i class="bx bx-check-double"></i> Assign Selected OBDs</button>';
+    html += '<button class="btn btn-secondary" onclick="_selectAllLA()"><i class="bx bx-check-square"></i> Select All</button>';
+    html += '<button class="btn btn-ghost" onclick="_deselectAllLA()"><i class="bx bx-square"></i> Deselect All</button>';
+    html += '<span id="_laSelCount" style="margin-left:12px;font-size:13px;color:var(--text-muted);display:flex;align-items:center;gap:4px"><i class="bx bx-check-circle"></i> 0 selected</span>';
+    html += '</div></div>';
+
+    // Table
+    html += '<div id="_lat"></div>';
+    document.getElementById('section-loading').innerHTML = html;
+    _laSel = {};
+    _loadLAOBDs();
+}
+
+function _loadLAOBDs() {
+    var q = (document.getElementById('_las') || {}).value || '';
+    var allOBDs = DB.get('obd_data');
+    var skipStatus = ['Loading Assigned', 'Loaded', 'Loading Done'];
+    var filtered = [];
+    for (var i = 0; i < allOBDs.length; i++) {
+        var obd = allOBDs[i];
+        if (skipStatus.indexOf(obd.status) > -1) continue;
+        if (q) {
+            var ql = q.toLowerCase();
+            if ((obd.obdNo || '').toLowerCase().indexOf(ql) === -1 && (obd.customer || '').toLowerCase().indexOf(ql) === -1) continue;
+        }
+        filtered.push(obd);
+    }
+    filtered.sort(function(a, b) { return new Date(b.createdAt || 0) - new Date(a.createdAt || 0); });
+
+    var total = filtered.length;
+    var perPage = 50;
+    var pages = Math.ceil(total / perPage) || 1;
+    var start = (_laP - 1) * perPage;
+    var items = filtered.slice(start, start + perPage);
+
+    var el = document.getElementById('_lat');
+    if (!el) return;
+
+    var h = '<div style="overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius)">';
+    h += '<table class="data-table"><thead><tr>';
+    h += '<th style="width:50px;text-align:center"><input type="checkbox" id="_laCA" onchange="_toggleAllLA(this.checked)" style="accent-color:var(--accent);width:16px;height:16px;cursor:pointer"></th>';
+    h += '<th>#</th><th>OBD No</th><th>Customer</th><th>Materials</th><th>Total Qty</th><th>Status</th><th>Created</th>';
+    h += '</tr></thead><tbody>';
+
+    if (items.length === 0) {
+        h += '<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:40px"><i class="bx bx-inbox" style="font-size:36px;display:block;margin-bottom:8px;opacity:.4"></i>No OBDs available for loading</td></tr>';
+    } else {
+        for (var r = 0; r < items.length; r++) {
+            var obd = items[r];
+            var ck = _laSel[obd.id] ? 'checked' : '';
+            var mc = obd.materials ? (Array.isArray(obd.materials) ? obd.materials.length : 0) : (obd.materialCount || 0);
+            var tq = obd.totalQty || obd.totalPickQty || 0;
+            var bg = _laSel[obd.id] ? 'background:var(--accent-dim)' : '';
+
+            h += '<tr style="' + bg + '">';
+            h += '<td style="text-align:center"><input type="checkbox" class="_laChk" data-id="' + obd.id + '" ' + ck + ' onchange="_toggleLA(\'' + obd.id + '\',this.checked)" style="accent-color:var(--accent);width:16px;height:16px;cursor:pointer"></td>';
+            h += '<td style="color:var(--text-muted);font-size:11px">' + (start + r + 1) + '</td>';
+            h += '<td><strong style="color:var(--accent);font-family:var(--font-display);font-size:12px">' + escapeHtml(obd.obdNo || '-') + '</strong></td>';
+            h += '<td>' + escapeHtml(obd.customer || '-') + '</td>';
+            h += '<td><span class="badge badge-info">' + mc + '</span></td>';
+            h += '<td><strong>' + tq + '</strong></td>';
+            h += '<td>' + _laBadge(obd.status) + '</td>';
+            h += '<td style="font-size:12px;color:var(--text-muted)">' + formatDateTime(obd.createdAt) + '</td>';
+            h += '</tr>';
+        }
+    }
+    h += '</tbody></table></div>';
+
+    // Pagination
+    if (pages > 1) {
+        h += '<div class="pagination" style="margin-top:12px">';
+        h += '<button class="page-btn" onclick="_laP=' + (_laP - 1) + ';_loadLAOBDs()" ' + (_laP <= 1 ? 'disabled' : '') + '><i class="bx bx-chevron-left"></i></button>';
+        var s = Math.max(1, _laP - 2), e = Math.min(pages, _laP + 2);
+        if (s > 1) { h += '<button class="page-btn" onclick="_laP=1;_loadLAOBDs()">1</button>'; if (s > 2) h += '<span style="color:var(--text-muted);padding:0 4px">...</span>'; }
+        for (var p = s; p <= e; p++) h += '<button class="page-btn ' + (p === _laP ? 'active' : '') + '" onclick="_laP=' + p + ';_loadLAOBDs()">' + p + '</button>';
+        if (e < pages) { if (e < pages - 1) h += '<span style="color:var(--text-muted);padding:0 4px">...</span>'; h += '<button class="page-btn" onclick="_laP=' + pages + ';_loadLAOBDs()">' + pages + '</button>'; }
+        h += '<button class="page-btn" onclick="_laP=' + (_laP + 1) + ';_loadLAOBDs()" ' + (_laP >= pages ? 'disabled' : '') + '><i class="bx bx-chevron-right"></i></button>';
+        h += '</div>';
+    }
+
+    // Info
+    h += '<div style="margin-top:10px;font-size:12px;color:var(--text-muted)">Showing ' + (total > 0 ? start + 1 : 0) + ' - ' + Math.min(start + perPage, total) + ' of ' + total + ' OBDs</div>';
+
+    el.innerHTML = h;
+}
+
+function _laBadge(v) {
+    if (!v) return '-';
+    if (v === 'Pending') return '<span class="badge badge-warning">Pending</span>';
+    if (v === 'Assigned') return '<span class="badge badge-accent">Assigned</span>';
+    if (v === 'In Progress') return '<span class="badge badge-info">In Progress</span>';
+    if (v === 'Picking Done' || v === 'Completed') return '<span class="badge badge-success">Picking Done</span>';
+    return '<span class="badge badge-info">' + escapeHtml(v) + '</span>';
+}
+
+function _toggleLA(id, checked) {
+    if (checked) _laSel[id] = true; else delete _laSel[id];
+    _updateLACount();
+    _loadLAOBDs();
+}
+function _toggleAllLA(checked) {
+    var cbs = document.querySelectorAll('._laChk');
+    for (var i = 0; i < cbs.length; i++) {
+        var id = cbs[i].getAttribute('data-id');
+        if (checked) _laSel[id] = true; else delete _laSel[id];
+    }
+    _updateLACount();
+    _loadLAOBDs();
+}
+function _selectAllLA() {
+    var q = (document.getElementById('_las') || {}).value || '';
+    var allOBDs = DB.get('obd_data');
+    var skip = ['Loading Assigned', 'Loaded', 'Loading Done'];
+    for (var i = 0; i < allOBDs.length; i++) {
+        if (skip.indexOf(allOBDs[i].status) > -1) continue;
+        if (q) {
+            var ql = q.toLowerCase();
+            if ((allOBDs[i].obdNo || '').toLowerCase().indexOf(ql) === -1 && (allOBDs[i].customer || '').toLowerCase().indexOf(ql) === -1) continue;
+        }
+        _laSel[allOBDs[i].id] = true;
+    }
+    _updateLACount();
+    _loadLAOBDs();
+}
+function _deselectAllLA() { _laSel = {}; _updateLACount(); _loadLAOBDs(); }
+function _updateLACount() {
+    var el = document.getElementById('_laSelCount');
+    if (el) el.innerHTML = '<i class="bx bx-check-circle"></i> ' + Object.keys(_laSel).length + ' selected';
+}
+
+function _assignSelectedOBDs() {
+    var user = (document.getElementById('_lauser') || {}).value || '';
+    if (!user.trim()) { showToast('Enter loader username first', 'error'); return; }
+    var ids = Object.keys(_laSel);
+    if (ids.length === 0) { showToast('Select at least one OBD', 'warning'); return; }
+
+    if (!confirm('Assign ' + ids.length + ' OBD(s) to "' + user.trim() + '"?')) return;
+
+    var count = 0;
+    var allOBDs = DB.get('obd_data');
+    for (var i = 0; i < allOBDs.length; i++) {
+        if (_laSel[allOBDs[i].id]) {
+            DB.update('obd_data', allOBDs[i].id, {
+                status: 'Loading Assigned',
+                assignedLoader: user.trim(),
+                loadingAssignedAt: new Date().toISOString()
+            });
+
+            // Also create loading assignment record
+            DB.add('loading_assignments', {
+                obdId: allOBDs[i].id,
+                obdNo: allOBDs[i].obdNo,
+                customer: allOBDs[i].customer,
+                loader: user.trim(),
+                materialCount: allOBDs[i].materials ? (Array.isArray(allOBDs[i].materials) ? allOBDs[i].materials.length : 0) : (allOBDs[i].materialCount || 0),
+                totalQty: allOBDs[i].totalQty || allOBDs[i].totalPickQty || 0,
+                status: 'Loading Assigned',
+                assignedAt: new Date().toISOString()
+            });
+            count++;
+        }
+    }
+
+    addNotification(count + ' OBD(s) assigned to loader ' + user.trim(), 'info');
+    logAction('Loading', 'ASSIGN', count + ' OBDs assigned to ' + user.trim());
+    showToast(count + ' OBD(s) assigned to ' + user.trim() + '!', 'success');
+    _laSel = {};
+    _loadLAOBDs();
+}
+
+// ===== START LOADING =====
+function renderStartLoading() {
+    var assignments = DB.filter('loading_assignments', function(a) { return a.status === 'Loading Assigned'; });
+    var html = '<div class="section-header"><h2><i class="bx bx-loader-circle"></i> Start Loading</h2></div>';
+
+    if (assignments.length === 0) {
+        html += '<div class="card"><div class="empty-state"><i class="bx bx-inbox"></i><p>No pending loading assignments</p></div></div>';
+        document.getElementById('section-loading').innerHTML = html;
+        return;
+    }
+
+    html += '<div class="card"><div class="card-title">PENDING LOADING (' + assignments.length + ')</div>';
+    html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>OBD No</th><th>Customer</th><th>Materials</th><th>Loader</th><th>Assigned At</th><th>Action</th></tr></thead><tbody>';
+    for (var i = 0; i < assignments.length; i++) {
+        var a = assignments[i];
+        html += '<tr>';
+        html += '<td>' + (i + 1) + '</td>';
+        html += '<td><strong style="color:var(--accent)">' + escapeHtml(a.obdNo || '-') + '</strong></td>';
+        html += '<td>' + escapeHtml(a.customer || '-') + '</td>';
+        html += '<td>' + (a.materialCount || 0) + '</td>';
+        html += '<td>' + escapeHtml(a.loader || '-') + '</td>';
+        html += '<td style="font-size:12px;color:var(--text-muted)">' + formatDateTime(a.assignedAt) + '</td>';
+        html += '<td><button class="btn btn-primary btn-sm" onclick="_startLoadingItem(\'' + a.obdId + '\')"><i class="bx bx-play"></i> Start</button></td>';
+        html += '</tr>';
+    }
+    html += '</tbody></table></div></div>';
+    document.getElementById('section-loading').innerHTML = html;
+}
+
+function _startLoadingItem(obdId) {
+    DB.update('loading_assignments', obdId, { status: 'Loading', startedAt: new Date().toISOString() });
+    DB.update('obd_data', obdId, { status: 'Loading' });
+    showToast('Loading started', 'success');
+    logAction('Loading', 'START', 'Loading started for OBD');
+    renderStartLoading();
+}
+
+// ===== LOADING DONE / LOADED VEHICLES =====
+function renderLoadingDone() {
+    var loaded = DB.get('loaded_vehicles');
+    var html = '<div class="section-header"><h2><i class="bx bx-check-double"></i> Loaded Vehicles</h2></div>';
+
+    if (loaded.length === 0) {
+        html += '<div class="card"><div class="empty-state"><i class="bx bx-truck"></i><p>No loaded vehicles yet</p></div></div>';
+        document.getElementById('section-loading').innerHTML = html;
+        return;
+    }
+
+    html += '<div class="card"><div class="card-title">LOADED VEHICLES (' + loaded.length + ')</div>';
+    html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>Vehicle No</th><th>OBDs Loaded</th><th>Total Items</th><th>Loader</th><th>Security</th><th>Loaded At</th><th>Action</th></tr></thead><tbody>';
+    for (var i = 0; i < loaded.length; i++) {
+        var v = loaded[i];
+        html += '<tr>';
+        html += '<td>' + (i + 1) + '</td>';
+        html += '<td><strong>' + escapeHtml(v.vehicleNo || '-') + '</strong></td>';
+        html += '<td>' + escapeHtml(v.obdNo || '-') + '</td>';
+        html += '<td>' + (v.totalItems || v.totalMaterials || 0) + '</td>';
+        html += '<td>' + escapeHtml(v.loader || v.loadedBy || '-') + '</td>';
+        html += '<td>' + escapeHtml(v.security || '-') + '</td>';
+        html += '<td style="font-size:12px;color:var(--text-muted)">' + formatDateTime(v.loadedAt || v.dateTime) + '</td>';
+        html += '<td><button class="btn-icon" onclick="_viewLoaded(\'' + v.id + '\')"><i class="bx bx-eye"></i></button></td>';
+        html += '</tr>';
+    }
+    html += '</tbody></table></div></div>';
+    document.getElementById('section-loading').innerHTML = html;
+}
+
+function _viewLoaded(id) {
+    var v = DB.find('loaded_vehicles', id);
+    if (!v) { showToast('Not found', 'error'); return; }
+    var html = '<div class="form-row">';
+    html += '<div class="form-group"><label>Vehicle No</label><div class="form-input" style="background:var(--bg-secondary)">' + escapeHtml(v.vehicleNo || '-') + '</div></div>';
+    html += '<div class="form-group"><label>OBDs</label><div class="form-input" style="background:var(--bg-secondary)">' + escapeHtml(v.obdNo || '-') + '</div></div>';
+    html += '<div class="form-group"><label>Loader</label><div class="form-input" style="background:var(--bg-secondary)">' + escapeHtml(v.loader || v.loadedBy || '-') + '</div></div>';
+    html += '<div class="form-group"><label>Security</label><div class="form-input" style="background:var(--bg-secondary)">' + escapeHtml(v.security || '-') + '</div></div>';
+    html += '</div>';
+    showModal('Loaded Vehicle Details', html);
+}
+
+// ===== QTY MISMATCH =====
+function renderQtyMismatch() {
+    var diffs = DB.get('difference_reports');
+    var html = '<div class="section-header"><h2><i class="bx bx-error-circle"></i> Qty Mismatch</h2></div>';
+
+    if (diffs.length === 0) {
+        html += '<div class="card"><div class="empty-state"><i class="bx bx-check-circle"></i><p>No quantity mismatches found</p></div></div>';
+        document.getElementById('section-loading').innerHTML = html;
+        return;
+    }
+
+    html += '<div class="card"><div class="card-title">MISMATCH REPORTS (' + diffs.length + ')</div>';
+    html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>OBD No</th><th>Material</th><th>Order Qty</th><th>Loaded Qty</th><th>Difference</th><th>Reported By</th><th>Date</th></tr></thead><tbody>';
+    for (var i = 0; i < diffs.length; i++) {
+        var d = diffs[i];
+        var diff = (d.loadedQty || 0) - (d.orderQty || 0);
+        var cls = diff < 0 ? 'qty-mismatch' : 'qty-match';
+        html += '<tr>';
+        html += '<td>' + (i + 1) + '</td>';
+        html += '<td><strong style="color:var(--accent)">' + escapeHtml(d.obdNo || '-') + '</strong></td>';
+        html += '<td>' + escapeHtml(d.material || '-') + '</td>';
+        html += '<td>' + (d.orderQty || 0) + '</td>';
+        html += '<td>' + (d.loadedQty || 0) + '</td>';
+        html += '<td class="' + cls + '">' + (diff < 0 ? '' : '+') + diff + '</td>';
+        html += '<td>' + escapeHtml(d.reportedBy || d.user || '-') + '</td>';
+        html += '<td style="font-size:12px;color:var(--text-muted)">' + formatDateTime(d.dateTime || d.createdAt) + '</td>';
+        html += '</tr>';
+    }
+    html += '</tbody></table></div></div>';
+    document.getElementById('section-loading').innerHTML = html;
 }
 /* ============================================================
    PART 4: ADMIN + USER WORKING TIME + ENHANCED REPORTS
@@ -5280,166 +5836,650 @@ function exportUserTimePDF() {
     } catch(e) { showToast('Export failed: ' + e.message, 'error'); }
 }
 
-// ==================== ENHANCED REPORTS ====================
+// ==================== REPORTS MODULE ====================
 function renderReports() {
-    var vehicles = DB.get('vehicles');
-    var grns = DB.get('grn_records');
-    var shorts = DB.get('short_reports');
-    var locs = DB.get('location_master');
-    var picks = DB.filter('obd_data', function(o) { return o.status === 'Picked' || o.status === 'Loaded' || o.status === 'Qty Mismatch' || o.status === 'Loading Assigned' || o.status === 'Loading In Progress'; });
-    var loaded = DB.filter('loaded_vehicles', function(v) { return v.allMatch === true; });
-    var mismatched = DB.filter('loaded_vehicles', function(v) { return v.allMatch === false; });
-    var diffs = DB.get('difference_reports');
-    var users = DB.get('users');
+    var todayStr = today();
+    var html = '<div class="section-header"><h2><i class="bx bxs-bar-chart-alt-2"></i> Reports & Analytics</h2></div>';
 
-    var html = '<div class="section-header"><h2><i class="bx bxs-bar-chart-alt-2"></i> Reports</h2>';
-    html += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
-    html += '<button class="btn btn-secondary btn-sm" onclick="exportFullReportPDF()"><i class="bx bx-download"></i> Full Report PDF</button>';
+    // Filter Card
+    html += '<div class="card" style="margin-bottom:20px">';
+    html += '<div class="card-title">Filter Reports</div>';
+    html += '<div class="form-row">';
+    html += '<div class="form-group"><label>From Date</label><input type="date" id="rptFromDate" class="form-input" value="' + todayStr + '"></div>';
+    html += '<div class="form-group"><label>To Date</label><input type="date" id="rptToDate" class="form-input" value="' + todayStr + '"></div>';
+    html += '<div class="form-group"><label>Report Type</label>';
+    html += '<select id="rptType" class="form-input" onchange="loadReport()">';
+    html += '<option value="vehicle">Vehicle Report</option>';
+    html += '<option value="piv">PIV Report</option>';
+    html += '<option value="putaway">Putaway Report</option>';
+    html += '<option value="loading">Loading Report</option>';
+    html += '<option value="user-time">User Working Time</option>';
+    html += '<option value="grn">GRN Report</option>';
+    html += '<option value="short">Short Report</option>';
+    html += '</select></div>';
+    html += '<div class="form-group" style="display:flex;align-items:flex-end;gap:8px">';
+    html += '<button class="btn btn-primary" onclick="loadReport()"><i class="bx bx-search"></i> Search</button>';
+    html += '<button class="btn btn-secondary" onclick="resetReportFilter()"><i class="bx bx-refresh"></i> Reset</button>';
+    html += '</div></div>';
+    html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">';
+    html += '<button class="btn btn-success btn-sm" onclick="downloadReportExcel()"><i class="bx bx-table"></i> Download Excel</button>';
+    html += '<button class="btn btn-danger btn-sm" onclick="downloadReportPDF()"><i class="bx bx-file"></i> Download PDF</button>';
     html += '</div></div>';
 
-    // KPIs
-    html += '<div class="kpi-grid">';
-    html += kpiCard('bxs-truck', vehicles.length, 'Total Vehicles');
-    html += kpiCard('bx-check-circle', grns.length, 'Total GRN');
-    html += kpiCard('bx-error-circle', shorts.filter(function(s) { return s.hasMismatch; }).length, 'Short/Excess');
-    html += kpiCard('bxs-package', locs.filter(function(l) { return l.action === 'PUTAWAY'; }).length, 'Putaway');
-    html += kpiCard('bxs-clipboard', locs.filter(function(l) { return l.action === 'PIV'; }).length, 'PIV');
-    html += kpiCard('bxs-box', picks.length, 'Picking Done');
-    html += kpiCard('bxs-truck', loaded.length, 'Loaded OK');
-    html += kpiCard('bx-error', mismatched.length, 'Qty Mismatch');
-    html += kpiCard('bx-error-circle', diffs.length, 'Picking Diffs');
-    html += kpiCard('bxs-receipt', DB.get('audit_log').length, 'Audit Entries');
+    // Summary KPIs
+    html += '<div id="rptKPIs" class="kpi-grid" style="margin-bottom:20px"></div>';
+
+    // Report Table
+    html += '<div class="card"><div class="card-title" id="rptTitle">Vehicle Report</div>';
+    html += '<div class="table-wrapper" style="max-height:60vh;overflow-y:auto">';
+    html += '<table class="data-table" id="rptTable"><thead id="rptHead"></thead><tbody id="rptBody"></tbody></table>';
+    html += '</div>';
+    html += '<div id="rptPagination" style="margin-top:12px"></div>';
+    html += '<div id="rptEmpty" class="empty-state" style="display:none"><i class="bx bx-bar-chart-alt-2"></i><p>No data found for selected filters</p></div>';
     html += '</div>';
 
-    // Quick search
-    html += '<div class="card" style="margin-bottom:16px"><div class="card-title">Quick Search by Any Number</div>';
-    html += '<div class="form-row"><div class="form-group"><label>GRN No / Report No / Invoice No / OBD No / LOAD No / Vehicle No</label>';
-    html += '<div style="display:flex;gap:8px"><input type="text" id="reportQuickSearch" class="form-input" placeholder="Type any number...">';
-    html += '<button class="btn btn-primary" onclick="quickSearchReport()"><i class="bx bx-search"></i> Search</button></div></div></div>';
-    html += '<div id="reportSearchResult"></div></div>';
-
-    // --- Vehicle Report ---
-    html += '<div class="card" style="margin-bottom:16px"><div class="card-title" style="cursor:pointer;display:flex;align-items:center;gap:8px" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display===\'none\'?\'block\':\'none\'"><i class="bx bxs-truck"></i> Vehicle Report <i class="bx bx-chevron-down" style="margin-left:auto"></i></div>';
-    html += '<div style="margin-top:12px"><div class="table-wrapper"><table class="data-table"><thead><tr><th>Vehicle</th><th>Type</th><th>LR</th><th>Transport</th><th>Status</th><th>GRN</th><th>Report</th></tr></thead><tbody>';
-    for (var vi = 0; vi < vehicles.length; vi++) {
-        var v = vehicles[vi];
-        var grnStr = v.grnNumbers ? v.grnNumbers.map(function(g) { return '<span style="font-family:var(--font-display);font-size:10px;color:var(--accent)">' + escapeHtml(g) + '</span>'; }).join(', ') : '-';
-        var statusClass = v.status === 'Posted' || v.status === 'Unloaded' ? 'badge-success' : (v.status === 'Posting Pending Approval' ? 'badge-danger' : 'badge-warning');
-        html += '<tr><td><strong>' + escapeHtml(v.vehicleNo) + '</strong></td><td>' + escapeHtml(v.vehicleType || '-') + '</td>';
-        html += '<td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(v.lrNo || '-') + '</td>';
-        html += '<td>' + escapeHtml(v.transportName || '-') + '</td>';
-        html += '<td><span class="badge ' + statusClass + '">' + escapeHtml(v.status) + '</span></td>';
-        html += '<td>' + grnStr + '</td>';
-        html += '<td style="font-family:var(--font-display);font-size:10px">' + escapeHtml(v.shortReportNo || '-') + '</td></tr>';
-    }
-    html += '</tbody></table></div></div></div>';
-
-    // --- User Productivity Report ---
-    html += '<div class="card" style="margin-bottom:16px"><div class="card-title" style="cursor:pointer;display:flex;align-items:center;gap:8px" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display===\'none\'?\'block\':\'none\'"><i class="bx bx-bar-chart"></i> User Productivity <i class="bx bx-chevron-down" style="margin-left:auto"></i></div>';
-    html += '<div style="margin-top:12px"><div class="table-wrapper"><table class="data-table"><thead><tr><th>User</th><th>Role</th><th>Vehicles Unloaded</th><th>Putaway Items</th><th>PIV Items</th><th>Picking OBDs</th><th>Loadings</th></tr></thead><tbody>';
-    for (var ui = 0; ui < users.length; ui++) {
-        var usr = users[ui];
-        var unloaded = DB.filter('vehicles', function(v) { return v.assignedTo === usr.username && (v.status === 'Posted' || v.status === 'Posting Pending Approval' || v.status === 'Unloaded'); }).length;
-        var putawayItems = DB.filter('location_master', function(l) { return l.user === usr.name && l.action === 'PUTAWAY'; }).length;
-        var pivItems = DB.filter('location_master', function(l) { return l.user === usr.name && l.action === 'PIV'; }).length;
-        var pickedObds = DB.filter('obd_data', function(o) { return o.assignedPicker === usr.username && (o.status === 'Picked' || o.status === 'Loaded' || o.status === 'Qty Mismatch'); }).length;
-        var loadings = DB.filter('loaded_vehicles', function(lv) { return lv.loader === usr.name; }).length;
-        html += '<tr><td><strong>' + escapeHtml(usr.name) + '</strong></td><td><span class="badge badge-info">' + escapeHtml(usr.role) + '</span></td>';
-        html += '<td>' + unloaded + '</td><td>' + putawayItems + '</td><td>' + pivItems + '</td>';
-        html += '<td>' + pickedObds + '</td><td>' + loadings + '</td></tr>';
-    }
-    html += '</tbody></table></div></div></div>';
-
-    // --- Difference Report Summary ---
-    if (diffs.length > 0) {
-        html += '<div class="card" style="margin-bottom:16px;border:2px solid var(--danger)"><div class="card-title" style="color:var(--danger);cursor:pointer;display:flex;align-items:center;gap:8px" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display===\'none\'?\'block\':\'none\'"><i class="bx bx-error-circle"></i> Picking Difference Report (' + diffs.length + ') <i class="bx bx-chevron-down" style="margin-left:auto"></i></div>';
-        html += '<div style="margin-top:12px"><div class="table-wrapper"><table class="data-table"><thead><tr><th>Date</th><th>OBD No</th><th>Picker</th><th>Material</th><th>Location</th><th>Reason</th><th>Expected</th><th>Picked</th></tr></thead><tbody>';
-        for (var di = 0; di < diffs.length; di++) {
-            var diff = diffs[di];
-            html += '<tr><td style="font-size:11px">' + formatDateTime(diff.dateTime) + '</td>';
-            html += '<td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">' + escapeHtml(diff.obdNo) + '</td>';
-            html += '<td>' + escapeHtml(diff.pickerName) + '</td>';
-            html += '<td>' + escapeHtml(diff.material) + '</td>';
-            html += '<td><span class="badge badge-accent">' + escapeHtml(diff.location) + '</span></td>';
-            html += '<td><span class="badge badge-danger">' + escapeHtml(diff.reason) + '</span>' + (diff.reasonDetail ? '<br><small style="color:var(--text-muted)">' + escapeHtml(diff.reasonDetail) + '</small>' : '') + '</td>';
-            html += '<td>' + diff.expectedQty + '</td>';
-            html += '<td class="qty-mismatch">' + diff.pickedQty + '</td></tr>';
-        }
-        html += '</tbody></table></div></div></div>';
-    }
-
     document.getElementById('section-reports').innerHTML = html;
+    loadReport();
 }
 
-function exportFullReportPDF() {
-    try {
-        var doc = new jspdf.jsPDF('l', 'mm', 'a4');
-        doc.setFontSize(18); doc.text('VIP INDUSTRIES LIMITED (MD20)', 14, 15);
-        doc.setFontSize(12); doc.text('Complete Warehouse Report', 14, 23);
-        doc.setFontSize(9); doc.text('Generated: ' + formatDateTime(new Date()) + ' | By: ' + (APP.currentUser ? APP.currentUser.name : 'System'), 14, 30);
+var rptCurrentData = [];
+var rptCurrentColumns = [];
+var rptCurrentTitle = '';
 
-        var y = 38;
+function resetReportFilter() {
+    var fd = document.getElementById('rptFromDate');
+    var td = document.getElementById('rptToDate');
+    if (fd) fd.value = today();
+    if (td) td.value = today();
+    document.getElementById('rptType').value = 'vehicle';
+    loadReport();
+}
 
-        // Vehicle Summary
+function getDateRange() {
+    var fd = document.getElementById('rptFromDate').value;
+    var td = document.getElementById('rptToDate').value;
+    if (!fd) fd = '2000-01-01';
+    if (!td) td = '2099-12-31';
+    return { from: fd, to: td };
+}
+
+function isInDateRange(dateStr, from, to) {
+    if (!dateStr) return false;
+    var d = dateStr.split('T')[0];
+    return d >= from && d <= to;
+}
+
+function loadReport() {
+    var type = document.getElementById('rptType').value;
+    var range = getDateRange();
+    var kpiHtml = '';
+    var headHtml = '';
+    var bodyHtml = '';
+    var data = [];
+    var columns = [];
+    var title = '';
+    var kpis = [];
+
+    // ===== VEHICLE REPORT =====
+    if (type === 'vehicle') {
+        title = 'Vehicle Report (' + range.from + ' to ' + range.to + ')';
+        columns = ['Sr', 'Vehicle No', 'LR No', 'Driver', 'Mobile', 'Transport', 'Type', 'Status', 'Reported At', 'Assigned To'];
         var vehicles = DB.get('vehicles');
-        var vehData = vehicles.map(function(v) {
-            return [v.vehicleNo, v.vehicleType || '-', v.lrNo || '-', v.transportName || '-', v.status, v.grnNumbers ? v.grnNumbers.join(', ') : '-', v.shortReportNo || '-'];
-        });
-        doc.setFontSize(11); doc.text('Vehicle Report', 14, y); y += 5;
-        doc.autoTable({
-            head: [['Vehicle', 'Type', 'LR', 'Transport', 'Status', 'GRN', 'Short Report']],
-            body: vehData, startY: y, styles: { fontSize: 6 },
-            headStyles: { fillColor: [0, 229, 160] }
-        });
-        y = doc.lastAutoTable.finalY + 10;
+        var filtered = [];
+        for (var i = 0; i < vehicles.length; i++) {
+            if (isInDateRange(vehicles[i].reportedAt, range.from, range.to)) {
+                filtered.push(vehicles[i]);
+            }
+        }
+        var pendingCount = 0, unloadedCount = 0, postedCount = 0, loadingCount = 0, rejectedCount = 0;
+        for (var v = 0; v < filtered.length; v++) {
+            var veh = filtered[v];
+            var st = veh.status || '';
+            if (st === 'Unload Pending' || st === 'Reporting Completed' || st === 'Assigned') pendingCount++;
+            else if (st === 'Unloading' || st === 'Unloaded') unloadedCount++;
+            else if (st === 'Posted' || st === 'Posting Pending Approval') postedCount++;
+            else if (st.indexOf('Loading') > -1 || st === 'Loaded') loadingCount++;
+            if (st === 'Rejected') rejectedCount++;
 
-        // GRN Report
+            data.push([
+                v + 1,
+                veh.vehicleNo || '-',
+                veh.lrNo || '-',
+                veh.driverName || '-',
+                veh.driverMobile || '-',
+                veh.transportName || '-',
+                veh.vehicleType || '-',
+                st,
+                formatDateTime(veh.reportedAt),
+                veh.assignedTo || '-'
+            ]);
+        }
+        kpis = [
+            { icon: 'bx-time-five', value: pendingCount, label: 'Pending', color: 'var(--warning)' },
+            { icon: 'bx-check-circle', value: unloadedCount, label: 'Unloaded', color: 'var(--info)' },
+            { icon: 'bx-check-double', value: postedCount, label: 'Posted', color: 'var(--success)' },
+            { icon: 'bx-truck', value: loadingCount, label: 'Loading', color: 'var(--accent2)' },
+            { icon: 'bx-block', value: rejectedCount, label: 'Rejected', color: 'var(--danger)' },
+            { icon: 'bx-list-ul', value: filtered.length, label: 'Total Vehicles', color: 'var(--accent)' }
+        ];
+    }
+
+    // ===== PIV REPORT =====
+    else if (type === 'piv') {
+        title = 'PIV Report (' + range.from + ' to ' + range.to + ')';
+        columns = ['Sr', 'Date', 'Rack', 'EAN', 'Material', 'Description', 'Qty', 'Packing', 'Box', 'Done By'];
+        var locs = DB.get('location_master');
+        var pivData = [];
+        var totalQty = 0;
+        for (var p = 0; p < locs.length; p++) {
+            if (locs[p].action === 'PIV' && isInDateRange(locs[p].dateTime || locs[p].date, range.from, range.to)) {
+                pivData.push(locs[p]);
+                totalQty += (parseInt(locs[p].quantity) || 0);
+            }
+        }
+        for (var pi = 0; pi < pivData.length; pi++) {
+            var pd = pivData[pi];
+            data.push([
+                pi + 1,
+                pd.date || '-',
+                pd.rack || '-',
+                pd.ean || '-',
+                pd.material || '-',
+                pd.description || '-',
+                pd.quantity || 0,
+                pd.packing || '-',
+                pd.box || '-',
+                pd.user || '-'
+            ]);
+        }
+        kpis = [
+            { icon: 'bx-clipboard', value: pivData.length, label: 'Total PIV Entries', color: 'var(--accent)' },
+            { icon: 'bx-package', value: totalQty, label: 'Total Qty PIV', color: 'var(--info)' },
+            { icon: 'bx-calendar', value: range.from, label: 'From Date', color: 'var(--warning)' },
+            { icon: 'bx-calendar-check', value: range.to, label: 'To Date', color: 'var(--success)' }
+        ];
+    }
+
+    // ===== PUTAWAY REPORT =====
+    else if (type === 'putaway') {
+        title = 'Putaway Report (' + range.from + ' to ' + range.to + ')';
+        columns = ['Sr', 'Date', 'Rack', 'EAN', 'Material', 'Description', 'Qty', 'Packing', 'Box', 'Done By', 'Time'];
+        var locs2 = DB.get('location_master');
+        var putData = [];
+        var totalPutQty = 0;
+        var userPutMap = {};
+        for (var pu = 0; pu < locs2.length; pu++) {
+            if (locs2[pu].action === 'PUTAWAY' && isInDateRange(locs2[pu].dateTime || locs2[pu].date, range.from, range.to)) {
+                putData.push(locs2[pu]);
+                totalPutQty += (parseInt(locs2[pu].quantity) || 0);
+                var uName = locs2[pu].user || 'Unknown';
+                if (!userPutMap[uName]) userPutMap[uName] = { count: 0, qty: 0 };
+                userPutMap[uName].count++;
+                userPutMap[uName].qty += (parseInt(locs2[pu].quantity) || 0);
+            }
+        }
+        for (var pj = 0; pj < putData.length; pj++) {
+            var pt = putData[pj];
+            data.push([
+                pj + 1,
+                pt.date || '-',
+                pt.rack || '-',
+                pt.ean || '-',
+                pt.material || '-',
+                pt.description || '-',
+                pt.quantity || 0,
+                pt.packing || '-',
+                pt.box || '-',
+                pt.user || '-',
+                formatDateTime(pt.dateTime)
+            ]);
+        }
+        var topUser = '-', topUserCount = 0;
+        for (var uk in userPutMap) {
+            if (userPutMap[uk].count > topUserCount) { topUser = uk; topUserCount = userPutMap[uk].count; }
+        }
+        kpis = [
+            { icon: 'bx-package', value: putData.length, label: 'Total Putaway', color: 'var(--accent)' },
+            { icon: 'bx-cube', value: totalPutQty, label: 'Total Qty', color: 'var(--info)' },
+            { icon: 'bx-user', value: Object.keys(userPutMap).length, label: 'Users Worked', color: 'var(--accent2)' },
+            { icon: 'bx-star', value: topUser, label: 'Top Performer', color: 'var(--warning)' }
+        ];
+    }
+
+    // ===== LOADING REPORT =====
+    else if (type === 'loading') {
+        title = 'Loading Report (' + range.from + ' to ' + range.to + ')';
+        columns = ['Sr', 'Load No', 'OBD No', 'Vehicle No', 'Driver', 'Total Materials', 'Total Qty', 'Loaded By', 'Date', 'Status'];
+        var loadedVehs = DB.get('loaded_vehicles');
+        var loadData = [];
+        var totalLoaded = 0;
+        var loaderMap = {};
+        for (var ld = 0; ld < loadedVehs.length; ld++) {
+            if (isInDateRange(loadedVehs[ld].loadedAt || loadedVehs[ld].dateTime, range.from, range.to)) {
+                loadData.push(loadedVehs[ld]);
+                totalLoaded++;
+                var lBy = loadedVehs[ld].loadedBy || 'Unknown';
+                if (!loaderMap[lBy]) loaderMap[lBy] = 0;
+                loaderMap[lBy]++;
+            }
+        }
+        // Also check loading_data
+        var loadingData2 = DB.get('loading_data');
+        for (var ld2 = 0; ld2 < loadingData2.length; ld2++) {
+            if (isInDateRange(loadingData2[ld2].dateTime, range.from, range.to)) {
+                var alreadyAdded = false;
+                for (var chk = 0; chk < loadData.length; chk++) {
+                    if (loadData[chk].obdNo === loadingData2[ld2].obdNo) { alreadyAdded = true; break; }
+                }
+                if (!alreadyAdded) {
+                    loadingData2[ld2].loadNo = loadingData2[ld2].loadNo || DB.loadNo(loadingData2[ld2].obdNo);
+                    loadData.push(loadingData2[ld2]);
+                    totalLoaded++;
+                }
+            }
+        }
+        for (var li = 0; li < loadData.length; li++) {
+            var lItem = loadData[li];
+            data.push([
+                li + 1,
+                lItem.loadNo || '-',
+                lItem.obdNo || '-',
+                lItem.vehicleNo || '-',
+                lItem.driverName || '-',
+                lItem.totalMaterials || lItem.materialCount || '-',
+                lItem.totalQty || lItem.loadedQty || '-',
+                lItem.loadedBy || lItem.user || '-',
+                formatDateTime(lItem.loadedAt || lItem.dateTime),
+                lItem.status || 'Loaded'
+            ]);
+        }
+        var topLoader = '-', topLoaderCount = 0;
+        for (var lk in loaderMap) {
+            if (loaderMap[lk] > topLoaderCount) { topLoader = lk; topLoaderCount = loaderMap[lk]; }
+        }
+        kpis = [
+            { icon: 'bx-truck', value: totalLoaded, label: 'Vehicles Loaded', color: 'var(--accent)' },
+            { icon: 'bx-user', value: Object.keys(loaderMap).length, label: 'Loaders', color: 'var(--info)' },
+            { icon: 'bx-star', value: topLoader, label: 'Top Loader', color: 'var(--warning)' },
+            { icon: 'bx-check-double', value: topLoaderCount, label: 'Max by One Person', color: 'var(--success)' }
+        ];
+    }
+
+    // ===== USER WORKING TIME =====
+    else if (type === 'user-time') {
+        title = 'User Working Time Report (' + range.from + ' to ' + range.to + ')';
+        columns = ['Sr', 'User Name', 'Login Time', 'Logout Time', 'Duration (hrs)', 'Status'];
+        var sessions = DB.get('user_sessions');
+        var sessData = [];
+        var totalHrs = 0;
+        var activeUsers = 0;
+        for (var s = 0; s < sessions.length; s++) {
+            if (isInDateRange(sessions[s].loginTime, range.from, range.to)) {
+                sessData.push(sessions[s]);
+                var dur = 0;
+                if (sessions[s].loginTime && sessions[s].logoutTime) {
+                    dur = (new Date(sessions[s].logoutTime) - new Date(sessions[s].loginTime)) / (1000 * 60 * 60);
+                } else if (sessions[s].loginTime) {
+                    dur = (new Date() - new Date(sessions[s].loginTime)) / (1000 * 60 * 60);
+                }
+                totalHrs += dur;
+                if (sessions[s].status === 'Active') activeUsers++;
+            }
+        }
+        for (var si = 0; si < sessData.length; si++) {
+            var sess = sessData[si];
+            var duration = 0;
+            if (sess.loginTime && sess.logoutTime) {
+                duration = (new Date(sess.logoutTime) - new Date(sess.loginTime)) / (1000 * 60 * 60);
+            } else if (sess.loginTime) {
+                duration = (new Date() - new Date(sess.loginTime)) / (1000 * 60 * 60);
+            }
+            data.push([
+                si + 1,
+                sess.userName || '-',
+                formatDateTime(sess.loginTime),
+                sess.logoutTime ? formatDateTime(sess.logoutTime) : 'Still Active',
+                duration.toFixed(2),
+                sess.status || '-'
+            ]);
+        }
+        kpis = [
+            { icon: 'bx-user', value: sessData.length, label: 'Total Sessions', color: 'var(--accent)' },
+            { icon: 'bx-time', value: totalHrs.toFixed(1) + 'h', label: 'Total Hours', color: 'var(--info)' },
+            { icon: 'bx-check-circle', value: activeUsers, label: 'Currently Active', color: 'var(--success)' },
+            { icon: 'bx-calendar', value: Object.keys(sessData.reduce(function(acc, s) { acc[s.userName || 'Unknown'] = true; return acc; }, {})).length, label: 'Unique Users', color: 'var(--warning)' }
+        ];
+    }
+
+    // ===== GRN REPORT =====
+    else if (type === 'grn') {
+        title = 'GRN Report (' + range.from + ' to ' + range.to + ')';
+        columns = ['Sr', 'GRN No', 'Vehicle No', 'Invoice No', 'Material', 'Qty', 'Unloaded Qty', 'Date', 'User'];
         var grns = DB.get('grn_records');
-        var grnData = grns.map(function(g) {
-            return [g.grnNo, g.vehicleNo, g.lrNo, g.invoiceNo, g.postedBy, formatDateTime(g.postedAt)];
+        var grnData = [];
+        var totalGrnQty = 0;
+        for (var g = 0; g < grns.length; g++) {
+            if (isInDateRange(grns[g].dateTime || grns[g].date, range.from, range.to)) {
+                grnData.push(grns[g]);
+                totalGrnQty += (parseInt(grns[g].unloadedQty) || 0);
+            }
+        }
+        for (var gi = 0; gi < grnData.length; gi++) {
+            var grn = grnData[gi];
+            data.push([
+                gi + 1,
+                grn.grnNo || '-',
+                grn.vehicleNo || '-',
+                grn.invoiceNo || '-',
+                grn.material || '-',
+                grn.qty || 0,
+                grn.unloadedQty || 0,
+                formatDateTime(grn.dateTime || grn.date),
+                grn.user || '-'
+            ]);
+        }
+        kpis = [
+            { icon: 'bx-file', value: grnData.length, label: 'Total GRNs', color: 'var(--accent)' },
+            { icon: 'bx-cube', value: totalGrnQty, label: 'Total Unloaded Qty', color: 'var(--info)' },
+            { icon: 'bx-calendar', value: range.from, label: 'From', color: 'var(--warning)' },
+            { icon: 'bx-calendar-check', value: range.to, label: 'To', color: 'var(--success)' }
+        ];
+    }
+
+    // ===== SHORT REPORT =====
+    else if (type === 'short') {
+        title = 'Short/Excess Report (' + range.from + ' to ' + range.to + ')';
+        columns = ['Sr', 'Short No', 'Vehicle No', 'Invoice No', 'Material', 'Invoice Qty', 'Actual Qty', 'Difference', 'Type', 'Date', 'User'];
+        var shorts = DB.get('short_reports');
+        var shortData = [];
+        var totalShort = 0, totalExcess = 0;
+        for (var sh = 0; sh < shorts.length; sh++) {
+            if (isInDateRange(shorts[sh].dateTime || shorts[sh].date, range.from, range.to)) {
+                shortData.push(shorts[sh]);
+                var diff = (parseInt(shorts[sh].actualQty) || 0) - (parseInt(shorts[sh].invoiceQty) || 0);
+                if (diff < 0) totalShort += Math.abs(diff);
+                else totalExcess += diff;
+            }
+        }
+        for (var shi = 0; shi < shortData.length; shi++) {
+            var sht = shortData[shi];
+            var diffVal = (parseInt(sht.actualQty) || 0) - (parseInt(sht.invoiceQty) || 0);
+            data.push([
+                shi + 1,
+                sht.shortNo || '-',
+                sht.vehicleNo || '-',
+                sht.invoiceNo || '-',
+                sht.material || '-',
+                sht.invoiceQty || 0,
+                sht.actualQty || 0,
+                (diffVal < 0 ? '' : '+') + diffVal,
+                diffVal < 0 ? 'SHORT' : 'EXCESS',
+                formatDateTime(sht.dateTime || sht.date),
+                sht.user || '-'
+            ]);
+        }
+        kpis = [
+            { icon: 'bx-error-circle', value: shortData.length, label: 'Total Differences', color: 'var(--danger)' },
+            { icon: 'bx-minus-circle', value: totalShort, label: 'Total Short Qty', color: 'var(--danger)' },
+            { icon: 'bx-plus-circle', value: totalExcess, label: 'Total Excess Qty', color: 'var(--warning)' },
+            { icon: 'bx-calendar', value: range.from + ' to ' + range.to, label: 'Period', color: 'var(--accent)' }
+        ];
+    }
+
+    // Store for export
+    rptCurrentData = data;
+    rptCurrentColumns = columns;
+    rptCurrentTitle = title;
+
+    // Render KPIs
+    var kpiContainer = document.getElementById('rptKPIs');
+    if (kpiContainer) {
+        var kpiH = '';
+        for (var ki = 0; ki < kpis.length; ki++) {
+            var k = kpis[ki];
+            kpiH += '<div class="kpi-card" style="cursor:default">';
+            kpiH += '<div class="kpi-icon" style="background:' + (k.color || 'var(--accent)') + '15;color:' + (k.color || 'var(--accent)') + '"><i class="bx ' + k.icon + '"></i></div>';
+            kpiH += '<div class="kpi-value" style="font-size:' + (String(k.value).length > 10 ? '16px' : '28px') + '">' + escapeHtml(String(k.value)) + '</div>';
+            kpiH += '<div class="kpi-label">' + escapeHtml(k.label) + '</div>';
+            kpiH += '</div>';
+        }
+        kpiContainer.innerHTML = kpiH;
+    }
+
+    // Render Table Header
+    var headEl = document.getElementById('rptHead');
+    if (headEl) {
+        var thHtml = '<tr>';
+        for (var ci = 0; ci < columns.length; ci++) {
+            thHtml += '<th>' + escapeHtml(columns[ci]) + '</th>';
+        }
+        thHtml += '</tr>';
+        headEl.innerHTML = thHtml;
+    }
+
+    // Render Table Body
+    var bodyEl = document.getElementById('rptBody');
+    var emptyEl = document.getElementById('rptEmpty');
+    var tableWrapper = document.querySelector('#section-reports .table-wrapper');
+    if (bodyEl) {
+        if (data.length === 0) {
+            bodyEl.innerHTML = '';
+            if (emptyEl) emptyEl.style.display = 'block';
+            if (tableWrapper) tableWrapper.style.display = 'none';
+        } else {
+            if (emptyEl) emptyEl.style.display = 'none';
+            if (tableWrapper) tableWrapper.style.display = 'block';
+            var tbHtml = '';
+            for (var di = 0; di < data.length; di++) {
+                tbHtml += '<tr>';
+                for (var dci = 0; dci < data[di].length; dci++) {
+                    var cellVal = String(data[di][dci]);
+                    var cellClass = '';
+                    // Highlight status
+                    if (columns[dci] === 'Status' || columns[dci] === 'Type') {
+                        if (cellVal === 'Posted' || cellVal === 'Unloaded' || cellVal === 'EXCESS' || cellVal === 'Logged Out') {
+                            cellClass = ' class="qty-match"';
+                        } else if (cellVal === 'Unload Pending' || cellVal === 'Assigned' || cellVal === 'Pending' || cellVal === 'SHORT' || cellVal === 'Rejected') {
+                            cellClass = ' class="qty-mismatch"';
+                        } else if (cellVal === 'Active') {
+                            cellClass = ' style="color:var(--accent);font-weight:600"';
+                        }
+                    }
+                    // Highlight difference column
+                    if (columns[dci] === 'Difference') {
+                        var numVal = parseInt(cellVal);
+                        if (!isNaN(numVal)) {
+                            cellClass = numVal < 0 ? ' class="qty-mismatch"' : ' class="qty-match"';
+                        }
+                    }
+                    tbHtml += '<td' + cellClass + '>' + escapeHtml(cellVal) + '</td>';
+                }
+                tbHtml += '</tr>';
+            }
+            bodyEl.innerHTML = tbHtml;
+        }
+    }
+
+    // Title
+    var titleEl = document.getElementById('rptTitle');
+    if (titleEl) titleEl.textContent = title;
+
+    // Log
+    logAction('Reports', 'VIEW', 'Viewed ' + title);
+}
+
+// ==================== EXCEL DOWNLOAD ====================
+function downloadReportExcel() {
+    if (rptCurrentData.length === 0) {
+        showToast('No data to export', 'warning');
+        return;
+    }
+    try {
+        var wb = XLSX.utils.book_new();
+        var wsData = [rptCurrentColumns];
+        for (var i = 0; i < rptCurrentData.length; i++) {
+            wsData.push(rptCurrentData[i]);
+        }
+        var ws = XLSX.utils.aoa_to_sheet(wsData);
+
+        // Column widths
+        var colWidths = [];
+        for (var c = 0; c < rptCurrentColumns.length; c++) {
+            var maxLen = rptCurrentColumns[c].length;
+            for (var r = 0; r < rptCurrentData.length; r++) {
+                if (rptCurrentData[r][c] && String(rptCurrentData[r][c]).length > maxLen) {
+                    maxLen = String(rptCurrentData[r][c]).length;
+                }
+            }
+            colWidths.push({ wch: Math.min(maxLen + 4, 40) });
+        }
+        ws['!cols'] = colWidths;
+
+        XLSX.utils.book_append_sheet(wb, ws, 'Report');
+
+        // Summary sheet
+        var range = getDateRange();
+        var summaryData = [
+            ['Report Summary'],
+            ['Title', rptCurrentTitle],
+            ['From Date', range.from],
+            ['To Date', range.to],
+            ['Total Records', rptCurrentData.length],
+            ['Generated By', APP.currentUser ? APP.currentUser.name : 'System'],
+            ['Generated At', formatDateTime(new Date())]
+        ];
+        var ws2 = XLSX.utils.aoa_to_sheet(summaryData);
+        ws2['!cols'] = [{ wch: 20 }, { wch: 50 }];
+        XLSX.utils.book_append_sheet(wb, ws2, 'Summary');
+
+        XLSX.writeFile(wb, rptCurrentTitle.replace(/[^a-zA-Z0-9 ]/g, '') + '.xlsx');
+        showToast('Excel downloaded successfully!', 'success');
+        logAction('Reports', 'EXCEL_DOWNLOAD', 'Downloaded Excel: ' + rptCurrentTitle);
+    } catch (err) {
+        showToast('Excel download error: ' + err.message, 'error');
+    }
+}
+
+// ==================== PDF DOWNLOAD ====================
+function downloadReportPDF() {
+    if (rptCurrentData.length === 0) {
+        showToast('No data to export', 'warning');
+        return;
+    }
+    try {
+        var jsPDF = window.jspdf.jsPDF;
+        var doc = new jsPDF('l', 'mm', 'a4');
+        var pageW = doc.internal.pageSize.getWidth();
+        var range = getDateRange();
+
+        // Header
+        doc.setFillColor(7, 11, 20);
+        doc.rect(0, 0, pageW, 40, 'F');
+        doc.setTextColor(0, 229, 160);
+        doc.setFontSize(18);
+        doc.setFont('helvetica', 'bold');
+        doc.text('VIP INDUSTRIES LIMITED (MD20)', 14, 16);
+        doc.setTextColor(150, 160, 180);
+        doc.setFontSize(10);
+        doc.setFont('helvetica', 'normal');
+        doc.text('Warehouse Management System — ' + rptCurrentTitle, 14, 26);
+        doc.text('Period: ' + range.from + ' to ' + range.to + '  |  Generated: ' + formatDateTime(new Date()) + '  |  By: ' + (APP.currentUser ? APP.currentUser.name : 'System'), 14, 34);
+
+        // Green accent line
+        doc.setDrawColor(0, 229, 160);
+        doc.setLineWidth(0.8);
+        doc.line(14, 42, pageW - 14, 42);
+
+        // Table
+        var startY = 48;
+        var tableData = rptCurrentData.map(function(row) {
+            return row.map(function(cell) { return String(cell); });
         });
-        if (grnData.length > 0) {
-            doc.setFontSize(11); doc.text('GRN Report', 14, y); y += 5;
-            doc.autoTable({
-                head: [['GRN No', 'Vehicle', 'LR', 'Invoice', 'Posted By', 'Date']],
-                body: grnData, startY: y, styles: { fontSize: 6 },
-                headStyles: { fillColor: [16, 185, 129] }
-            });
-            y = doc.lastAutoTable.finalY + 10;
+
+        doc.autoTable({
+            head: [rptCurrentColumns],
+            body: tableData,
+            startY: startY,
+            margin: { left: 14, right: 14 },
+            styles: {
+                fontSize: 7.5,
+                cellPadding: 2.5,
+                lineColor: [40, 50, 70],
+                lineWidth: 0.2,
+                font: 'helvetica',
+                textColor: [30, 40, 55],
+                fillColor: [255, 255, 255]
+            },
+            headStyles: {
+                fillColor: [15, 23, 42],
+                textColor: [0, 229, 160],
+                fontSize: 7.5,
+                fontStyle: 'bold',
+                halign: 'center'
+            },
+            alternateRowStyles: {
+                fillColor: [245, 247, 250]
+            },
+            didParseCell: function(data) {
+                // Color status cells
+                if (data.section === 'body') {
+                    var colIdx = data.column.index;
+                    var colName = rptCurrentColumns[colIdx];
+                    if (colName === 'Status' || colName === 'Type') {
+                        var val = String(data.cell.raw);
+                        if (val === 'Posted' || val === 'Unloaded' || val === 'EXCESS' || val === 'Logged Out' || val === 'Loaded') {
+                            data.cell.styles.textColor = [16, 185, 129];
+                            data.cell.styles.fontStyle = 'bold';
+                        } else if (val === 'Unload Pending' || val === 'Assigned' || val === 'Pending' || val === 'SHORT' || val === 'Rejected') {
+                            data.cell.styles.textColor = [239, 68, 68];
+                            data.cell.styles.fontStyle = 'bold';
+                        } else if (val === 'Active') {
+                            data.cell.styles.textColor = [0, 150, 105];
+                            data.cell.styles.fontStyle = 'bold';
+                        }
+                    }
+                    if (colName === 'Difference') {
+                        var numV = parseInt(data.cell.raw);
+                        if (!isNaN(numV)) {
+                            data.cell.styles.fontStyle = 'bold';
+                            data.cell.styles.textColor = numV < 0 ? [239, 68, 68] : [16, 185, 129];
+                        }
+                    }
+                }
+            },
+            didDrawPage: function(data) {
+                // Footer on each page
+                doc.setFillColor(7, 11, 20);
+                doc.rect(0, doc.internal.pageSize.getHeight() - 15, pageW, 15, 'F');
+                doc.setTextColor(150, 160, 180);
+                doc.setFontSize(7);
+                doc.text('VIP INDUSTRIES LIMITED MD20 — Confidential', 14, doc.internal.pageSize.getHeight() - 6);
+                doc.text('Page ' + doc.internal.getNumberOfPages(), pageW - 14, doc.internal.pageSize.getHeight() - 6, { align: 'right' });
+            }
+        });
+
+        // Summary at bottom
+        var finalY = doc.lastAutoTable.finalY + 10;
+        if (finalY < doc.internal.pageSize.getHeight() - 30) {
+            doc.setFillColor(240, 242, 245);
+            doc.roundedRect(14, finalY, pageW - 28, 20, 3, 3, 'F');
+            doc.setTextColor(50, 60, 75);
+            doc.setFontSize(8);
+            doc.setFont('helvetica', 'bold');
+            doc.text('Total Records: ' + rptCurrentData.length, 20, finalY + 8);
+            doc.text('Generated By: ' + (APP.currentUser ? APP.currentUser.name : 'System'), 20, finalY + 15);
+            doc.setFont('helvetica', 'normal');
+            doc.text('Date: ' + formatDateTime(new Date()), 120, finalY + 8);
+            doc.text('Report: ' + rptCurrentTitle, 120, finalY + 15);
         }
 
-        // Picking Difference
-        var diffs = DB.get('difference_reports');
-        if (diffs.length > 0) {
-            var diffData = diffs.map(function(d) {
-                return [d.obdNo, d.pickerName, d.material, d.location, d.reason, d.expectedQty, d.pickedQty, formatDateTime(d.dateTime)];
-            });
-            doc.setFontSize(11); doc.text('Picking Difference Report', 14, y); y += 5;
-            doc.autoTable({
-                head: [['OBD', 'Picker', 'Material', 'Location', 'Reason', 'Expected', 'Picked', 'Date']],
-                body: diffData, startY: y, styles: { fontSize: 6 },
-                headStyles: { fillColor: [239, 68, 68] }
-            });
-            y = doc.lastAutoTable.finalY + 10;
-        }
-
-        // Loaded Vehicles
-        var loaded = DB.get('loaded_vehicles');
-        if (loaded.length > 0) {
-            var loadData = loaded.map(function(lv) {
-                return [lv.vehicleNo, lv.obdNo, lv.loadingNo, lv.loader, lv.securityName, lv.allMatch ? 'Match' : 'Mismatch', formatDateTime(lv.loadedAt)];
-            });
-            doc.setFontSize(11); doc.text('Loading Report', 14, y); y += 5;
-            doc.autoTable({
-                head: [['Vehicle', 'OBD', 'Loading No', 'Loader', 'Security', 'Status', 'Date']],
-                body: loadData, startY: y, styles: { fontSize: 6 },
-                headStyles: { fillColor: [59, 130, 246] }
-            });
-        }
-
-        doc.save('WMS_FullReport_' + today() + '.pdf');
-        showToast('Full report PDF exported!', 'success');
-    } catch(e) { showToast('Export failed: ' + e.message, 'error'); }
+        var fileName = rptCurrentTitle.replace(/[^a-zA-Z0-9 ]/g, '') + '.pdf';
+        doc.save(fileName);
+        showToast('PDF downloaded successfully!', 'success');
+        logAction('Reports', 'PDF_DOWNLOAD', 'Downloaded PDF: ' + rptCurrentTitle);
+    } catch (err) {
+        showToast('PDF download error: ' + err.message, 'error');
+    }
 }
 
 /* ============================================================
@@ -5493,420 +6533,7 @@ if (supabaseClient) {
 }
 
 
-// ==================== COMPLETE UNLOADING FIX ====================
 
-function renderUnloadingScreen() {
-    if (!APP.currentUser) return '<div class="card"><div class="empty-state"><i class="bx bx-lock"></i><p>Not logged in</p></div></div>';
-
-    // FIX: Correct operator precedence with parentheses
-    var myVehicles = DB.filter('vehicles', function(v) {
-        return v.vehicleType === 'Unloading' && v.assignedTo && 
-               (v.assignedTo === APP.currentUser.username || 
-                APP.currentUser.role === 'Super Admin' || 
-                APP.currentUser.role === 'Admin' || 
-                APP.currentUser.role === 'Manager') &&
-               (v.status === 'Assigned' || v.status === 'Unloading In Progress');
-    });
-
-    var html = '<div class="section-header"><h2><i class="bx bx-download"></i> Unloading Screen</h2>';
-    html += '<div style="color:var(--text-muted);font-size:13px">User: <strong style="color:var(--accent)">' + escapeHtml(APP.currentUser.name) + '</strong> (' + escapeHtml(APP.currentUser.role) + ')</div></div>';
-
-    if (myVehicles.length === 0) {
-        html += '<div class="card"><div class="empty-state"><i class="bx bx-inbox"></i><p>No vehicles assigned for unloading</p>';
-        
-        // Show hint if vehicles exist but assigned to others
-        var otherVehicles = DB.filter('vehicles', function(v) {
-            return v.vehicleType === 'Unloading' && v.assignedTo && v.assignedTo !== APP.currentUser.username &&
-                   (v.status === 'Assigned' || v.status === 'Unloading In Progress');
-        });
-        
-        if (otherVehicles.length > 0) {
-            html += '<div style="margin-top:16px;text-align:left;max-width:450px;margin-left:auto;margin-right:auto">';
-            html += '<p style="color:var(--warning);font-weight:600;margin-bottom:8px"><i class="bx bx-info-circle"></i> ' + otherVehicles.length + ' vehicle(s) assigned to OTHER users:</p>';
-            for (var i = 0; i < otherVehicles.length; i++) {
-                html += '<div style="background:var(--bg-secondary);padding:8px 12px;border-radius:6px;margin-bottom:4px;font-size:12px">';
-                html += '<strong>' + escapeHtml(otherVehicles[i].vehicleNo) + '</strong> → <span class="badge badge-info">' + escapeHtml(otherVehicles[i].assignedTo || '?') + '</span>';
-                html += '</div>';
-            }
-            html += '</div>';
-        } else {
-            html += '<small style="color:var(--text-muted);display:block;margin-top:8px">Go to <strong>Pending Vehicle</strong> tab to assign vehicles first</small>';
-        }
-        html += '</div></div>';
-        return html;
-    }
-
-    // Vehicle table
-    html += '<div class="card"><div class="card-title">Vehicles Ready to Unload (' + myVehicles.length + ')</div>';
-    html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>Vehicle No</th><th>LR No</th><th>Assigned To</th><th>Status</th><th>Invoices</th><th>Action</th></tr></thead><tbody>';
-    for (var i = 0; i < myVehicles.length; i++) {
-        var v = myVehicles[i];
-        var invCount = DB.filter('invoices', function(inv) { return inv.vehicleId === v.id; }).length;
-        html += '<tr><td><strong>' + escapeHtml(v.vehicleNo) + '</strong></td>';
-        html += '<td style="font-family:var(--font-display);font-size:12px;color:var(--warning)">' + escapeHtml(v.lrNo) + '</td>';
-        html += '<td>' + escapeHtml(v.assignedTo || '-') + '</td>';
-        html += '<td><span class="badge badge-warning">' + escapeHtml(v.status) + '</span></td>';
-        html += '<td><span class="badge ' + (invCount > 0 ? 'badge-success' : 'badge-danger') + '">' + invCount + '</span></td>';
-        html += '<td><button class="btn btn-primary btn-sm" onclick="startUnloading(\'' + v.id + '\')"><i class="bx bx-download"></i> Unload</button></td></tr>';
-    }
-    html += '</tbody></table></div></div>';
-
-    // Scan area — ALWAYS in DOM but hidden
-    html += '<div id="unloadingScanArea" style="display:none"></div>';
-    return html;
-}
-
-
-// COMPLETE startUnloading with all fixes
-function startUnloading(vehicleId) {
-    var vehicle = DB.find('vehicles', vehicleId);
-    if (!vehicle) {
-        showToast('Vehicle not found! Try refreshing.', 'error');
-        return;
-    }
-
-    // SET FLAG — prevents real-time re-render from wiping scan area
-    APP.isScanning = true;
-
-    // Update status
-    DB.update('vehicles', vehicleId, { status: 'Unloading In Progress' });
-    currentUnloadSession = {
-        vehicleId: vehicleId,
-        scannedItems: [],
-        startTime: new Date().toISOString()
-    };
-    logAction('Inbound', 'UNLOAD_START', 'Started unloading vehicle ' + vehicle.vehicleNo);
-
-    // Build scan HTML
-    var scanHtml = '';
-    scanHtml += '<div class="card" style="border:2px solid var(--accent)">';
-    scanHtml += '<div class="card-title" style="color:var(--accent);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">';
-    scanHtml += '<span><i class="bx bx-scan"></i> Scanning — <strong>' + escapeHtml(vehicle.vehicleNo) + '</strong> (LR: ' + escapeHtml(vehicle.lrNo) + ')</span>';
-    scanHtml += '<span class="badge badge-warning" id="unloadScanCount">0 items scanned</span>';
-    scanHtml += '</div>';
-
-    // Scan form
-    scanHtml += '<div class="form-row" style="margin-bottom:16px">';
-    scanHtml += '<div class="form-group"><label>EAN / Barcode <span class="req">*</span></label>';
-    scanHtml += '<div style="display:flex;gap:6px;flex-wrap:wrap">';
-    scanHtml += '<input type="text" id="scanEanInput" class="form-input" placeholder="Scan or type EAN..." style="flex:1;min-width:200px" onkeydown="if(event.key===\'Enter\')addScanItem()">';
-    scanHtml += '<button class="btn btn-primary btn-sm" onclick="addScanItem()"><i class="bx bx-plus"></i> Add</button>';
-    scanHtml += '<button class="btn btn-secondary btn-sm scan-btn" onclick="openScannerForField(\'scanEanInput\',\'scanMaterial\',\'scanDesc\')"><i class="bx bx-qr"></i> Camera</button>';
-    scanHtml += '</div></div>';
-    scanHtml += '<div class="form-group"><label>Material (Auto / Manual)</label><input type="text" id="scanMaterial" class="form-input" placeholder="Auto-filled or type manually"></div>';
-    scanHtml += '<div class="form-group"><label>Description</label><input type="text" id="scanDesc" class="form-input" placeholder="Auto-filled"></div>';
-    scanHtml += '<div class="form-group"><label>Qty (1 per scan)</label><input type="number" id="scanQty" class="form-input" value="1" min="1" style="max-width:100px"></div>';
-    scanHtml += '</div>';
-
-    // Scanned items container
-    scanHtml += '<div id="scannedItemsTable"></div>';
-
-    scanHtml += '<hr class="cyber-line">';
-    scanHtml += '<div class="form-actions">';
-    scanHtml += '<button class="btn btn-danger" onclick="cancelUnloading()"><i class="bx bx-x"></i> Cancel</button>';
-    scanHtml += '<button class="btn btn-primary" onclick="submitUnloading()"><i class="bx bx-check-double"></i> Submit Unloading</button>';
-    scanHtml += '</div></div>';
-
-    // Insert into DOM
-    var area = document.getElementById('unloadingScanArea');
-    if (!area) {
-        // Fallback: create the div if it doesn't exist
-        var section = document.getElementById('section-inbound');
-        if (section) {
-            var div = document.createElement('div');
-            div.id = 'unloadingScanArea';
-            section.querySelector('.content-section, [class*="card"]:last-child]').appendChild(div);
-            area = div;
-        }
-    }
-
-    if (area) {
-        area.innerHTML = scanHtml;
-        area.style.display = 'block';
-        
-        // Focus the EAN input
-        setTimeout(function() {
-            var eanInput = document.getElementById('scanEanInput');
-            if (eanInput) eanInput.focus();
-        }, 100);
-
-        // Render empty scan table
-        renderScannedItems();
-        
-        showToast('Scanning started for ' + vehicle.vehicleNo, 'success');
-    } else {
-        showToast('ERROR: Scan area not found! Refreshing page...', 'error');
-        APP.isScanning = false;
-        setTimeout(function() { location.reload(); }, 2000);
-    }
-}
-
-
-// FIXED cancelUnloading — clears the flag
-function cancelUnloading() {
-    if (currentUnloadSession && currentUnloadSession.scannedItems.length > 0) {
-        if (!confirm('Are you sure? All scanned data will be lost.')) return;
-    }
-    if (currentUnloadSession && currentUnloadSession.vehicleId) {
-        DB.update('vehicles', currentUnloadSession.vehicleId, { status: 'Assigned' });
-    }
-    APP.isScanning = false;  // CLEAR FLAG
-    currentUnloadSession = { vehicleId: null, scannedItems: [], startTime: null };
-    
-    var area = document.getElementById('unloadingScanArea');
-    if (area) {
-        area.style.display = 'none';
-        area.innerHTML = '';
-    }
-    renderInbound('unloading-screen');
-}
-
-
-// FIXED submitUnloading — clears the flag
-function submitUnloading() {
-    if (!currentUnloadSession || currentUnloadSession.scannedItems.length === 0) {
-        showToast('No items scanned!', 'error');
-        return;
-    }
-
-    var vehicle = DB.find('vehicles', currentUnloadSession.vehicleId);
-    if (!vehicle) { showToast('Vehicle not found!', 'error'); return; }
-
-    // Update invoice_materials with scanned quantities
-    var invoices = DB.filter('invoices', function(inv) { return inv.vehicleId === currentUnloadSession.vehicleId; });
-    for (var i = 0; i < invoices.length; i++) {
-        var mats = DB.filter('invoice_materials', function(im) { return im.invoiceId === invoices[i].id; });
-        for (var j = 0; j < mats.length; j++) {
-            var scannedQty = 0;
-            for (var s = 0; s < currentUnloadSession.scannedItems.length; s++) {
-                var si = currentUnloadSession.scannedItems[s];
-                if (si.inInvoice && (si.ean === mats[j].ean || si.material.toUpperCase() === mats[j].material.toUpperCase())) {
-                    scannedQty += si.qty;
-                }
-            }
-            DB.update('invoice_materials', mats[j].id, { unloadedQty: scannedQty });
-        }
-    }
-
-    // Generate Short/Excess Report
-    var shortReportNo = DB.shortNo();
-    var reportLines = [];
-    var hasMismatch = false;
-
-    for (var ii = 0; ii < invoices.length; ii++) {
-        var invMats = DB.filter('invoice_materials', function(im) { return im.invoiceId === invoices[ii].id; });
-        for (var jj = 0; jj < invMats.length; jj++) {
-            var im = invMats[jj];
-            var diff = (im.unloadedQty || 0) - im.qty;
-            var status = diff === 0 ? 'Match' : (diff < 0 ? 'Short' : 'Excess');
-            if (diff !== 0) hasMismatch = true;
-            reportLines.push({
-                invoiceNo: invoices[ii].invoiceNo, material: im.material, ean: im.ean || '',
-                invoiceQty: im.qty, scannedQty: im.unloadedQty || 0, difference: diff, status: status
-            });
-        }
-    }
-
-    // Non-invoice scanned items
-    for (var ni = 0; ni < currentUnloadSession.scannedItems.length; ni++) {
-        var ns = currentUnloadSession.scannedItems[ni];
-        if (!ns.inInvoice) {
-            reportLines.push({
-                invoiceNo: 'N/A', material: ns.material, ean: ns.ean,
-                invoiceQty: 0, scannedQty: ns.qty, difference: ns.qty, status: 'Extra'
-            });
-            hasMismatch = true;
-        }
-    }
-
-    // Save short report
-    DB.add('short_reports', {
-        reportNo: shortReportNo, vehicleId: currentUnloadSession.vehicleId,
-        vehicleNo: vehicle.vehicleNo, lrNo: vehicle.lrNo,
-        unloader: APP.currentUser.name, unloaderUser: APP.currentUser.username,
-        lines: reportLines, hasMismatch: hasMismatch,
-        dateTime: new Date().toISOString()
-    });
-
-    // Save receiving doc
-    var rcvNo = DB.rcvNo();
-    DB.add('receiving_docs', {
-        rcvNo: rcvNo, vehicleId: currentUnloadSession.vehicleId,
-        vehicleNo: vehicle.vehicleNo, lrNo: vehicle.lrNo,
-        scannedItems: currentUnloadSession.scannedItems,
-        shortReportNo: shortReportNo, unloader: APP.currentUser.name,
-        dateTime: new Date().toISOString()
-    });
-
-    // CLEAR FLAG before updating status (to prevent re-render wipe)
-    APP.isScanning = false;
-
-    if (hasMismatch) {
-        DB.update('vehicles', currentUnloadSession.vehicleId, {
-            status: 'Posting Pending Approval',
-            shortReportNo: shortReportNo, rcvNo: rcvNo,
-            unloadedAt: new Date().toISOString()
-        });
-        addNotification('Vehicle ' + vehicle.vehicleNo + ' — Pending Approval. Report: ' + shortReportNo, 'warning');
-        var managers = DB.filter('users', function(u) { return u.role === 'Manager' || u.role === 'Super Admin'; });
-        for (var mg = 0; mg < managers.length; mg++) {
-            addNotification('Approval needed: ' + vehicle.vehicleNo + '. Report: ' + shortReportNo, 'warning', managers[mg].username);
-        }
-        logAction('Inbound', 'UNLOAD_SUBMIT', 'Unloading submitted. MISMATCH — Pending Approval. Report: ' + shortReportNo);
-        showToast('Submitted! Pending approval due to mismatch.', 'warning');
-    } else {
-        // Perfect match — post directly
-        postVehicle(currentUnloadSession.vehicleId, shortReportNo, rcvNo);
-        logAction('Inbound', 'UNLOAD_SUBMIT', 'Unloading submitted. PERFECT MATCH — Auto Posted. Report: ' + shortReportNo);
-        showToast('Submitted! Perfect match — auto posted! GRN created.', 'success');
-    }
-
-    // Clear session
-    currentUnloadSession = { vehicleId: null, scannedItems: [], startTime: null };
-
-    // Small delay then re-render
-    setTimeout(function() {
-        renderInbound('unloading-screen');
-    }, 500);
-}
-
-
-// FIXED renderScannedItems — with proper null checks
-function renderScannedItems() {
-    var container = document.getElementById('scannedItemsTable');
-    if (!container) return;
-
-    // Update count
-    var countBadge = document.getElementById('unloadScanCount');
-    if (countBadge && currentUnloadSession) {
-        countBadge.textContent = currentUnloadSession.scannedItems.length + ' items scanned';
-    }
-
-    if (!currentUnloadSession || currentUnloadSession.scannedItems.length === 0) {
-        container.innerHTML = '<div style="text-align:center;color:var(--text-muted);padding:30px">';
-        container.innerHTML += '<i class="bx bx-qr-scan" style="font-size:40px;display:block;margin-bottom:10px;opacity:.3"></i>';
-        container.innerHTML += 'Scan EAN barcode to start<br>';
-        container.innerHTML += '<small>Each scan = 1 qty. Change qty before adding next item.</small>';
-        container.innerHTML += '</div>';
-        return;
-    }
-
-    var html = '<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>EAN</th><th>Material</th><th>Description</th><th>Qty</th><th>Invoice Status</th><th>Action</th></tr></thead><tbody>';
-
-    for (var k = 0; k < currentUnloadSession.scannedItems.length; k++) {
-        var s = currentUnloadSession.scannedItems[k];
-        var rowStyle = s.inInvoice ? '' : 'style="background:var(--danger-dim)"';
-        var statusBadge = s.inInvoice 
-            ? '<span class="badge badge-success"><i class="bx bx-check"></i> In Invoice</span>' 
-            : '<span class="badge badge-danger"><i class="bx bx-x"></i> NOT in Invoice</span>';
-
-        html += '<tr ' + rowStyle + '>';
-        html += '<td>' + (k + 1) + '</td>';
-        html += '<td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(s.ean) + '</td>';
-        html += '<td>' + escapeHtml(s.material) + '</td>';
-        html += '<td style="font-size:12px;color:var(--text-secondary)">' + escapeHtml(s.description) + '</td>';
-        html += '<td><strong>' + s.qty + '</strong></td>';
-        html += '<td>' + statusBadge + '</td>';
-        html += '<td><button class="btn btn-danger btn-sm" onclick="removeScanItem(\'' + s.id + '\')"><i class="bx bx-trash"></i></button></td>';
-        html += '</tr>';
-    }
-
-    html += '</tbody></table></div>';
-
-    // Summary boxes
-    var matched = 0, notMatched = 0;
-    for (var m = 0; m < currentUnloadSession.scannedItems.length; m++) {
-        if (currentUnloadSession.scannedItems[m].inInvoice) matched++;
-        else notMatched++;
-    }
-
-    html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px">';
-    html += '<div style="padding:12px;background:rgba(16,185,129,.1);border-radius:8px;border:1px solid rgba(16,185,129,.3);text-align:center">';
-    html += '<strong style="color:var(--success);font-size:20px">' + matched + '</strong><br><small style="color:var(--text-muted)">Matched (Green)</small></div>';
-    html += '<div style="padding:12px;background:var(--danger-dim);border-radius:8px;border:1px solid rgba(239,68,68,.3);text-align:center">';
-    html += '<strong style="color:var(--danger);font-size:20px">' + notMatched + '</strong><br><small style="color:var(--text-muted)">Not in Invoice (Red)</small></div>';
-    html += '</div>';
-
-    container.innerHTML = html;
-}
-
-
-// FIXED removeScanItem
-function removeScanItem(itemId) {
-    if (!currentUnloadSession) return;
-    currentUnloadSession.scannedItems = currentUnloadSession.scannedItems.filter(function(s) { return s.id !== itemId; });
-    renderScannedItems();
-}
-
-
-// FIXED addScanItem — with null checks
-function addScanItem() {
-    if (!currentUnloadSession) {
-        showToast('No active unloading session! Click Unload first.', 'error');
-        return;
-    }
-
-    var eanEl = document.getElementById('scanEanInput');
-    var matEl = document.getElementById('scanMaterial');
-    var descEl = document.getElementById('scanDesc');
-    var qtyEl = document.getElementById('scanQty');
-
-    if (!eanEl) { showToast('Scan area not loaded! Refresh page.', 'error'); return; }
-
-    var ean = eanEl.value.trim();
-    if (!ean) { showToast('Scan or enter EAN first', 'error'); return; }
-
-    var material = matEl ? matEl.value.trim() : '';
-    var desc = descEl ? descEl.value.trim() : '';
-    var qty = qtyEl ? (parseInt(qtyEl.value) || 1) : 1;
-
-    // Auto-fill from material master
-    if (!material || !desc) {
-        var matMaster = DB.get('material_master');
-        for (var i = 0; i < matMaster.length; i++) {
-            if (matMaster[i].ean === ean || matMaster[i].material.toUpperCase() === ean.toUpperCase()) {
-                material = material || matMaster[i].material;
-                desc = desc || matMaster[i].description;
-                ean = matMaster[i].ean || ean;
-                break;
-            }
-        }
-    }
-
-    // Check if in vehicle's invoice
-    var invoices = DB.filter('invoices', function(inv) { return inv.vehicleId === currentUnloadSession.vehicleId; });
-    var foundInInvoice = false;
-    for (var ii = 0; ii < invoices.length; ii++) {
-        var mats = DB.filter('invoice_materials', function(im) { return im.invoiceId === invoices[ii].id; });
-        for (var jj = 0; jj < mats.length; jj++) {
-            if (mats[jj].ean === ean || mats[jj].material.toUpperCase() === (material || '').toUpperCase()) {
-                foundInInvoice = true;
-                break;
-            }
-        }
-        if (foundInInvoice) break;
-    }
-
-    currentUnloadSession.scannedItems.push({
-        id: DB.uid(), ean: ean, material: material || 'UNKNOWN', description: desc || '-',
-        qty: qty, inInvoice: foundInInvoice, scanTime: new Date().toISOString()
-    });
-
-    // Clear inputs
-    eanEl.value = '';
-    if (matEl) matEl.value = '';
-    if (descEl) descEl.value = '';
-    if (qtyEl) qtyEl.value = '1';
-    eanEl.focus();
-
-    renderScannedItems();
-
-    if (!foundInInvoice) {
-        showToast('WARNING: NOT in invoice! Row is RED.', 'warning');
-    } else {
-        showToast('Scanned: ' + (material || ean) + ' ✓', 'success');
-    }
-}
 /* ============================================================
    FINAL FIX: Putaway + PIV Scan (EAN + Rack) — Complete
    ============================================================ */

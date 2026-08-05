@@ -210,10 +210,10 @@ function logWorkTime(mod,act){
 }
 
 // ==================== NOTIFICATIONS ====================
-function addNotif(msg,type,target){
+function addNotif(msg,type,target,dataId,navSection){
     type=type||'info';
     var n=DB.get('notifications');
-    n.unshift({id:DB.uid(),message:type,type:type,read:false,dateTime:new Date().toISOString(),targetUser:target||null,messageText:msg});
+    n.unshift({id:DB.uid(),message:type,type:type,read:false,dateTime:new Date().toISOString(),targetUser:target||null,messageText:msg,dataId:dataId||null,navSection:navSection||null});
     if(n.length>100)n.length=100;
     DB.set('notifications',n);updateNotifBadge();
 }
@@ -223,14 +223,134 @@ function updateNotifBadge(){
     var b=document.getElementById('notifBadge');b.textContent=c;b.style.display=c>0?'flex':'none';
 }
 function renderNotifPanel(){
-    var list=document.getElementById('notifList');var n=DB.get('notifications');
+    var list=document.getElementById('notifList');
+    var n=DB.get('notifications');
     if(!n.length){list.innerHTML='<div class="notif-empty"><i class="bx bx-bell-off"></i><p>No notifications</p></div>';return;}
-    var h='';var s=n.slice(0,25);
+
+    var h='';
+    var s=n.slice(0,30);
     for(var i=0;i<s.length;i++){
-        h+='<div class="notif-item '+(s[i].read?'':'unread')+'"><div>'+esc(s[i].messageText||s[i].message)+'</div><div class="notif-time">'+fmtDT(s[i].dateTime)+'</div></div>';
+        var nt=s[i];
+        var isApproval=(nt.messageText||'').indexOf('Approval')>-1;
+        var isPLApproval=(nt.messageText||'').indexOf('P&L Approval')>-1;
+        var hasDataId=nt.dataId&&nt.dataId.length>0;
+
+        h+='<div class="notif-item '+(nt.read?'':'unread')+'" style="cursor:pointer;padding:12px;margin-bottom:6px;border-radius:8px;border:1px solid var(--border);background:var(--bg-secondary);transition:all .15s" onmouseover="this.style.borderColor=\'var(--accent)\'" onmouseout="this.style.borderColor=\'var(--border)\'">';
+
+        // Top row: icon + message
+        h+='<div style="display:flex;align-items:flex-start;gap:8px">';
+        var iconMap={warning:'bx-error',success:'bx-check-circle',error:'bx-error-circle',info:'bx-info-circle'};
+        var colorMap={warning:'var(--warning)',success:'var(--success)',error:'var(--danger)',info:'var(--info)'};
+        h+='<i class="bx '+(iconMap[nt.type]||iconMap.info)+'" style="color:'+(colorMap[nt.type]||colorMap.info)+';font-size:18px;margin-top:2px;flex-shrink:0"></i>';
+        h+='<div style="flex:1;min-width:0"><div style="font-size:12px;line-height:1.5;word-break:break-word">'+esc(nt.messageText||nt.message)+'</div>';
+        h+='<div class="notif-time" style="margin-top:4px">'+fmtDT(nt.dateTime)+'</div>';
+        h+='</div>';
+
+        // Unread dot
+        if(!nt.read)h+='<div style="width:8px;height:8px;border-radius:50%;background:var(--accent);flex-shrink:0;margin-top:6px"></div>';
+        h+='</div>';
+
+        // Action buttons for approval notifications
+        if(hasDataId&&(isApproval||isPLApproval)){
+            h+='<div style="display:flex;gap:6px;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">';
+            h+='<button class="btn btn-glass btn-sm" style="flex:1;justify-content:center;background:rgba(46,213,115,0.15);border-color:var(--success);color:var(--success);font-weight:600" onclick="event.stopPropagation();approveFromNotif(\''+nt.dataId+'\')"><i class="bx bx-check"></i> Approve</button>';
+            h+='<button class="btn btn-glass btn-sm" style="flex:1;justify-content:center;background:rgba(255,71,87,0.15);border-color:var(--danger);color:var(--danger);font-weight:600" onclick="event.stopPropagation();rejectFromNotif(\''+nt.dataId+'\')"><i class="bx bx-x"></i> Reject</button>';
+            h+='<button class="btn btn-glass btn-sm" style="justify-content:center" onclick="event.stopPropagation();viewFromNotif(\''+nt.dataId+'\')"><i class="bx bx-eye"></i></button>';
+            h+='</div>';
+        }else if(hasDataId){
+            // Other clickable notifications
+            h+='<div style="margin-top:8px"><button class="btn btn-glass btn-sm" style="width:100%;justify-content:center" onclick="event.stopPropagation();viewFromNotif(\''+nt.dataId+'\')"><i class="bx bx-eye"></i> View Details</button></div>';
+        }
+
+        h+='</div>';
     }
+
     list.innerHTML=h;
-    var all=DB.get('notifications');for(var j=0;j<all.length;j++){all[j].read=true;}DB.set('notifications',all);updateNotifBadge();
+
+    // Mark all as read
+    var all=DB.get('notifications');
+    for(var j=0;j<all.length;j++){all[j].read=true;}
+    DB.set('notifications',all);updateNotifBadge();
+}
+
+// ★ Approve directly from notification
+function approveFromNotif(approvalId){
+    if(!confirm('Approve this loading?'))return;
+    var a=DB.find('loading_approvals',approvalId);
+    if(!a){showToast('Approval record not found','error');return;}
+    if(a.status!=='Pending'){showToast('Already processed: '+a.status,'warning');return;}
+
+    DB.update('loading_approvals',approvalId,{status:'Approved',approvedBy:APP.currentUser?APP.currentUser.id:'',approvedByName:APP.currentUser?APP.currentUser.name:'',approvedAt:new Date().toISOString()});
+
+    var obdIds=a.obdIds;if(!Array.isArray(obdIds))obdIds=[obdIds];
+    var obdNos=a.obdNos;if(!Array.isArray(obdNos))obdNos=[obdNos];
+
+    DB.add('loaded_vehicles',{loadNo:a.loadNo,vehicleNo:a.vehicleNo,securityNo:a.securityNo,obdIds:obdIds,obdNos:obdNos,loadedBy:a.requestedBy,loadedByName:a.requestedByName,loadedAt:new Date().toISOString(),lastScannedAt:new Date().toISOString(),scannedItems:a.scannedItems,loadStatus:'Fully Loaded',mismatch:true,approvedById:approvalId,type:a.type||''});
+
+    var mis=[];(a.expected||[]).forEach(function(e){if(e.scannedQty!==e.requiredQty)mis.push({obdNo:e.obdNo,material:e.material,ean:e.ean,expectedQty:e.requiredQty,scannedQty:e.scannedQty,diff:e.requiredQty-e.scannedQty});});
+    (a.scannedItems||[]).filter(function(s){return !s.inOBD;}).forEach(function(s){mis.push({obdNo:'—',material:s.material,ean:s.ean,expectedQty:0,scannedQty:s.qty,diff:-s.qty});});
+    if(mis.length)DB.add('loading_data',{loadNo:a.loadNo,vehicleNo:a.vehicleNo,mismatches:mis,createdAt:new Date().toISOString()});
+
+    // Release locks if P&L
+    if(a.type==='pickandload'){obdIds.forEach(function(oid){releaseLocksForOBD(oid);DB.update('obd_data',oid,{status:'P&L Done'});});}
+
+    // Remove from assignments
+    obdIds.forEach(function(oid){
+        DB.filter('loading_assignments',function(as){return as.status==='Assigned'&&(as.obdIds||[]).indexOf(oid)>-1;}).forEach(function(as){
+            var ni=(as.obdIds||[]).filter(function(o){return o!==oid;});var nn=(as.obdNos||[]).filter(function(n,i){return as.obdIds[i]!==oid;});
+            if(!ni.length)DB.update('loading_assignments',as.id,{status:'Done'});else DB.update('loading_assignments',as.id,{obdIds:ni,obdNos:nn});
+        });
+        if(a.type==='pickandload'){
+            DB.filter('picking_assignments',function(pa){return pa.type==='pickandload'&&pa.status==='Assigned'&&(pa.obdIds||[]).indexOf(oid)>-1;}).forEach(function(pa){
+                var ni2=(pa.obdIds||[]).filter(function(o){return o!==oid;});var nn2=(pa.obdNos||[]).filter(function(n,i){return pa.obdIds[i]!==oid;});
+                if(!ni2.length)DB.update('picking_assignments',pa.id,{status:'Done'});else DB.update('picking_assignments',pa.id,{obdIds:ni2,obdNos:nn2});
+            });
+        }
+    });
+
+    addNotif('Loading '+a.loadNo+' approved by '+(APP.currentUser?APP.currentUser.name:'Admin'),'success');
+    logAction('Loading','APPROVED',a.loadNo+' approved from notification');
+    showToast('Approved: '+a.loadNo,'success');
+    renderNotifPanel();
+    if(APP.currentSection&&APP.currentSub)renderSection(APP.currentSection,APP.currentSub);
+}
+
+// ★ Reject directly from notification
+function rejectFromNotif(approvalId){
+    if(!confirm('Reject this loading?'))return;
+    var a=DB.find('loading_approvals',approvalId);
+    if(!a){showToast('Approval record not found','error');return;}
+    if(a.status!=='Pending'){showToast('Already processed: '+a.status,'warning');return;}
+
+    // Ask for rejection reason
+    var rh='<div class="form-group"><label>Rejection Reason <span class="req">*</span></label><textarea id="notifRejectReason" class="form-input" placeholder="Why are you rejecting?"></textarea></div>';
+    showModal('Reject Loading — '+a.loadNo,rh,'sm',
+        '<button class="btn btn-glass" onclick="closeModal()">Cancel</button>'+
+        '<button class="btn btn-danger" onclick="doRejectFromNotif(\''+approvalId+'\')"><i class="bx bx-x"></i> Reject</button>');
+}
+
+function doRejectFromNotif(approvalId){
+    var reason=(document.getElementById('notifRejectReason')||{}).value||'';
+    if(!reason.trim()){showToast('Enter rejection reason','error');return;}
+    var a=DB.find('loading_approvals',approvalId);if(!a)return;
+    DB.update('loading_approvals',approvalId,{status:'Rejected',rejectReason:reason,rejectedBy:APP.currentUser?APP.currentUser.id:'',rejectedByName:APP.currentUser?APP.currentUser.name:'',rejectedAt:new Date().toISOString()});
+    addNotif('Loading '+a.loadNo+' rejected by '+(APP.currentUser?APP.currentUser.name:'Admin'),'error');
+    logAction('Loading','REJECTED',a.loadNo+' rejected. Reason: '+reason);
+    showToast('Rejected: '+a.loadNo,'error');
+    closeModal();renderNotifPanel();
+    if(APP.currentSection&&APP.currentSub)renderSection(APP.currentSection,APP.currentSub);
+}
+
+// ★ View details from notification — opens in qty-mismatch section
+function viewFromNotif(approvalId){
+    var a=DB.find('loading_approvals',approvalId);
+    if(!a){showToast('Record not found','error');return;}
+    // Close notification panel
+    document.getElementById('notifPanel').classList.remove('open');
+    // Navigate to qty-mismatch section
+    navTo('loading','qty-mismatch');
+    // After a small delay, open the detail modal
+    setTimeout(function(){viewApprovalRequest(approvalId);},300);
 }
 
 // ==================== SEED DATA ====================
@@ -349,6 +469,7 @@ function renderSidebar(){
             {id:'picking-assign',label:'Picking Assign'},
             {id:'start-picking',label:'Start Picking'},
             {id:'picking-done',label:'Picking Done'}
+            ,{id:'picking-with-loading',label:'Picking with Loading'}
         ]},
         {id:'loading',icon:'bxs-truck',label:'Loading',subs:[
             {id:'loading-assign',label:'Loading Assign'},
@@ -2933,11 +3054,12 @@ function renderPicking(sub){
         case 'picking-assign':renderPickingAssign();break;
         case 'start-picking':renderStartPicking();break;
         case 'picking-done':renderPickingDone();break;
+        case 'picking-with-loading':renderPickingWithLoading();break;
         default:renderOBDUpload();
     }
 }
 
-// --- OBD Upload ---
+// --- OBD Upload (UNCHANGED) ---
 function renderOBDUpload(){
     var obds=DB.get('obd_data').reverse();
     var h='<div class="section-header"><h2><i class="bx bx-upload"></i> OBD Upload</h2></div>';
@@ -2980,104 +3102,264 @@ function processOBDUpload(){
                 DB.add('obd_data',{obdNo:key,customer:obdMap[key].customer,materials:obdMap[key].materials,status:'Pending',createdAt:new Date().toISOString()});
             }
             logAction('Picking','OBD_UPLOAD',count+' OBDs uploaded');
-            showToast(count+' OBDs uploaded!','success');
-            renderOBDUpload();
+            showToast(count+' OBDs uploaded!','success');renderOBDUpload();
         }catch(err){showToast('Excel error: '+err.message,'error');}
     };
     reader.readAsArrayBuffer(fi.files[0]);
 }
 
-// --- Picking Assign ---
+// ========== LOCATION LOCK SYSTEM ==========
+// Lock locations for an OBD when assigned
+function lockLocationsForOBD(obdId,obdNo){
+    var obd=DB.find('obd_data',obdId);
+    if(!obd)return{totalMaterials:0,fullyLocked:0,partialLocked:0,noStock:0,details:[]};
+    var fullyLocked=0,partialLocked=0,noStock=0,details=[];
+
+    obd.materials.forEach(function(mat){
+        var needed=mat.qty;
+        if(needed<=0)return;
+
+        // Get all ACTIVE locks for this EAN from OTHER OBDs
+        var existingLocks=DB.filter('location_locks',function(l){
+            return l.ean===mat.ean&&l.status==='Locked'&&l.obdId!==obdId;
+        });
+
+        // Get locations with stock
+        var locs=DB.filter('location_master',function(l){
+            return l.ean===mat.ean&&l.quantity>0;
+        });
+
+        // Calculate available per location (stock minus other OBDs' locks)
+        var locAvail=[];
+        locs.forEach(function(loc){
+            var lockedHere=0;
+            existingLocks.forEach(function(el){if(el.locationId===loc.id)lockedHere+=el.lockedQty;});
+            var avail=loc.quantity-lockedHere;
+            if(avail>0)locAvail.push({locationId:loc.id,rack:loc.rack,available:avail});
+        });
+
+        // Sort: fullest first
+        locAvail.sort(function(a,b){return b.available-a.available;});
+
+        // Lock across locations
+        var stillNeeded=needed;
+        var totalLockedForMat=0;
+
+        locAvail.forEach(function(la){
+            if(stillNeeded<=0)return;
+            var lockQty=Math.min(la.available,stillNeeded);
+            DB.add('location_locks',{
+                obdId:obdId,obdNo:obdNo,
+                material:mat.material,ean:mat.ean,
+                locationId:la.locationId,rack:la.rack,
+                lockedQty:lockQty,pickedQty:0,
+                status:'Locked'
+            });
+            totalLockedForMat+=lockQty;
+            stillNeeded-=lockQty;
+        });
+
+        if(totalLockedForMat===0)noStock++;
+        else if(totalLockedForMat<needed)partialLocked++;
+        else fullyLocked++;
+
+        details.push({material:mat.material,ean:mat.ean,needed:needed,locked:totalLockedForMat,short:needed-totalLockedForMat});
+    });
+
+    return{totalMaterials:obd.materials.length,fullyLocked:fullyLocked,partialLocked:partialLocked,noStock:noStock,details:details};
+}
+
+// Release all locks for an OBD (on unassign)
+function releaseLocksForOBD(obdId){
+    var locks=DB.filter('location_locks',function(l){return l.obdId===obdId&&l.status==='Locked';});
+    locks.forEach(function(l){DB.update('location_locks',l.id,{status:'Released'});});
+    return locks.length;
+}
+
+// --- Picking Assign (MODIFIED: auto locks locations) ---
 function renderPickingAssign(){
-    var obds=DB.get('obd_data').filter(function(o){return o.status==='Pending';});
+   var plAssignedIds={};DB.filter('picking_assignments',function(a){return a.type==='pickandload'&&a.status==='Assigned';}).forEach(function(a){(a.obdIds||[]).forEach(function(id){plAssignedIds[id]=1;});});
+var obds=DB.get('obd_data').filter(function(o){return o.status==='Pending'&&!plAssignedIds[o.id];});
     var assigned=DB.filter('picking_assignments',function(a){return a.status==='Assigned';});
     var h='<div class="section-header"><h2><i class="bx bx-user-plus"></i> Picking Assign</h2></div>';
 
-    // Unassigned OBDs
     h+='<div class="card"><div class="card-title"><i class="bx bx-list-ul"></i> Unassigned OBDs ('+obds.length+')</div>';
     if(!obds.length)h+='<div style="color:var(--text-muted);padding:16px;text-align:center">All OBDs assigned</div>';
     else{
-        h+='<div class="form-group" style="margin-bottom:12px"><label>User Name <span class="req">*</span></label><input type="text" id="pickAssignUser" class="form-input" style="max-width:300px" placeholder="Enter user name...">';
-        h+='</div>';
+        h+='<div class="form-group" style="margin-bottom:12px"><label>Assign To User <span class="req">*</span></label>';
+        h+='<select id="pickAssignUser" class="form-input" style="max-width:300px"><option value="">-- Select User --</option>';
+        var users=DB.get('users')||[];
+        if(!users.length)h+='<option value="__manual__">-- Type Manually --</option>';
+        else users.forEach(function(u){h+='<option value="'+esc(u.id)+'">'+esc(u.name||u.username)+(u.role?' ('+esc(u.role)+')':'')+'</option>';});
+        h+='</select></div>';
+        h+='<div id="manualUserWrap" style="display:none;margin-bottom:12px"><div class="form-group"><label>Enter User Name</label><input type="text" id="pickAssignUserManual" class="form-input" style="max-width:300px" placeholder="Type user name..."></div></div>';
+
         h+='<div class="chk-list" id="obdChkList">';
         obds.forEach(function(o){
             var totalQ=0;(o.materials||[]).forEach(function(m){totalQ+=m.qty;});
             h+='<label class="chk-list-item"><input type="checkbox" class="obd-chk" value="'+o.id+'" data-no="'+esc(o.obdNo)+'"><span><strong style="color:var(--accent);font-family:var(--font-display);font-size:11px">'+esc(o.obdNo)+'</strong> — '+(o.materials||[]).length+' mats, '+totalQ+' qty</span></label>';
         });
         h+='</div>';
-        h+='<div class="form-actions"><button class="btn btn-glass" onclick="doPickingAssign()"><i class="bx bx-check-double"></i> Assign Selected</button></div>';
+        h+='<div class="form-actions"><button class="btn btn-glass" onclick="doPickingAssign()"><i class="bx bx-check-double"></i> Assign & Lock Locations</button></div>';
     }
     h+='</div>';
 
-    // Assigned
     if(assigned.length){
-        h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-user-check"></i> Assigned ('+assigned.length+')</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Assigned To</th><th>Materials</th><th>Actions</th></tr></thead><tbody>';
+        h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-user-check"></i> Assigned ('+assigned.length+')</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Assigned To</th><th>Lock Status</th><th>Materials</th><th>Actions</th></tr></thead><tbody>';
         assigned.forEach(function(a){
             var obd=DB.find('obd_data',a.obdId);
-            h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(obd?obd.obdNo:'-')+'</td><td>'+esc(a.assignedToName)+'</td><td><span class="badge badge-info">'+(obd?obd.materials.length:0)+'</span></td><td><button class="btn btn-danger btn-sm" onclick="unassignPicking(\''+a.id+'\')"><i class="bx bx-user-minus"></i> Unassign</button></td></tr>';
+            // Check lock status
+            var locks=DB.filter('location_locks',function(l){return l.obdId===a.obdId&&l.status==='Locked';});
+            var totalLocked=0,totalPicked=0;
+            locks.forEach(function(l){totalLocked+=l.lockedQty;totalPicked+=l.pickedQty;});
+            var totalQ=0;if(obd)(obd.materials||[]).forEach(function(m){totalQ+=m.qty;});
+            var lockBadge=totalLocked>=totalQ?'<span class="badge badge-success">Fully Locked</span>':(totalLocked>0?'<span class="badge badge-warning">Partial ('+totalLocked+'/'+totalQ+')</span>':'<span class="badge badge-danger">No Stock</span>');
+
+            h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(obd?obd.obdNo:'-')+'</td><td>'+esc(a.assignedToName)+'</td><td>'+lockBadge+'</td><td><span class="badge badge-info">'+(obd?obd.materials.length:0)+'</span></td><td><button class="btn btn-danger btn-sm" onclick="unassignPicking(\''+a.id+'\')"><i class="bx bx-user-minus"></i> Unassign</button></td></tr>';
         });
         h+='</tbody></table></div></div>';
     }
     setHtml(h);
+
+    var sel=document.getElementById('pickAssignUser');
+    if(sel){
+        sel.onchange=function(){document.getElementById('manualUserWrap').style.display=(this.value==='__manual__'?'block':'none');};
+        if(!users.length)document.getElementById('manualUserWrap').style.display='block';
+    }
 }
+
 function doPickingAssign(){
-    var userInp=document.getElementById('pickAssignUser');
-    var userName=userInp.value.trim();
-    if(!userName){showToast('Enter user name','error');return;}
+    var sel=document.getElementById('pickAssignUser');
+    var manualInp=document.getElementById('pickAssignUserManual');
+    var userId='',userName='';
+    if(sel.value==='__manual__'){userName=manualInp?manualInp.value.trim():'';userId=userName;}
+    else if(sel.value){userId=sel.value;userName=sel.options[sel.selectedIndex].text;var rpIdx=userName.lastIndexOf(' (');if(rpIdx>-1)userName=userName.substring(0,rpIdx);}
+    if(!userId||!userName){showToast('Select a user','error');return;}
     var checks=document.querySelectorAll('.obd-chk:checked');
     if(!checks.length){showToast('Select at least one OBD','error');return;}
-    var count=0;
+
+    var count=0,lockResults=[];
     checks.forEach(function(chk){
         var obdId=chk.value,obdNo=chk.getAttribute('data-no');
-        DB.add('picking_assignments',{obdId:obdId,obdNo:obdNo,assignedTo:userName,assignedToName:userName,status:'Assigned',assignedAt:new Date().toISOString()});
+        DB.add('picking_assignments',{obdId:obdId,obdNo:obdNo,assignedTo:userId,assignedToName:userName,status:'Assigned',assignedAt:new Date().toISOString()});
         DB.update('obd_data',obdId,{status:'Assigned'});
+        // AUTO LOCK LOCATIONS
+        var lockResult=lockLocationsForOBD(obdId,obdNo);
+        lockResults.push({obdNo:obdNo,result:lockResult});
         count++;
     });
-    logAction('Picking','ASSIGN',count+' OBDs assigned to '+userName);
-    showToast(count+' OBDs assigned to '+userName,'success');
-    renderPickingAssign();
+
+    logAction('Picking','ASSIGN',count+' OBDs assigned to '+userName+' with location locks');
+    showToast(count+' OBDs assigned!','success');
+
+    // Show lock summary if any shortage
+    var hasShort=lockResults.some(function(lr){return lr.result.partialLocked>0||lr.result.noStock>0;});
+    if(hasShort){
+        var sh='<div style="padding:16px"><div style="font-size:16px;font-weight:700;margin-bottom:12px"><i class="bx bx-lock" style="color:var(--warning)"></i> Location Lock Summary</div>';
+        lockResults.forEach(function(lr){
+            if(lr.result.partialLocked===0&&lr.result.noStock===0)return;
+            sh+='<div style="margin-bottom:12px;padding:10px;background:var(--bg-secondary);border-radius:8px;border-left:3px solid var(--warning)">';
+            sh+='<div style="font-weight:700;color:var(--accent);margin-bottom:6px">'+esc(lr.obdNo)+'</div>';
+            lr.result.details.forEach(function(d){
+                if(d.short>0)sh+='<div style="font-size:12px;color:var(--text-muted);padding:2px 0"><span style="color:var(--danger)">⚠</span> '+esc(d.material)+': Need <strong>'+d.needed+'</strong>, Locked <strong>'+d.locked+'</strong>, <strong style="color:var(--danger)">Short '+d.short+'</strong></div>';
+            });
+            sh+='</div>';
+        });
+        sh+='</div>';
+        showModal('Location Lock Warning',sh,'lg','<button class="btn btn-glass" onclick="closeModal();renderPickingAssign()"><i class="bx bx-check"></i> OK</button>');
+    }else{renderPickingAssign();}
 }
+
 function unassignPicking(assignId){
     if(!confirm('Unassign?'))return;
     var a=DB.find('picking_assignments',assignId);if(!a)return;
     DB.update('picking_assignments',assignId,{status:'Unassigned'});
     DB.update('obd_data',a.obdId,{status:'Pending'});
-    logAction('Picking','UNASSIGN','OBD '+a.obdNo+' unassigned');
-    showToast('Unassigned','success');renderPickingAssign();
+    // RELEASE ALL LOCKS
+    var released=releaseLocksForOBD(a.obdId);
+    logAction('Picking','UNASSIGN','OBD '+a.obdNo+' unassigned, '+released+' locks released');
+    showToast('Unassigned, '+released+' locks released','success');renderPickingAssign();
 }
 
-// --- Start Picking ---
+// --- Start Picking (COMPLETELY MODIFIED: uses locked locations) ---
 function renderStartPicking(){
     if(!APP.currentUser)return;
-    var myAssign=DB.filter('picking_assignments',function(a){return a.assignedTo===APP.currentUser.id&&a.status==='Assigned';});
-    var h='<div class="section-header"><h2><i class="bx bx-box"></i> My Picking</h2></div>';
-    if(!myAssign.length){h+='<div class="card"><div class="empty-state"><i class="bx bx-inbox"></i><p>No OBDs assigned to you</p></div></div>';setHtml(h);return;}
+    var myAssign=DB.filter('picking_assignments',function(a){return a.assignedTo===APP.currentUser.id&&a.status==='Assigned'&&a.type!=='pickandload';});
 
-    // Show OBD list
+    var h='<div class="section-header"><h2><i class="bx bx-box"></i> My Picking</h2></div>';
+    if(!myAssign.length){
+        var allAssigned=DB.filter('picking_assignments',function(a){return a.status==='Assigned';});
+        h+='<div class="card"><div class="empty-state"><i class="bx bx-inbox"></i><p>No OBDs assigned to you</p></div>';
+        if(allAssigned.length>0){
+            h+='<div style="margin-top:12px;padding:10px;background:var(--bg-secondary);border-radius:8px;font-size:11px;color:var(--text-muted);text-align:left">';
+            h+='<div><strong>Debug:</strong> Your ID: <code style="background:var(--bg-primary);padding:1px 4px;border-radius:3px">'+esc(APP.currentUser.id)+'</code> | Name: <code style="background:var(--bg-primary);padding:1px 4px;border-radius:3px">'+esc(APP.currentUser.name)+'</code></div>';
+            h+='<div style="margin-top:4px">Assigned to:</div>';
+            allAssigned.slice(0,3).forEach(function(a){h+='<div style="padding:1px 0">→ <code style="background:var(--bg-primary);padding:1px 4px;border-radius:3px">'+esc(a.assignedTo)+'</code> | '+esc(a.assignedToName)+' | '+esc(a.obdNo)+'</div>';});
+            h+='</div>';
+        }
+        h+='</div>';setHtml(h);return;
+    }
+
     h+='<div class="card"><div class="card-title"><i class="bx bx-list-ul"></i> Your OBDs ('+myAssign.length+')</div>';
     myAssign.forEach(function(a){
         var obd=DB.find('obd_data',a.obdId);if(!obd)return;
         var totalQ=0;(obd.materials||[]).forEach(function(m){totalQ+=m.qty;});
-        h+='<div class="inv-list-item" onclick="openPickingOBD(\''+a.obdId+'\')"><div class="ili-left"><span class="ili-invno">'+esc(obd.obdNo)+'</span><span class="ili-info">'+(obd.materials||[]).length+' materials | '+totalQ+' total qty</span></div><span class="badge badge-warning">Pick</span></div>';
+        // Lock stats
+        var locks=DB.filter('location_locks',function(l){return l.obdId===a.obdId&&l.status==='Locked';});
+        var totalLocked=0,totalPicked=0;
+        locks.forEach(function(l){totalLocked+=l.lockedQty;totalPicked+=l.pickedQty;});
+        var lockBadge,totalPct=totalQ>0?Math.round((totalPicked/totalQ)*100):0;
+        if(totalPicked>=totalQ)lockBadge='<span class="badge badge-success">Done</span>';
+        else if(totalPicked>0)lockBadge='<span class="badge badge-warning">Picking '+totalPct+'%</span>';
+        else if(totalLocked>=totalQ)lockBadge='<span class="badge badge-accent">Ready to Pick</span>';
+        else if(totalLocked>0)lockBadge='<span class="badge badge-warning">Partial Lock</span>';
+        else lockBadge='<span class="badge badge-danger">No Stock</span>';
+
+        h+='<div class="inv-list-item" onclick="openPickingOBD(\''+a.obdId+'\')">';
+        h+='<div class="ili-left">';
+        h+='<span class="ili-invno">'+esc(obd.obdNo)+'</span>';
+        h+='<span class="ili-info">'+(obd.materials||[]).length+' materials | '+totalQ+' total qty</span>';
+        h+='<span class="ili-info" style="font-size:10px;color:var(--text-muted)"><i class="bx bx-lock"></i> Locked: '+totalLocked+' | Picked: '+totalPicked+'/'+totalQ+'</span>';
+        h+='</div>'+lockBadge+'</div>';
     });
-    h+='</div>';
-    setHtml(h);
+    h+='</div>';setHtml(h);
 }
 
 function openPickingOBD(obdId){
     var obd=DB.find('obd_data',obdId);if(!obd)return;
-    window._pickData={obdId:obdId,obdNo:obd.obdNo,materials:JSON.parse(JSON.stringify(obd.materials)),pickedLocations:{}};
+    window._pickData={obdId:obdId,obdNo:obd.obdNo,materials:JSON.parse(JSON.stringify(obd.materials))};
+
+    // Read all locks for this OBD from DB
+    var allLocks=DB.filter('location_locks',function(l){return l.obdId===obdId&&l.status==='Locked';});
 
     var h='<div style="margin-bottom:12px"><strong style="color:var(--accent);font-family:var(--font-display)">'+esc(obd.obdNo)+'</strong></div>';
-    h+='<div class="card-title"><i class="bx bx-package"></i> Materials — Click to see locations</div>';
+    h+='<div class="card-title"><i class="bx bx-package"></i> Materials — Click to pick from locked locations</div>';
     h+='<div class="mat-cards-grid" id="pickMatCards">';
+
     obd.materials.forEach(function(m,idx){
-        var picked=(window._pickData.pickedLocations[m.material]||[]).length>0;
-        h+='<div class="mat-card '+(picked?'picked':'')+'" onclick="showPickLocations('+idx+')">';
+        var matLocks=allLocks.filter(function(l){return l.ean===m.ean;});
+        var totalLocked=0,totalPicked=0;
+        matLocks.forEach(function(l){totalLocked+=l.lockedQty;totalPicked+=l.pickedQty;});
+        var allDone=totalPicked>=m.qty;
+        var partial=totalPicked>0&&!allDone;
+        var noLock=totalLocked===0;
+
+        var cardStyle='';
+        if(allDone)cardStyle='background:var(--success-dim);border-color:var(--success)';
+        else if(noLock)cardStyle='background:rgba(255,71,87,0.08);border-color:var(--danger)';
+        else if(partial)cardStyle='background:rgba(255,165,2,0.08);border-color:var(--warning)';
+
+        var statusHTML='';
+        if(allDone)statusHTML='<span class="status-dot green"></span> Picked '+totalPicked;
+        else if(partial)statusHTML='<span class="status-dot yellow"></span> Partial '+totalPicked+'/'+m.qty;
+        else if(noLock)statusHTML='<span class="status-dot red"></span> No Stock Locked';
+        else statusHTML='<span class="status-dot green"></span> Ready ('+totalLocked+' locked)';
+
+        h+='<div class="mat-card" style="'+cardStyle+'" onclick="showPickLocations('+idx+')">';
         h+='<div class="mc-name"><i class="bx bx-box" style="color:var(--accent)"></i> '+esc(m.material)+'</div>';
         h+='<div class="mc-ean">'+esc(m.ean)+'</div>';
-        h+='<div class="mc-qty">Need: <strong>'+m.qty+'</strong></div>';
-        h+='<div class="mc-status">'+(picked?'<span class="status-dot green"></span> Picked':'<span class="status-dot yellow"></span> Pending')+'</div>';
+        h+='<div class="mc-qty">Need: <strong>'+m.qty+'</strong> | Locked: <strong style="color:'+(noLock?'var(--danger)':'var(--success)')+'">'+totalLocked+'</strong></div>';
+        h+='<div class="mc-status">'+statusHTML+'</div>';
         h+='</div>';
     });
     h+='</div>';
@@ -3088,66 +3370,86 @@ function openPickingOBD(obdId){
 function showPickLocations(matIdx){
     var pd=window._pickData;if(!pd)return;
     var mat=pd.materials[matIdx];
-    // Find locations for this material
-    var locs=DB.filter('location_master',function(l){return l.ean===mat.ean&&l.quantity>0;});
-    if(!locs.length){
-        // Ask admin to assign location
-        var h='<div style="text-align:center;padding:20px"><i class="bx bx-map-pin" style="font-size:40px;color:var(--warning);opacity:.5"></i><p style="color:var(--text-muted);margin:10px 0">No stock found for <strong>'+esc(mat.material)+'</strong> at any location.</p>';
-        h+='<div class="form-group"><label>Reason</label><textarea id="pickNoLocReason" class="form-input" placeholder="Why material not found?"></textarea></div>';
-        h+='<div class="form-group"><label>Request Alternative Location</label><input type="text" id="pickAltLoc" class="form-input" placeholder="RACK-XXX"></div>';
+
+    // Get ONLY locked locations for this material in this OBD
+    var matLocks=DB.filter('location_locks',function(l){
+        return l.obdId===pd.obdId&&l.ean===mat.ean&&l.status==='Locked';
+    });
+
+    if(!matLocks.length){
+        var h='<div style="text-align:center;padding:20px">';
+        h+='<i class="bx bx-map-pin" style="font-size:40px;color:var(--danger);opacity:.5"></i>';
+        h+='<p style="color:var(--text-muted);margin:10px 0">No stock was available for <strong>'+esc(mat.material)+'</strong> when OBD was assigned.</p>';
+        h+='<p style="color:var(--danger);font-weight:700">Needed: '+mat.qty+' | Locked: 0</p>';
+        h+='<div class="form-group" style="text-align:left;margin-top:12px"><label>Reason / Note</label><textarea id="pickNoLocReason" class="form-input" placeholder="Why material not available?"></textarea></div>';
         h+='</div>';
-        showModal('No Location Found',h,'sm',
-            '<button class="btn btn-glass" onclick="closeModal();openPickingOBD(\''+pd.obdId+'\')">Back</button>'+
+        showModal('No Location Locked',h,'sm',
+            '<button class="btn btn-glass" onclick="closeModal();openPickingOBD(\''+pd.obdId+'\')"><i class="bx bx-arrow-back"></i> Back</button>'+
             '<button class="btn btn-glass" onclick="requestAdminLocation('+matIdx+')"><i class="bx bx-send"></i> Request Admin</button>');
         return;
     }
-    // Show location cards
+
     var totalPicked=0;
-    (pd.pickedLocations[mat.material]||[]).forEach(function(p){totalPicked+=p.qty;});
+    matLocks.forEach(function(l){totalPicked+=l.pickedQty;});
     var remaining=mat.qty-totalPicked;
 
-    var h='<div style="margin-bottom:12px"><strong>'+esc(mat.material)+'</strong> | Need: <span style="color:var(--accent)">'+mat.qty+'</span> | Already Picked: <span style="color:var(--success)">'+totalPicked+'</span> | Remaining: <span style="color:var(--warning)">'+remaining+'</span></div>';
+    var h='<div style="margin-bottom:12px;padding:10px;background:var(--bg-secondary);border-radius:8px">';
+    h+='<strong>'+esc(mat.material)+'</strong> | EAN: <span style="font-family:var(--font-display)">'+esc(mat.ean)+'</span><br>';
+    h+='<span style="color:var(--accent)">Need: '+mat.qty+'</span> | ';
+    h+='<span style="color:var(--success)">Picked: '+totalPicked+'</span> | ';
+    h+='<span style="color:var(--warning)">Remaining: '+remaining+'</span>';
+    h+='</div>';
+
     h+='<div class="loc-cards-grid">';
-    locs.forEach(function(l,idx){
-        var alreadyPicked=0;
-        (pd.pickedLocations[mat.material]||[]).forEach(function(p){if(p.rack===l.rack)alreadyPicked+=p.qty;});
-        var avail=l.quantity-alreadyPicked;
-        if(avail<0)avail=0;
-        var isPicked=alreadyPicked>0;
-        h+='<div class="loc-card '+(isPicked?'lc-picked':'')+'">';
-        h+='<div class="lc-rack"><i class="bx bx-map-pin"></i> '+esc(l.rack)+'</div>';
-        h+='<div class="lc-mat">'+esc(l.material)+'</div>';
-        h+='<div class="lc-avail">Available: <strong>'+avail+'</strong></div>';
-        if(avail>0&&remaining>0){
-            var maxPick=Math.min(avail,remaining);
-            h+='<input type="number" id="pickQty_'+idx+'" value="'+maxPick+'" min="1" max="'+maxPick+'" placeholder="Qty to pick">';
-            h+='<button class="btn btn-glass btn-sm" style="width:100%;margin-top:6px;justify-content:center" onclick="doPickFromLocation('+matIdx+','+idx+',\''+esc(l.rack)+'\','+avail+')"><i class="bx bx-check"></i> Pick</button>';
-        }else if(isPicked){
-            h+='<div style="text-align:center;color:var(--success);font-size:11px;margin-top:6px"><i class="bx bx-check-circle"></i> Picked '+alreadyPicked+'</div>';
+    matLocks.forEach(function(lock,idx){
+        var canPick=lock.lockedQty-lock.pickedQty;
+        var isDone=lock.pickedQty>=lock.lockedQty;
+
+        h+='<div class="loc-card '+(isDone?'lc-picked':'')+'">';
+        h+='<div class="lc-rack"><i class="bx bx-lock"></i> '+esc(lock.rack)+'</div>';
+        h+='<div class="lc-avail">Locked: <strong>'+lock.lockedQty+'</strong> | Picked: <strong>'+lock.pickedQty+'</strong></div>';
+
+        if(canPick>0&&remaining>0){
+            var maxPick=Math.min(canPick,remaining);
+            h+='<div style="font-size:10px;color:var(--text-muted);margin:6px 0">Max pick: '+maxPick+'</div>';
+            h+='<input type="number" id="pickQty_'+idx+'" value="'+maxPick+'" min="1" max="'+maxPick+'" placeholder="Qty">';
+            h+='<button class="btn btn-glass btn-sm" style="width:100%;margin-top:6px;justify-content:center" onclick="doPickFromLock(\''+lock.id+'\','+matIdx+','+idx+')"><i class="bx bx-check"></i> Pick</button>';
+        }else if(isDone){
+            h+='<div style="text-align:center;color:var(--success);font-size:11px;margin-top:6px"><i class="bx bx-check-circle"></i> Fully Picked</div>';
         }else{
-            h+='<div style="text-align:center;color:var(--text-muted);font-size:11px;margin-top:6px">Not available</div>';
+            h+='<div style="text-align:center;color:var(--text-muted);font-size:11px;margin-top:6px">Done</div>';
         }
         h+='</div>';
     });
     h+='</div>';
-    showModal('Pick Locations — '+mat.material,h,'lg',
+
+    showModal('Pick — '+mat.material,h,'lg',
         '<button class="btn btn-glass" onclick="closeModal();openPickingOBD(\''+pd.obdId+'\')"><i class="bx bx-arrow-back"></i> Back</button>');
 }
 
-function doPickFromLocation(matIdx,locIdx,rack,avail){
+function doPickFromLock(lockId,matIdx,displayIdx){
     var pd=window._pickData;if(!pd)return;
     var mat=pd.materials[matIdx];
-    var qtyInput=document.getElementById('pickQty_'+locIdx);
+
+    var lock=DB.find('location_locks',lockId);
+    if(!lock||lock.status!=='Locked'){showToast('Lock not found','error');return;}
+
+    var qtyInput=document.getElementById('pickQty_'+displayIdx);
     var qty=parseInt(qtyInput?qtyInput.value:0)||0;
     if(qty<=0){showToast('Enter quantity','error');return;}
-    if(qty>avail){showToast('Cannot pick more than available','error');return;}
-    var totalPicked=0;
-    (pd.pickedLocations[mat.material]||[]).forEach(function(p){totalPicked+=p.qty;});
-    if(totalPicked+qty>mat.qty){showToast('Exceeds required quantity','error');return;}
 
-    if(!pd.pickedLocations[mat.material])pd.pickedLocations[mat.material]=[];
-    pd.pickedLocations[mat.material].push({rack:rack,qty:qty,ean:mat.ean,material:mat.material});
-    showToast('Picked '+qty+' from '+rack,'success');
+    var canPick=lock.lockedQty-lock.pickedQty;
+    if(qty>canPick){showToast('Max '+canPick+' allowed (locked qty)','error');return;}
+
+    // Check total against material requirement
+    var allMatLocks=DB.filter('location_locks',function(l){return l.obdId===pd.obdId&&l.ean===mat.ean&&l.status==='Locked';});
+    var totalPickedSoFar=0;
+    allMatLocks.forEach(function(l){totalPickedSoFar+=l.pickedQty;});
+    if(totalPickedSoFar+qty>mat.qty){showToast('Cannot exceed required qty '+mat.qty,'error');return;}
+
+    // Update lock
+    DB.update('location_locks',lockId,{pickedQty:lock.pickedQty+qty});
+    showToast('Picked '+qty+' from '+lock.rack,'success');
     closeModal();openPickingOBD(pd.obdId);
 }
 
@@ -3155,36 +3457,47 @@ function requestAdminLocation(matIdx){
     var pd=window._pickData;if(!pd)return;
     var mat=pd.materials[matIdx];
     var reason=document.getElementById('pickNoLocReason').value.trim();
-    var altLoc=document.getElementById('pickAltLoc').value.trim();
-    addNotif('Admin: Location needed for '+mat.material+' (OBD: '+pd.obdNo+'). Reason: '+(reason||'Not found')+'. Alt: '+(altLoc||'N/A'),'warning');
-    logAction('Picking','LOCATION_REQUEST','Material '+mat.material+' location requested. Alt: '+(altLoc||'N/A'));
-    showToast('Location request sent to admin','success');
+    addNotif('Admin: No stock for '+mat.material+' (OBD: '+pd.obdNo+'). Need: '+mat.qty+'. Reason: '+(reason||'Not found'),'warning');
+    logAction('Picking','LOCATION_REQUEST','Material '+mat.material+' no stock. OBD: '+pd.obdNo);
+    showToast('Request sent to admin','success');
     closeModal();openPickingOBD(pd.obdId);
 }
 
 function submitPicking(){
     var pd=window._pickData;if(!pd)return;
+
+    // Get all locks for this OBD
+    var allLocks=DB.filter('location_locks',function(l){return l.obdId===pd.obdId&&l.status==='Locked';});
+
+    // Check all picked?
     var allPicked=true;
     pd.materials.forEach(function(m){
-        var total=0;(pd.pickedLocations[m.material]||[]).forEach(function(p){total+=p.qty;});
-        if(total<m.qty)allPicked=false;
+        var tp=0;allLocks.filter(function(l){return l.ean===m.ean;}).forEach(function(l){tp+=l.pickedQty;});
+        if(tp<m.qty)allPicked=false;
     });
     if(!allPicked&&!confirm('Some materials not fully picked. Submit anyway?'))return;
 
+    // Build details from locks
     var pickingDetails=[];
     pd.materials.forEach(function(m){
-        var locs=pd.pickedLocations[m.material]||[];
-        var totalPicked=0;locs.forEach(function(l){totalPicked+=l.qty;});
-        pickingDetails.push({material:m.material,ean:m.ean,requiredQty:m.qty,pickedQty:totalPicked,locations:locs,short:m.qty-totalPicked});
+        var matLocks=allLocks.filter(function(l){return l.ean===m.ean;});
+        var totalPicked=0,locations=[];
+        matLocks.forEach(function(l){
+            totalPicked+=l.pickedQty;
+            if(l.pickedQty>0)locations.push({rack:l.rack,qty:l.pickedQty,ean:l.ean,material:l.material});
+        });
+        pickingDetails.push({material:m.material,ean:m.ean,requiredQty:m.qty,pickedQty:totalPicked,locations:locations,short:m.qty-totalPicked});
     });
 
+    // Save picking done
     DB.add('picking_done',{obdId:pd.obdId,obdNo:pd.obdNo,pickedBy:APP.currentUser.id,pickedByName:APP.currentUser.name,pickedAt:new Date().toISOString(),details:pickingDetails,status:'Done'});
     DB.update('obd_data',pd.obdId,{status:'Picking Done'});
-    // Update assignment
+
+    // Update assignments
     var assign=DB.filter('picking_assignments',function(a){return a.obdId===pd.obdId&&a.status==='Assigned';});
     assign.forEach(function(a){DB.update('picking_assignments',a.id,{status:'Done'});});
 
-    // Deduct from location master
+    // ★ DEDUCT FROM LOCATION MASTER ★
     pickingDetails.forEach(function(d){
         d.locations.forEach(function(loc){
             var locRecords=DB.filter('location_master',function(l){return l.rack===loc.rack&&l.ean===loc.ean&&l.quantity>0;});
@@ -3195,25 +3508,24 @@ function submitPicking(){
                 DB.update('location_master',lr.id,{quantity:lr.quantity-deduct});
                 remaining-=deduct;
             });
-            // Delete location records with 0 qty
+            // Delete 0 qty records
             var zeroLocs=DB.filter('location_master',function(l){return l.rack===loc.rack&&l.ean===loc.ean&&l.quantity<=0;});
             zeroLocs.forEach(function(zl){DB.remove('location_master',zl.id);});
         });
     });
 
-    // Create short report if any
+    // ★ RELEASE ALL LOCKS ★
+    allLocks.forEach(function(l){DB.update('location_locks',l.id,{status:'Released'});});
+
+    // Short report if any
     var shorts=pickingDetails.filter(function(d){return d.short>0;});
     if(shorts.length>0){
         DB.add('short_reports',{shortNo:DB.shortNo(),vehicleNo:pd.obdNo,lrNo:'OBD',unloadNo:pd.obdNo,items:shorts.map(function(s){return{invoiceNo:pd.obdNo,material:s.material,ean:s.ean,expected:s.requiredQty,scanned:s.pickedQty,short:s.short};}),posted:false,createdAt:new Date().toISOString()});
     }
 
-    // Create picking report
+    // Picking report
     var reportRows=[];
-    pickingDetails.forEach(function(d){
-        d.locations.forEach(function(loc){
-            reportRows.push({obdNo:pd.obdNo,material:d.material,ean:d.ean,rack:loc.rack,qty:loc.qty,pickedBy:APP.currentUser.name,pickedAt:new Date().toISOString()});
-        });
-    });
+    pickingDetails.forEach(function(d){d.locations.forEach(function(loc){reportRows.push({obdNo:pd.obdNo,material:d.material,ean:d.ean,rack:loc.rack,qty:loc.qty,pickedBy:APP.currentUser.name,pickedAt:new Date().toISOString()});});});
     DB.add('picking_reports',{reportNo:'PR-'+Date.now().toString(36).toUpperCase(),obdNo:pd.obdNo,rows:reportRows,createdAt:new Date().toISOString()});
 
     logAction('Picking','DONE','OBD '+pd.obdNo+' picked by '+APP.currentUser.name);
@@ -3222,7 +3534,7 @@ function submitPicking(){
     closeModal();renderStartPicking();
 }
 
-// --- Picking Done ---
+// --- Picking Done (UNCHANGED) ---
 function renderPickingDone(){
     var done=DB.get('picking_done').reverse();
     var h='<div class="section-header"><h2><i class="bx bx-check-circle"></i> Picking Done ('+done.length+')</h2>';
@@ -3249,7 +3561,7 @@ function viewPickingDoneDetail(id){
 }
 function exportPickingDoneExcel(){
     var done=DB.get('picking_done');var rows=[['OBD No','Material','EAN','Required','Picked','Short','Picked By','Time']];
-    done.forEach(function(d){(d.details||[]).forEach(function(det){rows.push([d.obnNo||d.obdNo,det.material,det.ean,det.requiredQty,det.pickedQty,det.short,det.pickedByName,fmtDT(d.pickedAt)]);});});
+    done.forEach(function(d){(d.details||[]).forEach(function(det){rows.push([d.obdNo||d.obnNo,det.material,det.ean,det.requiredQty,det.pickedQty,det.short,det.pickedByName,fmtDT(d.pickedAt)]);});});
     var ws=XLSX.utils.aoa_to_sheet(rows);var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'PickingDone');XLSX.writeFile(wb,'Picking_Done_'+today()+'.xlsx');showToast('Excel downloaded!','success');
 }
 function exportPickingDonePDF(){
@@ -3259,7 +3571,482 @@ function exportPickingDonePDF(){
     pdf.autoTable({startY:28,head:[['OBD No','Material','EAN','Req','Picked','Short','By','Time']],body:rows,theme:'grid',headStyles:{fillColor:[0,180,120]},styles:{fontSize:7}});
     pdf.save('Picking_Done_'+today()+'.pdf');showToast('PDF downloaded!','success');
 }
+// ==================== PICKING WITH LOADING ====================
+function renderPickingWithLoading(){
+    var isAssigner=chkAct('canPick')&&chkAct('canLoad');
+    var h='<div class="section-header"><h2><i class="bx bx-transfer"></i> Picking with Loading</h2></div>';
 
+    // ===== SECTION 1: ASSIGN =====
+    if(isAssigner){
+        var plAssignedIds={};
+        DB.filter('picking_assignments',function(a){return a.type==='pickandload'&&a.status==='Assigned';}).forEach(function(a){(a.obdIds||[]).forEach(function(id){plAssignedIds[id]=1;});});
+        var obds=DB.get('obd_data').filter(function(o){return o.status==='Pending'&&!plAssignedIds[o.id];});
+        var assigned=DB.filter('picking_assignments',function(a){return a.type==='pickandload'&&a.status==='Assigned';});
+
+        h+='<div class="card"><div class="card-title"><i class="bx bx-user-plus"></i> P&L Assign</div>';
+        if(!obds.length)h+='<div style="color:var(--text-muted);padding:12px;text-align:center">No OBDs pending</div>';
+        else{
+            h+='<div class="form-group" style="margin-bottom:10px"><label>Assign To <span class="req">*</span></label>';
+            h+='<select id="pwlAssignUser" class="form-input" style="max-width:280px"><option value="">-- Select --</option>';
+            DB.get('users').filter(function(u){return u.role==='Picker'||u.role==='Loader'||u.role==='Manager'||u.role==='Admin';}).forEach(function(u){h+='<option value="'+u.id+'" data-name="'+esc(u.name)+'">'+esc(u.name)+' ('+esc(u.role)+')</option>';});
+            h+='</select></div>';
+            h+='<div class="chk-list" id="pwlChkList" style="max-height:180px;overflow-y:auto">';
+            obds.forEach(function(o){
+                var tq=0;(o.materials||[]).forEach(function(m){tq+=m.qty;});
+                h+='<label class="chk-list-item"><input type="checkbox" class="pwl-chk" value="'+o.id+'" data-no="'+esc(o.obdNo)+'"><span><strong style="color:var(--accent);font-family:var(--font-display);font-size:11px">'+esc(o.obdNo)+'</strong> — '+(o.materials||[]).length+' mats, '+tq+' qty</span></label>';
+            });
+            h+='</div>';
+            h+='<div class="form-actions"><button class="btn btn-glass" onclick="doPWLAssign()"><i class="bx bx-check-double"></i> Assign & Lock</button></div>';
+        }
+        h+='</div>';
+
+        if(assigned.length){
+            h+='<div class="card" style="margin-top:12px"><div class="card-title"><i class="bx bx-user-check"></i> Active P&L ('+assigned.length+')</div>';
+            h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>User</th><th>OBDs</th><th>Lock Status</th><th>Actions</th></tr></thead><tbody>';
+            assigned.forEach(function(a){
+                var tags='';(a.obdNos||[]).forEach(function(n){tags+='<span class="badge badge-info" style="margin:1px;font-size:9px">'+esc(n)+'</span>';});
+                var lockInfo='';var tl=0,tp=0,tq=0;
+                (a.obdIds||[]).forEach(function(oid){
+                    var obd=DB.find('obd_data',oid);if(obd)(obd.materials||[]).forEach(function(m){tq+=m.qty;});
+                    DB.filter('location_locks',function(l){return l.obdId===oid&&l.status==='Locked';}).forEach(function(l){tl+=l.lockedQty;tp+=l.pickedQty;});
+                });
+                lockInfo=tl>=tq?'<span class="badge badge-success">Locked</span>':(tl>0?'<span class="badge badge-warning">'+tl+'/'+tq+'</span>':'<span class="badge badge-danger">No Stock</span>');
+                h+='<tr><td>'+esc(a.assignedToName)+'</td><td>'+tags+'</td><td>'+lockInfo+'</td><td><button class="btn btn-danger btn-sm" onclick="unassignPWL(\''+a.id+'\')"><i class="bx bx-user-minus"></i></button></td></tr>';
+            });
+            h+='</tbody></table></div></div>';
+        }
+    }
+
+    // ===== SECTION 2: MY P&L =====
+    var myPWL=DB.filter('picking_assignments',function(a){
+        if(a.type!=='pickandload'||a.status!=='Assigned')return false;
+        if(a.assignedTo===APP.currentUser.id)return true;
+        return(a.assignedToName||'').toLowerCase().trim()===(APP.currentUser.name||'').toLowerCase().trim();
+    });
+    h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-box"></i> My P&L ('+myPWL.length+')</div>';
+    if(!myPWL.length)h+='<div style="color:var(--text-muted);padding:16px;text-align:center">No P&L assigned to you</div>';
+    else{
+        h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Materials</th><th>Locked</th><th>Picked</th><th>Loaded</th><th>Action</th></tr></thead><tbody>';
+        myPWL.forEach(function(a){
+            (a.obdIds||[]).forEach(function(oid,i){
+                var obd=DB.find('obd_data',oid);if(!obd)return;
+                var tq=0;(obd.materials||[]).forEach(function(m){tq+=m.qty;});
+                var locks=DB.filter('location_locks',function(l){return l.obdId===oid&&l.status==='Locked';});
+                var tl=0,tp=0;locks.forEach(function(l){tl+=l.lockedQty;tp+=l.pickedQty;});
+                var partials=DB.filter('loaded_vehicles',function(lv){return lv.type==='pickandload'&&lv.loadStatus==='Partial';var ids=lv.obdIds;if(!Array.isArray(ids))ids=[ids];return ids.indexOf(oid)>-1;});
+                var loadedQ=0;partials.forEach(function(p){(p.scannedItems||[]).forEach(function(s){if(s.inOBD)loadedQ+=s.qty;});});
+                var done=DB.filter('loaded_vehicles',function(lv){return lv.type==='pickandload'&&lv.loadStatus==='Fully Loaded';var ids=lv.obdIds;if(!Array.isArray(ids))ids=[ids];return ids.indexOf(oid)>-1;});
+
+                var statusBadge='',actionBtn='';
+                if(done.length>0){statusBadge='<span class="badge badge-success">Done</span>';actionBtn='<span style="color:var(--text-muted);font-size:11px">Completed</span>';}
+                else if(partials.length>0){
+                    var pl=partials[partials.length-1];
+                    statusBadge='<span class="badge badge-warning">Partial '+loadedQ+'/'+tq+'</span>';
+                    actionBtn='<button class="btn btn-glass btn-sm" style="border-color:var(--warning)" onclick="continuePWL(\''+pl.id+'\')"><i class="bx bx-reload"></i> Continue</button>';
+                }else if(tp>0){statusBadge='<span class="badge badge-accent">Picking '+tp+'/'+tq+'</span>';actionBtn='<button class="btn btn-glass btn-sm" onclick="resumePWLPicking(\''+oid+'\')"><i class="bx bx-play"></i> Resume</button>';}
+                else if(tl>0){statusBadge='<span class="badge badge-info">Locked '+tl+'/'+tq+'</span>';actionBtn='<button class="btn btn-glass btn-sm" onclick="openPWLSetup(\''+oid+'\')"><i class="bx bx-play"></i> Start</button>';}
+                else{statusBadge='<span class="badge badge-danger">No Stock</span>';actionBtn='<button class="btn btn-glass btn-sm" onclick="openPWLSetup(\''+oid+'\')"><i class="bx bx-play"></i> Start</button>';}
+
+                h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(a.obdNos[i]||'-')+'</td><td><span class="badge badge-info">'+(obd.materials||[]).length+'</span></td><td style="font-family:var(--font-display)">'+tl+'</td><td style="font-family:var(--font-display)">'+tp+'</td><td style="font-family:var(--font-display)">'+loadedQ+'</td><td>'+actionBtn+'</td></tr>';
+            });
+        });
+        h+='</tbody></table></div></div>';
+    }
+
+    // ===== SECTION 3: P&L DONE =====
+    var pwlDone=DB.filter('loaded_vehicles',function(l){return l.type==='pickandload';}).reverse();
+    h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-check-circle"></i> P&L Done ('+pwlDone.length+')</div>';
+    if(!pwlDone.length)h+='<div style="color:var(--text-muted);padding:16px;text-align:center">No P&L completed yet</div>';
+    else{
+        h+='<div class="search-box" style="margin-bottom:8px"><i class="bx bx-search"></i><input type="text" id="pwlDoneSearch" placeholder="Search LOAD-202601, vehicle..." oninput="searchPWLDone()"></div>';
+        h+='<div id="pwlDoneTable">'+buildPWLDoneTable(pwlDone)+'</div>';
+    }
+    h+='</div>';
+    setHtml(h);
+}
+
+function buildPWLDoneTable(list){
+    var h='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Load No</th><th>Vehicle</th><th>Security</th><th>OBD</th><th>Items</th><th>Status</th><th>By</th><th>Time</th><th>Action</th></tr></thead><tbody>';
+    if(!list.length)h+='<tr><td colspan="9" style="text-align:center;color:var(--text-muted);padding:20px">No records</td></tr>';
+    else list.forEach(function(l){
+        var sb=l.loadStatus==='Fully Loaded'?'<span class="badge badge-success">Full</span>':'<span class="badge badge-warning">Partial</span>';
+        var ot='';(l.obdNos||[]).forEach(function(n){ot+='<span class="badge badge-info" style="margin:1px;font-size:9px">'+esc(n)+'</span>';});
+        h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(l.loadNo)+'</td><td><strong>'+esc(l.vehicleNo)+'</strong></td><td style="font-size:11px">'+esc(l.securityNo||'-')+'</td><td>'+ot+'</td><td><span class="badge badge-info">'+(l.scannedItems||[]).length+'</span></td><td>'+sb+'</td><td style="font-size:11px">'+esc(l.loadedByName)+'</td><td style="font-size:10px;color:var(--text-muted)">'+fmtDT(l.loadedAt)+'</td><td><button class="btn btn-glass btn-sm" onclick="viewPWLDoneDetail(\''+l.id+'\')"><i class="bx bx-eye"></i></button></td></tr>';
+    });
+    h+='</tbody></table></div>';return h;
+}
+function searchPWLDone(){
+    var q=(document.getElementById('pwlDoneSearch').value||'').trim().toUpperCase();
+    var list=DB.filter('loaded_vehicles',function(l){return l.type==='pickandload';}).reverse();
+    if(q)list=list.filter(function(l){return(l.loadNo||'').toUpperCase().indexOf(q)>-1||(l.vehicleNo||'').toUpperCase().indexOf(q)>-1;});
+    document.getElementById('pwlDoneTable').innerHTML=buildPWLDoneTable(list);
+}
+
+// ===== ASSIGN =====
+function doPWLAssign(){
+    var sel=document.getElementById('pwlAssignUser');if(!sel.value){showToast('Select user','error');return;}
+    var userName=sel.options[sel.selectedIndex].getAttribute('data-name');
+    var checks=document.querySelectorAll('.pwl-chk:checked');if(!checks.length){showToast('Select OBDs','error');return;}
+    var obdIds=[],obdNos=[];
+    checks.forEach(function(c){obdIds.push(c.value);obdNos.push(c.getAttribute('data-no'));});
+    DB.add('picking_assignments',{obdIds:obdIds,obdNos:obdNos,assignedTo:sel.value,assignedToName:userName,status:'Assigned',type:'pickandload',assignedAt:new Date().toISOString()});
+    obdIds.forEach(function(oid){
+        DB.update('obd_data',oid,{status:'P&L Assigned'});
+        var obd=DB.find('obd_data',oid);
+        lockLocationsForOBD(oid,obd?obd.obdNo:'');
+    });
+    logAction('P&L','ASSIGN',obdNos.join(', ')+' P&L assigned to '+userName);
+    showToast(obdIds.length+' OBDs assigned with locks!','success');renderPickingWithLoading();
+}
+function unassignPWL(aid){
+    if(!confirm('Unassign?'))return;
+    var a=DB.find('picking_assignments',aid);if(!a)return;
+    DB.update('picking_assignments',aid,{status:'Unassigned'});
+    (a.obdIds||[]).forEach(function(oid){DB.update('obd_data',oid,{status:'Pending'});releaseLocksForOBD(oid);});
+    logAction('P&L','UNASSIGN','Unassigned from '+a.assignedToName);showToast('Unassigned','success');renderPickingWithLoading();
+}
+
+// ===== STEP 1: VEHICLE + SECURITY =====
+function openPWLSetup(obdId){
+    var obd=DB.find('obd_data',obdId);if(!obd)return;
+    window._pwlOBDId=obdId;
+    var tq=0;(obd.materials||[]).forEach(function(m){tq+=m.qty;});
+    var h='<div style="margin-bottom:12px;padding:10px;background:var(--accent-dim);border-radius:8px;border-left:3px solid var(--accent)">';
+    h+='<div style="font-weight:700;color:var(--accent);font-family:var(--font-display)">'+esc(obd.obdNo)+'</div>';
+    h+='<div style="font-size:12px;color:var(--text-muted)">'+(obd.materials||[]).length+' materials | '+tq+' qty</div></div>';
+    h+='<div class="form-row">';
+    h+='<div class="form-group"><label>Vehicle Number <span class="req">*</span></label><input type="text" id="pwlVehNo" class="form-input" placeholder="MH-12-AB-1234" style="text-transform:uppercase"></div>';
+    h+='<div class="form-group"><label>Security / LR No <span class="req">*</span></label><input type="text" id="pwlSecNo" class="form-input" placeholder="SEC-001" style="text-transform:uppercase"></div>';
+    h+='</div>';
+    showModal('P&L Setup — '+obd.obdNo,h,'sm',
+        '<button class="btn btn-glass" onclick="closeModal()">Cancel</button>'+
+        '<button class="btn btn-glass" style="background:var(--accent);color:#000;font-weight:600" onclick="openPWLPicking()"><i class="bx bx-box"></i> Next: Pick</button>');
+}
+
+// ===== STEP 2: PICKING =====
+function openPWLPicking(){
+    var vehNo=(document.getElementById('pwlVehNo').value||'').trim().toUpperCase();
+    var secNo=(document.getElementById('pwlSecNo').value||'').trim().toUpperCase();
+    if(!vehNo){showToast('Enter vehicle number','error');return;}
+    if(!secNo){showToast('Enter security number','error');return;}
+    var obdId=window._pwlOBDId;
+    var obd=DB.find('obd_data',obdId);if(!obd)return;
+    var allLocks=DB.filter('location_locks',function(l){return l.obdId===obdId&&l.status==='Locked';});
+
+    // Build picked state from locks
+    var pickedItems=[];
+    obd.materials.forEach(function(m){
+        var matLocks=allLocks.filter(function(l){return l.ean===m.ean;});
+        var tp=0;matLocks.forEach(function(l){tp+=l.pickedQty;});
+        var locs=[];matLocks.forEach(function(l){if(l.pickedQty>0)locs.push({rack:l.rack,qty:l.pickedQty});});
+        pickedItems.push({material:m.material,ean:m.ean,requiredQty:m.qty,pickedQty:tp,locations:locs});
+    });
+
+    window._pwlData={obdId:obdId,obdNo:obd.obdNo,vehicleNo:vehNo,securityNo:secNo,materials:obd.materials,pickedItems:pickedItems,scannedItems:[],source:'new'};
+    closeModal();renderPWLPickModal();
+}
+
+function resumePWLPicking(obdId){
+    var obd=DB.find('obd_data',obdId);if(!obd)return;
+    var allLocks=DB.filter('location_locks',function(l){return l.obdId===obdId&&l.status==='Locked';});
+    var pickedItems=[];
+    obd.materials.forEach(function(m){
+        var matLocks=allLocks.filter(function(l){return l.ean===m.ean;});
+        var tp=0;matLocks.forEach(function(l){tp+=l.pickedQty;});
+        var locs=[];matLocks.forEach(function(l){if(l.pickedQty>0)locs.push({rack:l.rack,qty:l.pickedQty});});
+        pickedItems.push({material:m.material,ean:m.ean,requiredQty:m.qty,pickedQty:tp,locations:locs});
+    });
+    // Try to get vehicle/sec from any partial
+    var partials=DB.filter('loaded_vehicles',function(lv){return lv.type==='pickandload'&&lv.loadStatus==='Partial';var ids=lv.obdIds;if(!Array.isArray(ids))ids=[ids];return ids.indexOf(obdId)>-1;});
+    var vehNo='?',secNo='?';var loadNo='';
+    if(partials.length){var pl=partials[partials.length-1];vehNo=pl.vehicleNo||'?';secNo=pl.securityNo||'?';loadNo=pl.loadNo||'';window._pwlPartialId=pl.id;}
+    window._pwlData={obdId:obdId,obdNo:obd.obdNo,vehicleNo:vehNo,securityNo:secNo,materials:obd.materials,pickedItems:pickedItems,scannedItems:[],source:loadNo?'continue':'new',loadNo:loadNo};
+    renderPWLPickModal();
+}
+
+function renderPWLPickModal(){
+    var pd=window._pwlData;if(!pd)return;
+    var h='<div style="margin-bottom:10px;display:flex;flex-wrap:wrap;gap:8px;align-items:center">';
+    h+='<div style="padding:6px 12px;background:var(--accent-dim);border-radius:6px"><strong style="color:var(--accent);font-family:var(--font-display)">'+esc(pd.obdNo)+'</strong></div>';
+    h+='<div style="padding:6px 12px;background:var(--bg-secondary);border-radius:6px"><i class="bx bx-truck"></i> '+esc(pd.vehicleNo)+'</div>';
+    h+='<div style="padding:6px 12px;background:var(--bg-secondary);border-radius:6px"><i class="bx bx-shield-quarter"></i> '+esc(pd.securityNo)+'</div>';
+    h+='</div>';
+    h+='<div class="card-title"><i class="bx bx-box"></i> Pick Materials — Click to pick from locked locations</div>';
+    h+='<div class="mat-cards-grid" id="pwlMatCards">';
+    pd.pickedItems.forEach(function(m,idx){
+        var allDone=m.pickedQty>=m.requiredQty;
+        var partial=m.pickedQty>0&&!allDone;
+        var noLock=m.pickedQty===0;
+        var cs='';if(allDone)cs='background:var(--success-dim);border-color:var(--success)';else if(noLock)cs='background:rgba(255,71,87,0.08);border-color:var(--danger)';else if(partial)cs='background:rgba(255,165,2,0.08);border-color:var(--warning)';
+        var st='';if(allDone)st='<span class="status-dot green"></span> Picked '+m.pickedQty;else if(partial)st='<span class="status-dot yellow"></span> Partial '+m.pickedQty+'/'+m.requiredQty;else if(noLock)st='<span class="status-dot red"></span> No Stock';else st='<span class="status-dot green"></span> Ready';
+        h+='<div class="mat-card" style="'+cs+'" onclick="showPWLPickLocs('+idx+')">';
+        h+='<div class="mc-name"><i class="bx bx-box" style="color:var(--accent)"></i> '+esc(m.material)+'</div>';
+        h+='<div class="mc-ean">'+esc(m.ean)+'</div>';
+        h+='<div class="mc-qty">Need: <strong>'+m.requiredQty+'</strong> | Picked: <strong style="color:'+(noLock?'var(--danger)':'var(--success)')+'">'+m.pickedQty+'</strong></div>';
+        h+='<div class="mc-status">'+st+'</div></div>';
+    });
+    h+='</div>';
+
+    var totalPicked=0,totalReq=0;pd.pickedItems.forEach(function(m){totalPicked+=m.pickedQty;totalReq+=m.requiredQty;});
+    var canGo=totalPicked>0;
+    h+='<div style="display:flex;gap:8px;margin-top:14px;justify-content:flex-end">';
+    h+='<button class="btn btn-glass" onclick="closeModal()"><i class="bx bx-x"></i> Cancel</button>';
+    h+='<button class="btn btn-glass" onclick="savePWLPartialPick()"><i class="bx bx-save"></i> Save Partial</button>';
+    h+='<button class="btn btn-glass" style="background:var(--accent);color:#000;font-weight:700" '+(canGo?'':'disabled')+' onclick="goToPWLLoading()"><i class="bx bx-truck"></i> Go Loading ('+totalPicked+')</button>';
+    h+='</div>';
+    showModal('P&L Pick — '+pd.obdNo,h,'xl','');
+}
+
+function showPWLPickLocs(matIdx){
+    var pd=window._pwlData;if(!pd)return;
+    var m=pd.pickedItems[matIdx];
+    var matLocks=DB.filter('location_locks',function(l){return l.obdId===pd.obdId&&l.ean===m.ean&&l.status==='Locked';});
+    if(!matLocks.length){
+        showModal('No Location', '<div style="text-align:center;padding:20px"><i class="bx bx-map-pin" style="font-size:36px;color:var(--danger);opacity:.5"></i><p style="color:var(--text-muted);margin:10px 0">No stock locked for this material</p></div>','sm','<button class="btn btn-glass" onclick="closeModal();renderPWLPickModal()">Back</button>');return;
+    }
+    var remaining=m.requiredQty-m.pickedQty;
+    var h='<div style="margin-bottom:10px;padding:10px;background:var(--bg-secondary);border-radius:8px">';
+    h+='<strong>'+esc(m.material)+'</strong> | EAN: <span style="font-family:var(--font-display)">'+esc(m.ean)+'</span><br>';
+    h+='<span style="color:var(--accent)">Need: '+m.requiredQty+'</span> | <span style="color:var(--success)">Picked: '+m.pickedQty+'</span> | <span style="color:var(--warning)">Remaining: '+remaining+'</span></div>';
+    h+='<div class="loc-cards-grid">';
+    matLocks.forEach(function(lock,idx){
+        var canPick=lock.lockedQty-lock.pickedQty;var isDone=lock.pickedQty>=lock.lockedQty;
+        h+='<div class="loc-card '+(isDone?'lc-picked':'')+'">';
+        h+='<div class="lc-rack"><i class="bx bx-lock"></i> '+esc(lock.rack)+'</div>';
+        h+='<div class="lc-avail">Locked: <strong>'+lock.lockedQty+'</strong> | Picked: <strong>'+lock.pickedQty+'</strong></div>';
+        if(canPick>0&&remaining>0){
+            var mx=Math.min(canPick,remaining);
+            h+='<input type="number" id="pwlPickQty_'+idx+'" value="'+mx+'" min="1" max="'+mx+'" style="width:100%;margin-top:6px;padding:6px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);text-align:center;font-size:13px">';
+            h+='<button class="btn btn-glass btn-sm" style="width:100%;margin-top:6px;justify-content:center" onclick="doPWLPick(\''+lock.id+'\','+matIdx+','+idx+')"><i class="bx bx-check"></i> Pick</button>';
+        }else if(isDone){h+='<div style="text-align:center;color:var(--success);font-size:11px;margin-top:6px"><i class="bx bx-check-circle"></i> Done</div>';}
+        else{h+='<div style="text-align:center;color:var(--text-muted);font-size:11px;margin-top:6px">—</div>';}
+        h+='</div>';
+    });
+    h+='</div>';
+    showModal('Pick — '+m.material,h,'lg','<button class="btn btn-glass" onclick="closeModal();renderPWLPickModal()"><i class="bx bx-arrow-back"></i> Back</button>');
+}
+
+function doPWLPick(lockId,matIdx,dispIdx){
+    var pd=window._pwlData;if(!pd)return;
+    var m=pd.pickedItems[matIdx];
+    var lock=DB.find('location_locks',lockId);if(!lock||lock.status!=='Locked'){showToast('Lock not found','error');return;}
+    var qty=parseInt((document.getElementById('pwlPickQty_'+dispIdx)||{}).value)||0;
+    if(qty<=0){showToast('Enter qty','error');return;}
+    var canPick=lock.lockedQty-lock.pickedQty;if(qty>canPick){showToast('Max '+canPick,'error');return;}
+    if(m.pickedQty+qty>m.requiredQty){showToast('Max '+m.requiredQty,'error');return;}
+    DB.update('location_locks',lockId,{pickedQty:lock.pickedQty+qty});
+    m.pickedQty+=qty;
+    var exists=false;m.locations.forEach(function(l){if(l.rack===lock.rack){l.qty+=qty;exists=true;}});
+    if(!exists)m.locations.push({rack:lock.rack,qty:qty});
+    showToast('Picked '+qty+' from '+lock.rack,'success');closeModal();renderPWLPickModal();
+}
+
+function savePWLPartialPick(){closeModal();showToast('Progress saved!','success');renderPickingWithLoading();}
+
+// ===== STEP 3: GO LOADING =====
+function goToPWLLoading(){
+    var pd=window._pwlData;if(!pd)return;
+    // Build expected from PICKED items only
+    var expected=[];
+    pd.pickedItems.forEach(function(m){
+        if(m.pickedQty>0)expected.push({obdNo:pd.obdNo,material:m.material,ean:m.ean,requiredQty:m.pickedQty,scannedQty:0});
+    });
+    if(!expected.length){showToast('Pick at least one item','error');return;}
+    pd.expected=expected;pd.scannedItems=[];
+    closeModal();renderPWLLoadingScan();
+}
+
+function continuePWL(partialId){
+    var pl=DB.find('loaded_vehicles',partialId);if(!pl){showToast('Record not found','error');return;}
+    var obdIds=pl.obdIds;if(!Array.isArray(obdIds))obdIds=[obdIds];
+    var obdNos=pl.obdNos;if(!Array.isArray(obdNos))obdNos=[obdNos];
+    var obdId=obdIds[0];var obd=DB.find('obd_data',obdId);if(!obd){showToast('OBD not found','error');return;}
+    var allLocks=DB.filter('location_locks',function(l){return l.obdId===obdId&&l.status==='Locked';});
+    var pickedItems=[];obd.materials.forEach(function(m){
+        var tp=0;allLocks.filter(function(l){return l.ean===m.ean;}).forEach(function(l){tp+=l.pickedQty;});
+        var locs=[];allLocks.filter(function(l){return l.ean===m.ean&&l.pickedQty>0;}).forEach(function(l){locs.push({rack:l.rack,qty:l.pickedQty});});
+        pickedItems.push({material:m.material,ean:m.ean,requiredQty:m.qty,pickedQty:tp,locations:locs});
+    });
+    var expected=[];pickedItems.forEach(function(m){if(m.pickedQty>0)expected.push({obdNo:obd.obdNo,material:m.material,ean:m.ean,requiredQty:m.pickedQty,scannedQty:0});});
+    window._pwlData={obdId:obdIds,obdNo:obdNos,vehicleNo:pl.vehicleNo,securityNo:pl.securityNo||'',materials:obd.materials,pickedItems:pickedItems,scannedItems:JSON.parse(JSON.stringify(pl.scannedItems||[])),expected:expected,source:'continue',loadNo:pl.loadNo,partialLoadId:partialId};
+    renderPWLLoadingScan();
+}
+
+// ===== LOADING SCAN (Same format as loading module) =====
+function renderPWLLoadingScan(){
+    var pd=window._pwlData;if(!pd)return;
+    var obdTags='';if(Array.isArray(pd.obdNo))pd.obdNo.forEach(function(n){obdTags+='<span class="badge badge-info" style="font-size:9px">'+esc(n)+'</span>';});else obdTags='<span class="badge badge-info">'+esc(pd.obdNo)+'</span>';
+
+    var h='<div style="margin-bottom:10px;display:flex;flex-wrap:wrap;gap:8px;align-items:center">';
+    h+='<div style="padding:6px 12px;background:var(--accent-dim);border-radius:6px;display:flex;flex-wrap:wrap;gap:4px;align-items:center"><strong style="color:var(--accent);font-size:11px">OBDs:</strong> '+obdTags+'</div>';
+    h+='<div style="padding:6px 12px;background:var(--bg-secondary);border-radius:6px"><i class="bx bx-truck"></i> '+esc(pd.vehicleNo)+'</div>';
+    h+='<div style="padding:6px 12px;background:var(--bg-secondary);border-radius:6px"><i class="bx bx-shield-quarter"></i> '+esc(pd.securityNo)+'</div>';
+    if(pd.source==='continue')h+='<div style="padding:6px 12px;background:rgba(255,165,2,0.12);border-radius:6px;color:var(--warning)"><i class="bx bx-reload"></i> Continuing</div>';
+    h+='</div>';
+
+    // Picked summary bar
+    var totalPicked=0;pd.expected.forEach(function(e){totalPicked+=e.requiredQty;});
+    h+='<div style="padding:8px 12px;background:var(--bg-secondary);border-radius:6px;margin-bottom:10px;font-size:11px;color:var(--text-muted)"><i class="bx bx-info-circle" style="color:var(--accent)"></i> You picked <strong style="color:var(--accent)">'+totalPicked+'</strong> items — scan exactly <strong style="color:var(--success)">'+totalPicked+'</strong> to load into vehicle</div>';
+
+    h+='<div class="search-box" style="margin-bottom:8px"><i class="bx bx-search"></i><input type="text" id="pwlScanInput" placeholder="Scan EAN..." onkeydown="if(event.key===\'Enter\')doPWLScan()" autofocus></div>';
+    h+='<div style="display:flex;gap:6px;margin-bottom:12px">';
+    h+='<button class="btn btn-glass btn-sm" onclick="APP.scanCallback=function(c){document.getElementById(\'pwlScanInput\').value=c;doPWLScan();};document.getElementById(\'scannerModal\').style.display=\'flex\'"><i class="bx bx-qr"></i> Scanner</button>';
+    h+='<button class="btn btn-glass btn-sm" onclick="showPWLManualEntry()"><i class="bx bx-plus"></i> Manual</button>';
+    h+='</div>';
+
+    h+='<div class="table-wrapper" style="max-height:260px;overflow-y:auto"><table class="data-table"><thead><tr><th>#</th><th>EAN</th><th>Material</th><th>Description</th><th>Qty</th><th>Status</th><th>X</th></tr></thead><tbody id="pwlScanBody"></tbody></table></div>';
+    h+='<div id="pwlScanSummary" style="margin-top:12px"></div>';
+    h+='<div class="form-actions" style="margin-top:12px">';
+    h+='<button class="btn btn-glass" onclick="savePWLPartialLoad()"><i class="bx bx-save"></i> Partial</button>';
+    h+='<button class="btn btn-glass" style="background:var(--accent);color:#000;font-weight:600" onclick="submitPWLLoading()"><i class="bx bx-check-double"></i> Submit Loading</button>';
+    h+='</div>';
+
+    showModal('P&L Loading — '+esc(pd.vehicleNo),h,'xl','<button class="btn btn-glass" onclick="closeModal()"><i class="bx bx-x"></i> Cancel</button>');
+    renderPWLScanTable();
+}
+
+function doPWLScan(){
+    var inp=document.getElementById('pwlScanInput');if(!inp)return;
+    var val=inp.value.trim();inp.value='';if(!val)return;
+    var pd=window._pwlData;if(!pd)return;var uv=val.toUpperCase();
+    var found=null;for(var i=0;i<pd.expected.length;i++){var e=pd.expected[i];if(e.ean&&e.ean.toUpperCase()===uv&&e.scannedQty<e.requiredQty){found=e;break;}}
+    var mm=DB.filter('material_master',function(m){return m.ean&&m.ean.toUpperCase()===uv;});
+    if(found){
+        found.scannedQty++;
+        pd.scannedItems.push({ean:found.ean,material:found.material,description:mm.length?mm[0].description:'',qty:1,inOBD:true,obdNo:found.obdNo,scannedAt:new Date().toISOString()});
+        showToast(found.material+' — Match ✓','success');
+    }else{
+        pd.scannedItems.push({ean:uv,material:mm.length?mm[0].material:val,description:mm.length?mm[0].description:'',qty:1,inOBD:false,obdNo:'—',scannedAt:new Date().toISOString()});
+        showToast((mm.length?mm[0].material:val)+' — Not in OBD ✗','warning');
+    }
+    renderPWLScanTable();setTimeout(function(){var i=document.getElementById('pwlScanInput');if(i)i.focus();},100);
+}
+
+function showPWLManualEntry(){
+    var h='<div class="form-row">';
+    h+='<div class="form-group"><label>EAN</label><input type="text" id="pwlManEan" class="form-input" placeholder="EAN" style="font-family:var(--font-display)" onblur="var e=this.value.trim().toUpperCase();if(e.length>5){var mm=DB.filter(\'material_master\',function(m){return m.ean&&m.ean.toUpperCase()===e;});if(mm.length){if(!document.getElementById(\'pwlManMat\').value)document.getElementById(\'pwlManMat\').value=mm[0].material||\'\';if(!document.getElementById(\'pwlManDesc\').value)document.getElementById(\'pwlManDesc\').value=mm[0].description||\'\';}}"></div>';
+    h+='<div class="form-group"><label>Material</label><input type="text" id="pwlManMat" class="form-input" placeholder="Material"></div>';
+    h+='<div class="form-group"><label>Description</label><input type="text" id="pwlManDesc" class="form-input" placeholder="Description"></div>';
+    h+='<div class="form-group"><label>Qty</label><input type="number" id="pwlManQty" class="form-input" value="1" min="1"></div>';
+    h+='</div>';
+    showModal('Manual Entry',h,'sm','<button class="btn btn-glass" onclick="closeModal();renderPWLLoadingScan()">Cancel</button><button class="btn btn-glass" onclick="addPWLManualItem()"><i class="bx bx-check"></i> Add</button>');
+}
+function addPWLManualItem(){
+    var ean=(document.getElementById('pwlManEan').value||'').trim().toUpperCase();
+    var mat=(document.getElementById('pwlManMat').value||'').trim();
+    var desc=(document.getElementById('pwlManDesc').value||'').trim();
+    var qty=parseInt(document.getElementById('pwlManQty').value)||0;
+    if(!mat&&!ean){showToast('Enter data','error');return;}if(qty<=0){showToast('Enter qty','error');return;}
+    var pd=window._pwlData;var inOBD=false,obdNo='—';
+    pd.expected.forEach(function(e){if((e.ean&&e.ean.toUpperCase()===ean)||(e.material||'').toUpperCase()===mat.toUpperCase()){inOBD=true;obdNo=e.obdNo;e.scannedQty+=qty;}});
+    pd.scannedItems.push({ean:ean,material:mat,description:desc,qty:qty,inOBD:inOBD,obdNo:obdNo,scannedAt:new Date().toISOString()});
+    closeModal();renderPWLLoadingScan();showToast((inOBD?'Match ✓ ':'Not in OBD ✗ ')+mat+' x '+qty,'info');
+}
+
+function updatePWLScanQty(idx,nq){var pd=window._pwlData;if(!pd)return;var item=pd.scannedItems[idx];if(!item)return;nq=parseInt(nq)||1;if(nq<1)nq=1;var diff=nq-item.qty;if(item.inOBD)pd.expected.forEach(function(e){if(e.ean===item.ean)e.scannedQty+=diff;});item.qty=nq;renderPWLScanTable();}
+function removePWLScanItem(idx){var pd=window._pwlData;if(!pd)return;var item=pd.scannedItems[idx];if(!item)return;if(item.inOBD)pd.expected.forEach(function(e){if(e.ean===item.ean)e.scannedQty-=item.qty;});pd.scannedItems.splice(idx,1);renderPWLScanTable();}
+
+function renderPWLScanTable(){
+    var pd=window._pwlData;if(!pd)return;var body=document.getElementById('pwlScanBody');if(!body)return;var h='';
+    pd.scannedItems.forEach(function(s,i){
+        var rc=s.inOBD?'':'scan-row-red';
+        var sb=s.inOBD?'<span class="badge badge-success" style="font-size:9px;padding:2px 6px"><i class="bx bx-check" style="font-size:10px"></i> Match</span>':'<span class="badge badge-danger" style="font-size:9px;padding:2px 6px"><i class="bx bx-x" style="font-size:10px"></i> Not in OBD</span>';
+        h+='<tr class="'+rc+'"><td style="font-size:11px;color:var(--text-muted);text-align:center;width:30px">'+(i+1)+'</td><td style="font-family:var(--font-display);font-size:10px;width:120px">'+esc(s.ean)+'</td><td style="font-size:12px;font-weight:500">'+esc(s.material)+'</td><td style="font-size:11px;color:var(--text-muted);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(s.description)+'</td><td style="width:70px"><input type="number" value="'+s.qty+'" min="1" style="width:55px;padding:4px 6px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);text-align:center;font-size:12px;font-family:var(--font-display)" onchange="updatePWLScanQty('+i+',parseInt(this.value)||1)"></td><td style="text-align:center;width:100px">'+sb+'</td><td style="width:30px;text-align:center"><button class="btn btn-danger btn-sm" style="width:24px;height:24px;padding:0;min-width:24px" onclick="removePWLScanItem('+i+')"><i class="bx bx-trash" style="font-size:10px"></i></button></td></tr>';
+    });
+    if(!pd.scannedItems.length)h='<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:24px"><i class="bx bx-scan" style="font-size:24px;display:block;margin-bottom:6px;opacity:0.3"></i>Scan EAN to load</td></tr>';
+    body.innerHTML=h;
+    var sd=document.getElementById('pwlScanSummary');if(!sd)return;
+    var ts=0,mq=0,nq=0,mc=0;pd.scannedItems.forEach(function(s){ts+=s.qty;if(s.inOBD)mq+=s.qty;else nq+=s.qty;});
+    pd.expected.forEach(function(e){if(e.scannedQty!==e.requiredQty)mc++;});
+    var sh='<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">';
+    sh+='<div style="text-align:center;padding:8px;background:var(--bg-secondary);border-radius:6px"><div style="font-size:18px;font-weight:700;color:var(--accent);font-family:var(--font-display)">'+ts+'</div><div style="font-size:10px;color:var(--text-muted)">Scanned</div></div>';
+    sh+='<div style="text-align:center;padding:8px;background:rgba(46,213,115,0.1);border-radius:6px"><div style="font-size:18px;font-weight:700;color:var(--success);font-family:var(--font-display)">'+mq+'</div><div style="font-size:10px;color:var(--text-muted)">Match</div></div>';
+    sh+='<div style="text-align:center;padding:8px;background:rgba(255,71,87,0.1);border-radius:6px"><div style="font-size:18px;font-weight:700;color:var(--danger);font-family:var(--font-display)">'+nq+'</div><div style="font-size:10px;color:var(--text-muted)">Not in OBD</div></div>';
+    sh+='<div style="text-align:center;padding:8px;background:'+(mc?'rgba(255,71,87,0.1)':'rgba(46,213,115,0.1)')+';border-radius:6px"><div style="font-size:18px;font-weight:700;color:'+(mc?'var(--danger)':'var(--success)')+';font-family:var(--font-display)">'+(mc===0?'✓ OK':'⚠ '+mc)+'</div><div style="font-size:10px;color:var(--text-muted)">Mismatch</div></div>';
+    sh+='</div>';sd.innerHTML=sh;
+}
+
+// ===== PARTIAL SAVE =====
+function savePWLPartialLoad(){
+    var pd=window._pwlData;if(!pd)return;if(!pd.scannedItems.length){showToast('Scan at least one item','error');return;}
+    var obdIds=Array.isArray(pd.obdId)?pd.obdId:[pd.obdId];var obdNos=Array.isArray(pd.obdNo)?pd.obdNo:[pd.obdNo];
+    var loadNo='';
+    if(pd.source==='continue'&&pd.partialLoadId){var old=DB.find('loaded_vehicles',pd.partialLoadId);loadNo=old?old.loadNo:'';DB.update('loaded_vehicles',pd.partialLoadId,{scannedItems:pd.scannedItems,lastScannedAt:new Date().toISOString()});}
+    else{loadNo=pd.loadNo||genLoadNo();DB.add('loaded_vehicles',{loadNo:loadNo,vehicleNo:pd.vehicleNo,securityNo:pd.securityNo,obdIds:obdIds,obdNos:obdNos,loadedBy:APP.currentUser.id,loadedByName:APP.currentUser.name,loadedAt:new Date().toISOString(),lastScannedAt:new Date().toISOString(),scannedItems:pd.scannedItems,loadStatus:'Partial',mismatch:false,type:'pickandload'});}
+    logAction('P&L','PARTIAL',obdNos.join(', ')+' partial. '+loadNo);showToast('Partial saved: '+loadNo,'success');closeModal();renderPickingWithLoading();
+}
+
+// ===== SUBMIT =====
+function submitPWLLoading(){
+    var pd=window._pwlData;if(!pd)return;if(!pd.scannedItems.length){showToast('Scan at least one item','error');return;}
+    var mismatch=false;pd.expected.forEach(function(e){if(e.scannedQty!==e.requiredQty)mismatch=true;});
+    var hasNotInOBD=pd.scannedItems.some(function(s){return !s.inOBD;});
+    if(mismatch||hasNotInOBD){showPWLMismatchBlock(pd);return;}
+    doPWLFinalSubmit(pd);
+}
+
+function showPWLMismatchBlock(pd){
+    var mh='<div style="margin-bottom:12px;padding:12px;background:rgba(255,71,87,0.1);border:1px solid var(--danger);border-radius:8px">';
+    mh+='<div style="font-weight:700;color:var(--danger);margin-bottom:8px"><i class="bx bx-error-circle"></i> Picked ≠ Loaded — Cannot Submit!</div>';
+    pd.expected.forEach(function(e){if(e.scannedQty!==e.requiredQty){var d=e.requiredQty-e.scannedQty;mh+='<div style="font-size:11px;padding:2px 0;color:var(--text-muted)">→ '+esc(e.material)+': Picked <strong>'+e.requiredQty+'</strong>, Loaded <strong style="color:var(--danger)">'+e.scannedQty+'</strong>, Diff: <strong style="color:var(--danger)">'+(d>0?'-'+d:'+'+Math.abs(d))+'</strong></div>';}});
+    var nio=pd.scannedItems.filter(function(s){return !s.inOBD;});
+    if(nio.length){mh+='<div style="font-size:12px;margin-top:6px;color:var(--warning)"><strong>Extra items:</strong></div>';nio.forEach(function(s){mh+='<div style="font-size:11px;color:var(--text-muted)">→ '+esc(s.material)+' ('+esc(s.ean)+') x '+s.qty+'</div>';});}
+    mh+='</div>';
+    mh+='<div class="form-group"><label>Reason <span class="req">*</span></label><textarea id="pwlMisReason" class="form-input" placeholder="Explain mismatch..."></textarea></div>';
+    showModal('P&L Mismatch — Approval Required',mh,'lg','<button class="btn btn-glass" onclick="closeModal();renderPWLLoadingScan()"><i class="bx bx-arrow-back"></i> Back</button><button class="btn btn-glass" style="background:var(--warning);color:#000;font-weight:600" onclick="requestPWLApproval()"><i class="bx bx-send"></i> Request Approval</button>');
+}
+
+function requestPWLApproval(){
+    var pd=window._pwlData;if(!pd)return;
+    var reason=(document.getElementById('pwlMisReason')||{}).value||'';if(!reason.trim()){showToast('Enter reason','error');return;}
+    var obdIds=Array.isArray(pd.obdId)?pd.obdId:[pd.obdId];var obdNos=Array.isArray(pd.obdNo)?pd.obdNo:[pd.obdNo];
+    var loadNo=pd.loadNo||genLoadNo();
+        var newPWLApproval=DB.add('loading_approvals',{loadNo:loadNo,vehicleNo:pd.vehicleNo,securityNo:pd.securityNo,obdIds:obdIds,obdNos:obdNos,requestedBy:APP.currentUser.id,requestedByName:APP.currentUser.name,reason:reason,scannedItems:pd.scannedItems,expected:pd.expected,status:'Pending',type:'pickandload',createdAt:new Date().toISOString()});
+    if(pd.source==='continue'&&pd.partialLoadId)DB.remove('loaded_vehicles',pd.partialLoadId);
+    // Release locks and mark done
+    obdIds.forEach(function(oid){releaseLocksForOBD(oid);DB.update('obd_data',oid,{status:'P&L Done'});});
+    DB.filter('picking_assignments',function(a){return a.type==='pickandload'&&a.status==='Assigned';}).forEach(function(a){var ni=(a.obdIds||[]).filter(function(o){return obdIds.indexOf(o)===-1;});var nn=(a.obdNos||[]).filter(function(n,i){return obdIds.indexOf(a.obdIds[i])===-1;});if(!ni.length)DB.update('picking_assignments',a.id,{status:'Done'});else DB.update('picking_assignments',a.id,{obdIds:ni,obdNos:nn});});
+    addNotif('P&L Approval: '+loadNo+' for '+pd.vehicleNo,'warning',null,newPWLApproval.id,'qty-mismatch');logAction('P&L','APPROVAL_REQ',loadNo);
+}
+
+function doPWLFinalSubmit(pd){
+    var obdIds=Array.isArray(pd.obdId)?pd.obdId:[pd.obdId];var obdNos=Array.isArray(pd.obdNo)?pd.obdNo:[pd.obdNo];
+    var loadNo='';
+    if(pd.source==='continue'&&pd.partialLoadId){var old=DB.find('loaded_vehicles',pd.partialLoadId);loadNo=old?old.loadNo:genLoadNo();DB.update('loaded_vehicles',pd.partialLoadId,{loadNo:loadNo,scannedItems:pd.scannedItems,loadStatus:'Fully Loaded',mismatch:false,loadedAt:new Date().toISOString(),lastScannedAt:new Date().toISOString()});}
+    else{loadNo=pd.loadNo||genLoadNo();DB.add('loaded_vehicles',{loadNo:loadNo,vehicleNo:pd.vehicleNo,securityNo:pd.securityNo,obdIds:obdIds,obdNos:obdNos,loadedBy:APP.currentUser.id,loadedByName:APP.currentUser.name,loadedAt:new Date().toISOString(),lastScannedAt:new Date().toISOString(),scannedItems:pd.scannedItems,loadStatus:'Fully Loaded',mismatch:false,type:'pickandload'});}
+    // ★ DEDUCT FROM LOCATION MASTER (based on picked/loaded qty) ★
+    pd.pickedItems.forEach(function(m){
+        if(m.pickedQty<=0)return;
+        (m.locations||[]).forEach(function(loc){
+            var locRecs=DB.filter('location_master',function(l){return l.rack===loc.rack&&l.ean===m.ean&&l.quantity>0;});
+            var rem=loc.qty;locRecs.forEach(function(lr){if(rem<=0)return;var d=Math.min(lr.quantity,rem);DB.update('location_master',lr.id,{quantity:lr.quantity-d});rem-=d;});
+            DB.filter('location_master',function(l){return l.rack===loc.rack&&l.ean===m.ean&&l.quantity<=0;}).forEach(function(zl){DB.remove('location_master',zl.id);});
+        });
+    });
+    // Release locks
+    obdIds.forEach(function(oid){releaseLocksForOBD(oid);DB.update('obd_data',oid,{status:'P&L Done'});});
+    // Update assignments
+    DB.filter('picking_assignments',function(a){return a.type==='pickandload'&&a.status==='Assigned';}).forEach(function(a){var ni=(a.obdIds||[]).filter(function(o){return obdIds.indexOf(o)===-1;});var nn=(a.obdNos||[]).filter(function(n,i){return obdIds.indexOf(a.obdIds[i])===-1;});if(!ni.length)DB.update('picking_assignments',a.id,{status:'Done'});else DB.update('picking_assignments',a.id,{obdIds:ni,obdNos:nn});});
+    logAction('P&L','DONE',loadNo+' for '+pd.vehicleNo);addNotif('P&L '+loadNo+' completed','success');showToast('P&L '+loadNo+' submitted!','success');closeModal();renderPickingWithLoading();
+}
+
+// ===== VIEW DETAIL =====
+function viewPWLDoneDetail(id){
+    var l=DB.find('loaded_vehicles',id);if(!l)return;
+    var h='<div style="margin-bottom:12px;display:flex;flex-wrap:wrap;gap:10px">';
+    h+='<div><strong>Load:</strong> <span style="color:var(--accent);font-family:var(--font-display)">'+esc(l.loadNo)+'</span></div>';
+    h+='<div><strong>Vehicle:</strong> '+esc(l.vehicleNo)+'</div>';
+    h+='<div><strong>Security:</strong> '+esc(l.securityNo||'-')+'</div>';
+    h+='<div><strong>Status:</strong> '+(l.loadStatus==='Fully Loaded'?'<span class="badge badge-success">Full</span>':'<span class="badge badge-warning">Partial</span>')+'</div>';
+    h+='<div><strong>By:</strong> '+esc(l.loadedByName)+'</div><div><strong>Time:</strong> '+fmtDT(l.loadedAt)+'</div></div>';
+    h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>EAN</th><th>Material</th><th>Description</th><th>Qty</th><th>Status</th></tr></thead><tbody>';
+    (l.scannedItems||[]).forEach(function(s,i){
+        var rc=s.inOBD?'':'scan-row-red';var st=s.inOBD?'<span class="badge badge-success" style="font-size:9px">Match</span>':'<span class="badge badge-danger" style="font-size:9px">Not in OBD</span>';
+        h+='<tr class="'+rc+'"><td>'+(i+1)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(s.ean)+'</td><td>'+esc(s.material)+'</td><td style="font-size:11px;color:var(--text-muted)">'+esc(s.description)+'</td><td><strong>'+s.qty+'</strong></td><td>'+st+'</td></tr>';
+    });
+    h+='</tbody></table></div>';
+    showModal('P&L Detail — '+l.loadNo,h,'xl','<button class="btn btn-glass" onclick="closeModal()">Close</button>');
+}
 // ==================== LOADING ====================
 function renderLoading(sub){
     switch(sub){
@@ -3273,265 +4060,833 @@ function renderLoading(sub){
 
 // --- Loading Assign ---
 function renderLoadingAssign(){
-    // Get loading pending vehicles (entered by security for loading)
-    var loadVehs=DB.filter('vehicles',function(v){return v.vehicleType==='Loading'&&(v.status==='Loading Pending'||v.status==='Loading Assigned');});
-    // Get picking done OBDs
     var pickedOBDs=DB.get('picking_done').filter(function(p){return p.status==='Done';});
-    // Get assigned loadings
+    var fullyLoadedIds={};
+    DB.get('loaded_vehicles').forEach(function(lv){
+        if(lv.loadStatus==='Fully Loaded'){(lv.obdIds||[]).forEach(function(oid){fullyLoadedIds[oid]=1;});}
+    });
+    var availableOBDs=pickedOBDs.filter(function(o){return !fullyLoadedIds[o.id];});
     var assigned=DB.filter('loading_assignments',function(a){return a.status==='Assigned';});
 
     var h='<div class="section-header"><h2><i class="bx bx-truck"></i> Loading Assign</h2></div>';
-
-    // Unassigned loading vehicles
-    var unassigned=loadVehs.filter(function(v){return v.status==='Loading Pending';});
-    h+='<div class="card"><div class="card-title"><i class="bx bx-clock"></i> Pending Loading Vehicles ('+unassigned.length+')</div>';
-    if(!unassigned.length)h+='<div style="color:var(--text-muted);padding:16px;text-align:center">No pending vehicles</div>';
+    h+='<div class="card"><div class="card-title"><i class="bx bx-box"></i> Picking Done OBDs — Ready to Load ('+availableOBDs.length+')</div>';
+    if(!availableOBDs.length)h+='<div style="color:var(--text-muted);padding:16px;text-align:center">No OBDs ready for loading</div>';
     else{
-        h+='<div class="form-group" style="margin-bottom:12px"><label>Select User <span class="req">*</span></label><select id="loadAssignUser" class="form-input" style="max-width:300px"><option value="">-- Select User --</option>';
-        DB.get('users').filter(function(u){return u.role==='Loader'||u.role==='Manager';}).forEach(function(u){h+='<option value="'+u.id+'" data-name="'+esc(u.name)+'">'+esc(u.name)+' ('+esc(u.role)+')</option>';});
-        h+='</select></div>';
-        h+='<div class="form-group" style="margin-bottom:12px"><label>Vehicle Number (from Security Entry) <span class="req">*</span></label>';
-        h+='<select id="loadVehSelect" class="form-input" style="max-width:300px"><option value="">-- Select Vehicle --</option>';
-        unassigned.forEach(function(v){h+='<option value="'+v.id+'" data-no="'+esc(v.vehicleNo)+'">'+esc(v.vehicleNo)+' | '+esc(v.transportName||'')+'</option>';});
-        h+='</select></div>';
-        h+='<div class="card-title" style="margin-top:12px"><i class="bx bx-box"></i> Select OBDs to Load</div>';
-        h+='<div class="chk-list" id="loadObdChkList" style="max-height:200px;overflow-y:auto">';
-        if(!pickedOBDs.length)h+='<div style="padding:12px;text-align:center;color:var(--text-muted)">No picked OBDs available</div>';
-        else pickedOBDs.forEach(function(o){
+        var assignedOBDIds={};
+        assigned.forEach(function(a){(a.obdIds||[]).forEach(function(oid){assignedOBDIds[oid]=a;});});
+        var partialOBDIds={};
+        DB.get('loaded_vehicles').filter(function(lv){return lv.loadStatus==='Partial';}).forEach(function(lv){
+            (lv.obdIds||[]).forEach(function(oid){partialOBDIds[oid]=lv;});
+        });
+
+        h+='<div class="form-row" style="margin-bottom:12px">';
+        h+='<div class="form-group"><label>Assign To User <span class="req">*</span></label>';
+        h+='<select id="loadAssignUser" class="form-input" style="max-width:300px"><option value="">-- Select User --</option>';
+        DB.get('users').filter(function(u){return u.role==='Loader'||u.role==='Manager'||u.role==='Admin';}).forEach(function(u){
+            h+='<option value="'+u.id+'" data-name="'+esc(u.name)+'">'+esc(u.name)+' ('+esc(u.role)+')</option>';
+        });
+        h+='</select></div></div>';
+
+        h+='<div class="chk-list" id="loadObdChkList" style="max-height:300px;overflow-y:auto">';
+        availableOBDs.forEach(function(o){
             var totalQ=0;(o.details||[]).forEach(function(d){totalQ+=d.pickedQty;});
-            h+='<label class="chk-list-item"><input type="checkbox" class="load-obd-chk" value="'+o.id+'" data-no="'+esc(o.obdNo)+'"><span><strong style="color:var(--accent);font-family:var(--font-display);font-size:11px">'+esc(o.obdNo)+'</strong> — '+(o.details||[]).length+' mats, '+totalQ+' qty</span></label>';
+            var statusBadge='';
+            if(assignedOBDIds[o.id])statusBadge=' <span class="badge badge-warning" style="font-size:9px">Assigned: '+esc(assignedOBDIds[o.id].assignedToName)+'</span>';
+            else if(partialOBDIds[o.id])statusBadge=' <span class="badge badge-accent" style="font-size:9px">Partial: '+esc(partialOBDIds[o.id].loadNo)+'</span>';
+            else statusBadge=' <span class="badge badge-success" style="font-size:9px">Ready</span>';
+            var dis=assignedOBDIds[o.id]?'disabled':'';
+            h+='<label class="chk-list-item" style="'+(assignedOBDIds[o.id]?'opacity:0.5':'')+'"><input type="checkbox" class="load-obd-chk" value="'+o.id+'" data-no="'+esc(o.obdNo)+'" '+dis+'><span><strong style="color:var(--accent);font-family:var(--font-display);font-size:11px">'+esc(o.obdNo)+'</strong> — '+(o.details||[]).length+' mats, '+totalQ+' qty'+statusBadge+'</span></label>';
         });
         h+='</div>';
-        h+='<div class="form-actions"><button class="btn btn-glass" onclick="doLoadingAssign()"><i class="bx bx-check-double"></i> Assign Loading</button></div>';
+        h+='<div class="form-actions"><button class="btn btn-glass" onclick="doLoadingAssign()"><i class="bx bx-check-double"></i> Assign Selected</button></div>';
     }
     h+='</div>';
 
-    // Assigned
     if(assigned.length){
-        h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-user-check"></i> Assigned Loadings ('+assigned.length+')</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>Load No</th><th>Vehicle</th><th>User</th><th>OBDs</th><th>Actions</th></tr></thead><tbody>';
+        h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-user-check"></i> Active Assignments ('+assigned.length+')</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>User</th><th>OBDs</th><th>Assigned At</th><th>Actions</th></tr></thead><tbody>';
         assigned.forEach(function(a){
-            h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(a.loadNo)+'</td><td>'+esc(a.vehicleNo)+'</td><td>'+esc(a.assignedToName)+'</td><td><span class="badge badge-info">'+(a.obdIds||[]).length+'</span></td><td><button class="btn btn-danger btn-sm" onclick="unassignLoading(\''+a.id+'\')"><i class="bx bx-user-minus"></i> Unassign</button></td></tr>';
+            var tags='';(a.obdNos||[]).forEach(function(n){tags+='<span class="badge badge-info" style="margin:1px;font-size:9px">'+esc(n)+'</span>';});
+            h+='<tr><td>'+esc(a.assignedToName)+'</td><td>'+tags+'</td><td style="font-size:11px;color:var(--text-muted)">'+fmtDT(a.assignedAt)+'</td><td><button class="btn btn-danger btn-sm" onclick="unassignLoading(\''+a.id+'\')"><i class="bx bx-user-minus"></i> Unassign</button></td></tr>';
         });
         h+='</tbody></table></div></div>';
     }
     setHtml(h);
 }
 function doLoadingAssign(){
-    var userSel=document.getElementById('loadAssignUser');
-    var vehSel=document.getElementById('loadVehSelect');
-    if(!userSel.value){showToast('Select user','error');return;}
-    if(!vehSel.value){showToast('Select vehicle','error');return;}
-    var userName=userSel.options[userSel.selectedIndex].getAttribute('data-name');
-    var vehicleNo=vehSel.options[vehSel.selectedIndex].getAttribute('data-no');
+    var sel=document.getElementById('loadAssignUser');
+    if(!sel.value){showToast('Select user','error');return;}
+    var userName=sel.options[sel.selectedIndex].getAttribute('data-name');
     var checks=document.querySelectorAll('.load-obd-chk:checked');
     if(!checks.length){showToast('Select at least one OBD','error');return;}
-    var loadNo=DB.loadNo();
     var obdIds=[],obdNos=[];
-    checks.forEach(function(chk){obdIds.push(chk.value);obdNos.push(chk.getAttribute('data-no'));});
-    DB.add('loading_assignments',{loadNo:loadNo,vehicleId:vehSel.value,vehicleNo:vehicleNo,obdIds:obdIds,obdNos:obdNos,assignedTo:userSel.value,assignedToName:userName,status:'Assigned',assignedAt:new Date().toISOString()});
-    DB.update('vehicles',vehSel.value,{status:'Loading Assigned'});
-    logAction('Loading','ASSIGN',loadNo+' assigned to '+userName+' for vehicle '+vehicleNo+' with '+obdIds.length+' OBDs');
-    showToast('Loading assigned! '+obdIds.length+' OBDs','success');
-    renderLoadingAssign();
+    checks.forEach(function(c){obdIds.push(c.value);obdNos.push(c.getAttribute('data-no'));});
+    DB.add('loading_assignments',{obdIds:obdIds,obdNos:obdNos,assignedTo:sel.value,assignedToName:userName,status:'Assigned',assignedAt:new Date().toISOString()});
+    logAction('Loading','ASSIGN',obdNos.join(', ')+' assigned to '+userName);
+    showToast(obdIds.length+' OBDs assigned to '+userName,'success');renderLoadingAssign();
 }
-function unassignLoading(assignId){
+function unassignLoading(id){
     if(!confirm('Unassign?'))return;
-    var a=DB.find('loading_assignments',assignId);if(!a)return;
-    DB.update('loading_assignments',assignId,{status:'Unassigned'});
-    if(a.vehicleId)DB.update('vehicles',a.vehicleId,{status:'Loading Pending'});
-    logAction('Loading','UNASSIGN','Loading '+a.loadNo+' unassigned');
+    var a=DB.find('loading_assignments',id);if(!a)return;
+    DB.update('loading_assignments',id,{status:'Unassigned'});
+    logAction('Loading','UNASSIGN','Unassigned from '+a.assignedToName);
     showToast('Unassigned','success');renderLoadingAssign();
 }
 
-// --- Start Loading ---
+// --- Start Loading (COMPLETELY FIXED) ---
 function renderStartLoading(){
     if(!APP.currentUser)return;
-    var myAssign=DB.filter('loading_assignments',function(a){return a.assignedTo===APP.currentUser.id&&a.status==='Assigned';});
+    var myAssigns=DB.filter('loading_assignments',function(a){
+        if(a.status!=='Assigned')return false;
+        if(a.assignedTo===APP.currentUser.id)return true;
+        var an=(a.assignedToName||'').toLowerCase().trim();
+        var cn=(APP.currentUser.name||'').toLowerCase().trim();
+        return an&&cn&&an===cn;
+    });
     var h='<div class="section-header"><h2><i class="bx bx-truck"></i> My Loading</h2></div>';
-    if(!myAssign.length){h+='<div class="card"><div class="empty-state"><i class="bx bx-inbox"></i><p>No loading assigned to you</p></div></div>';setHtml(h);return;}
-    myAssign.forEach(function(a){
-        h+='<div class="card" style="margin-bottom:12px"><div class="card-title"><i class="bx bxs-truck"></i> '+esc(a.vehicleNo)+' — '+esc(a.loadNo)+'</div>';
-        h+='<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">';
-        (a.obdNos||[]).forEach(function(n){h+='<span class="badge badge-info">'+esc(n)+'</span>';});
-        h+='</div>';
-        if(chkAct('canLoad'))h+='<button class="btn btn-glass" onclick="startLoadingScan(\''+a.id+'\')"><i class="bx bx-scan"></i> Start Loading</button>';
-        h+='</div>';
-    });
-    setHtml(h);
-}
-function startLoadingScan(assignId){
-    var a=DB.find('loading_assignments',assignId);if(!a)return;
-    // Build expected materials from all OBDs
-    var expected=[];
-    (a.obdIds||[]).forEach(function(oid){
-        var pd=DB.find('picking_done',oid);
-        if(pd){(pd.details||[]).forEach(function(d){expected.push({obdNo:d.obdNo,material:d.material,ean:d.ean,qty:d.pickedQty,scannedQty:0,scanned:false});});}
-    });
-    if(!expected.length){showToast('No materials to load','error');return;}
-    window._loadData={assignId:assignId,loadNo:a.loadNo,vehicleNo:a.vehicleNo,expected:expected,scannedItems:[]};
+    if(!myAssigns.length){h+='<div class="card"><div class="empty-state"><i class="bx bx-inbox"></i><p>No OBDs assigned to you</p></div></div>';setHtml(h);return;}
 
-    var h='<div style="margin-bottom:12px"><strong style="color:var(--accent)">'+esc(a.vehicleNo)+'</strong> — '+esc(a.loadNo)+'</div>';
-    h+='<div class="search-box" style="max-width:100%;margin-bottom:12px"><i class="bx bx-search"></i><input type="text" id="scanLoadInput" placeholder="Scan material / EAN..." onkeydown="if(event.key===\'Enter\')addScanLoadItem()"></div>';
-    h+='<div style="display:flex;gap:6px;margin-bottom:12px"><button class="btn btn-glass btn-sm" onclick="openScannerForLoad()"><i class="bx bx-qr"></i> Scanner</button><button class="btn btn-glass btn-sm" onclick="addScanLoadItem()"><i class="bx bx-plus"></i> Add</button></div>';
-    h+='<div class="table-wrapper" style="max-height:350px;overflow-y:auto"><table class="data-table"><thead><tr><th>#</th><th>OBD</th><th>Material</th><th>EAN</th><th>Expected</th><th>Scanned</th><th>Match</th></tr></thead><tbody id="scanLoadBody"></tbody></table></div>';
-    h+='<div class="form-actions" style="margin-top:14px"><button class="btn btn-glass" onclick="submitLoading()"><i class="bx bx-check-double"></i> Submit Loading</button></div>';
-    showModal('Loading Scan — '+a.vehicleNo,h,'xl','<button class="btn btn-glass" onclick="closeModal()">Cancel</button>');
-    renderScanLoadTable();
-}
-function openScannerForLoad(){
-    APP.scanCallback=function(code){document.getElementById('scanLoadInput').value=code;addScanLoadItem();};
-    document.getElementById('scannerModal').style.display='flex';focusForBluetoothScanner();
-}
-function addScanLoadItem(){
-    var input=document.getElementById('scanLoadInput');if(!input)return;
-    var val=input.value.trim().toUpperCase();input.value='';if(!val)return;
-    var ld=window._loadData;if(!ld)return;
-    var found=null;
-    ld.expected.forEach(function(e){if(!found&&(e.ean&&e.ean.toUpperCase()===val||e.material.toUpperCase()===val)){found=e;}});
-    if(found){found.scannedQty++;found.scanned=true;ld.scannedItems.push({ean:val,material:found.material,match:true,obdNo:found.obdNo,time:new Date().toISOString()});}
-    else{ld.scannedItems.push({ean:val,material:'UNKNOWN',match:false,obdNo:'-',time:new Date().toISOString()});}
-    renderScanLoadTable();
-}
-function renderScanLoadTable(){
-    var ld=window._loadData;if(!ld)return;
-    var body=document.getElementById('scanLoadBody');if(!body)return;
-    var h='';
-    ld.expected.forEach(function(e,idx){
-        var cls=e.scanned?(e.scannedQty<=e.qty?'scan-row-green':'scan-row-red'):'';
-        var status=e.scanned?(e.scannedQty<=e.qty?'<span class="badge badge-success">Match</span>':'<span class="badge badge-danger">Excess</span>'):'<span class="badge badge-warning">Pending</span>';
-        h+='<tr class="'+cls+'"><td>'+(idx+1)+'</td><td style="font-size:11px">'+esc(e.obdNo)+'</td><td>'+esc(e.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(e.ean)+'</td><td>'+e.qty+'</td><td><strong>'+(e.scannedQty||0)+'</strong></td><td>'+status+'</td></tr>';
-    });
-    ld.scannedItems.filter(function(s){return!s.match;}).forEach(function(s){
-        h+='<tr class="scan-row-red"><td>-</td><td>'+esc(s.obdNo)+'</td><td>UNKNOWN</td><td style="font-family:var(--font-display);font-size:10px">'+esc(s.ean)+'</td><td>0</td><td>1</td><td><span class="badge badge-danger">Wrong</span></td></tr>';
-    });
-    body.innerHTML=h;
-}
-function submitLoading(){
-    var ld=window._loadData;if(!ld)return;
-    var hasScan=ld.expected.some(function(e){return e.scanned;});
-    if(!hasScan){showToast('Scan at least one material','error');return;}
-    var materials=[];var wrongItems=[];
-    ld.expected.forEach(function(e){
-        materials.push({obdNo:e.obdNo,material:e.material,ean:e.ean,expectedQty:e.qty,scannedQty:e.scannedQty,diff:e.qty-e.scannedQty});
-    });
-    ld.scannedItems.filter(function(s){return!s.match;}).forEach(function(s){
-        materials.push({obdNo:'-',material:'UNKNOWN',ean:s.ean,expectedQty:0,scannedQty:1,diff:-1});
-        wrongItems.push(s);
+    var allOBDs=[];
+    myAssigns.forEach(function(a){
+        (a.obdIds||[]).forEach(function(oid,i){
+            var pd=DB.find('picking_done',oid);if(!pd)return;
+            var totalQ=0;(pd.details||[]).forEach(function(d){totalQ+=d.pickedQty;});
+            // FIXED: handle both array and single string obdIds
+            var partials=DB.filter('loaded_vehicles',function(lv){
+                if(lv.loadStatus!=='Partial')return false;
+                var ids=lv.obdIds;if(!Array.isArray(ids))ids=[ids];
+                return ids.indexOf(oid)>-1;
+            });
+            var fullDone=DB.filter('loaded_vehicles',function(lv){
+                if(lv.loadStatus!=='Fully Loaded')return false;
+                var ids=lv.obdIds;if(!Array.isArray(ids))ids=[ids];
+                return ids.indexOf(oid)>-1;
+            });
+            var approvedDone=DB.filter('loading_approvals',function(la){
+                if(la.status!=='Approved')return false;
+                var ids=la.obdIds;if(!Array.isArray(ids))ids=[ids];
+                return ids.indexOf(oid)>-1;
+            });
+
+            var statusBadge='',actionBtn='',rowStyle='',isReady=true;
+            if(fullDone.length>0||approvedDone.length>0){
+                statusBadge='<span class="badge badge-success" style="font-size:9px">Done</span>';
+                actionBtn='<span style="font-size:11px;color:var(--text-muted)">Completed</span>';
+                rowStyle='opacity:0.4;pointer-events:none';isReady=false;
+            }else if(partials.length>0){
+                var pl=partials[partials.length-1];
+                var loadedQ=0;(pl.scannedItems||[]).forEach(function(s){if(s.inOBD)loadedQ+=s.qty;});
+                statusBadge='<span class="badge badge-warning" style="font-size:9px">Partial '+loadedQ+'/'+totalQ+'</span>';
+                actionBtn='<button class="btn btn-glass btn-sm" style="border-color:var(--warning)" onclick="continueLoading(\''+pl.id+'\')"><i class="bx bx-reload"></i> Continue</button>';
+                isReady=false;
+            }else{
+                statusBadge='<span class="badge badge-accent" style="font-size:9px">Ready</span>';
+                actionBtn='';
+            }
+            allOBDs.push({id:oid,obdNo:a.obdNos[i]||'-',pd:pd,totalQ:totalQ,statusBadge:statusBadge,actionBtn:actionBtn,rowStyle:rowStyle,isReady:isReady});
+        });
     });
 
-    DB.add('loaded_vehicles',{loadNo:ld.loadNo,vehicleNo:ld.vehicleNo,loadedBy:APP.currentUser.id,loadedByName:APP.currentUser.name,loadedAt:new Date().toISOString(),materials:materials,status:'Loaded'});
-    DB.update('loading_assignments',ld.assignId,{status:'Done'});
-    // Update vehicle
-    var vehs=DB.filter('vehicles',function(v){return v.vehicleNo===ld.vehicleNo;});
-    vehs.forEach(function(v){DB.update('vehicles',v.id,{status:'Loading Done'});});
-    // Qty mismatch report
-    var mismatches=materials.filter(function(m){return m.diff!==0;});
-    if(mismatches.length>0){
-        DB.add('loading_data',{loadNo:ld.loadNo,vehicleNo:ld.vehicleNo,mismatches:mismatches,createdAt:new Date().toISOString()});
+    var readyOBDs=allOBDs.filter(function(o){return o.isReady;});
+    var otherOBDs=allOBDs.filter(function(o){return !o.isReady;});
+
+    if(readyOBDs.length>0){
+        h+='<div class="card" style="margin-bottom:12px">';
+        h+='<div class="card-title"><i class="bx bx-checkbox-checked"></i> Select OBDs to Load ('+readyOBDs.length+')</div>';
+        h+='<div style="padding:8px 12px;background:var(--bg-secondary);border-radius:6px;margin-bottom:10px;font-size:11px;color:var(--text-muted)"><i class="bx bx-info-circle" style="color:var(--accent)"></i> Select OBDs → Click Start Loading → Enter vehicle → Scan</div>';
+        h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th style="width:40px"><input type="checkbox" id="loadSelectAll" onchange="toggleAllLoadOBDs(this.checked)" style="cursor:pointer;accent-color:var(--accent);width:16px;height:16px"></th><th>OBD No</th><th>Materials</th><th>Total Qty</th><th>Status</th></tr></thead><tbody>';
+        readyOBDs.forEach(function(o){
+            h+='<tr style="'+o.rowStyle+'"><td><input type="checkbox" class="load-obd-sel-chk" value="'+o.id+'" data-no="'+esc(o.obdNo)+'" style="cursor:pointer;accent-color:var(--accent);width:16px;height:16px"></td>';
+            h+='<td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(o.obdNo)+'</td>';
+            h+='<td><span class="badge badge-info">'+(o.pd.details||[]).length+'</span></td>';
+            h+='<td><strong>'+o.totalQ+'</strong></td><td>'+o.statusBadge+'</td></tr>';
+        });
+        h+='</tbody></table></div>';
+        h+='<div style="display:flex;align-items:center;justify-content:space-between;margin-top:12px;padding:10px 14px;background:var(--accent-dim);border-radius:8px;border:1px solid var(--accent)">';
+        h+='<div><span style="font-size:13px;font-weight:600">Selected: <span id="loadSelCount" style="color:var(--accent);font-family:var(--font-display)">0</span> OBDs</span>';
+        h+='<div id="loadSelNames" style="font-size:11px;color:var(--text-muted);margin-top:2px">None selected</div></div>';
+        h+='<button class="btn btn-glass" style="background:var(--accent);color:#000;font-weight:700;padding:10px 24px" onclick="startMultiLoading()"><i class="bx bx-truck"></i> Start Loading</button></div></div>';
     }
-    logAction('Loading','DONE',ld.loadNo+' for vehicle '+ld.vehicleNo);
-    addNotif('Loading '+ld.loadNo+' completed for '+ld.vehicleNo,'success');
-    showToast('Loading completed!','success');
-    closeModal();renderStartLoading();
+
+    if(otherOBDs.length>0){
+        h+='<div class="card" style="margin-bottom:12px"><div class="card-title"><i class="bx bx-loader-circle"></i> In-Progress OBDs ('+otherOBDs.length+')</div>';
+        h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Materials</th><th>Total Qty</th><th>Status</th><th>Action</th></tr></thead><tbody>';
+        otherOBDs.forEach(function(o){
+            h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(o.obdNo)+'</td>';
+            h+='<td><span class="badge badge-info">'+(o.pd.details||[]).length+'</span></td>';
+            h+='<td><strong>'+o.totalQ+'</strong></td><td>'+o.statusBadge+'</td><td>'+o.actionBtn+'</td></tr>';
+        });
+        h+='</tbody></table></div></div>';
+    }
+    setHtml(h);
+    setTimeout(function(){document.querySelectorAll('.load-obd-sel-chk').forEach(function(c){c.onchange=updateLoadSelCount;});},100);
+}
+
+function toggleAllLoadOBDs(checked){document.querySelectorAll('.load-obd-sel-chk').forEach(function(c){c.checked=checked;});updateLoadSelCount();}
+function updateLoadSelCount(){
+    var checked=document.querySelectorAll('.load-obd-sel-chk:checked');
+    var countEl=document.getElementById('loadSelCount');
+    var namesEl=document.getElementById('loadSelNames');
+    if(countEl)countEl.textContent=checked.length;
+    if(namesEl){
+        if(!checked.length)namesEl.innerHTML='None selected';
+        else{var names=[];checked.forEach(function(c){names.push(c.getAttribute('data-no'));});namesEl.innerHTML=names.map(function(n){return '<span class="badge badge-info" style="margin:1px;font-size:10px">'+esc(n)+'</span>';}).join(' ');}
+    }
+}
+
+function startMultiLoading(){
+    var checked=document.querySelectorAll('.load-obd-sel-chk:checked');
+    if(!checked.length){showToast('Select at least one OBD','error');return;}
+    var obdIds=[],obdNos=[];
+    checked.forEach(function(c){obdIds.push(c.value);obdNos.push(c.getAttribute('data-no'));});
+    window._multiLoadOBDs={ids:obdIds,nos:obdNos};
+    var totalMats=0,totalQty=0;
+    obdIds.forEach(function(oid){var pd=DB.find('picking_done',oid);if(pd){(pd.details||[]).forEach(function(d){totalMats++;totalQty+=d.pickedQty;});}});
+    var h='<div style="margin-bottom:16px;padding:12px;background:var(--accent-dim);border-radius:8px;border-left:3px solid var(--accent)">';
+    h+='<div style="font-weight:700;color:var(--accent);margin-bottom:6px"><i class="bx bx-box"></i> '+obdIds.length+' OBDs Selected</div>';
+    h+='<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px">';
+    obdNos.forEach(function(n){h+='<span class="badge badge-info" style="font-size:10px">'+esc(n)+'</span>';});
+    h+='</div><div style="font-size:12px;color:var(--text-muted)">'+totalMats+' materials | '+totalQty+' total qty</div></div>';
+    h+='<div class="form-row">';
+    h+='<div class="form-group"><label>Vehicle Number <span class="req">*</span></label><input type="text" id="loadVehicleNo" class="form-input" placeholder="MH-12-AB-1234" style="text-transform:uppercase"></div>';
+    h+='<div class="form-group"><label>Security / LR Number <span class="req">*</span></label><input type="text" id="loadSecurityNo" class="form-input" placeholder="SEC-001" style="text-transform:uppercase"></div>';
+    h+='</div>';
+    showModal('Loading Setup — '+obdIds.length+' OBDs',h,'sm',
+        '<button class="btn btn-glass" onclick="closeModal()">Cancel</button>'+
+        '<button class="btn btn-glass" style="background:var(--accent);color:#000;font-weight:600" onclick="openMultiLoadingScanner()"><i class="bx bx-scan"></i> Next: Scan</button>');
+}
+
+function openMultiLoadingScanner(){
+    var vehNo=(document.getElementById('loadVehicleNo').value||'').trim().toUpperCase();
+    var secNo=(document.getElementById('loadSecurityNo').value||'').trim().toUpperCase();
+    if(!vehNo){showToast('Enter vehicle number','error');return;}
+    if(!secNo){showToast('Enter security number','error');return;}
+    var ml=window._multiLoadOBDs;if(!ml)return;
+    var expected=[];
+    ml.ids.forEach(function(oid){var pd=DB.find('picking_done',oid);if(!pd)return;(pd.details||[]).forEach(function(d){expected.push({obdNo:d.obdNo,material:d.material,ean:d.ean,requiredQty:d.pickedQty,scannedQty:0});});});
+    window._loadScanData={obdId:ml.ids,obdNo:ml.nos,vehicleNo:vehNo,securityNo:secNo,expected:expected,scannedItems:[],source:'new',isMulti:true};
+    closeModal();renderLoadingScanModal();
+}
+
+// ★★★ FIXED: Continue Loading — handles both array & string obdIds ★★★
+function continueLoading(partialLoadId){
+    var pl=DB.find('loaded_vehicles',partialLoadId);
+    if(!pl){showToast('Partial load record not found','error');return;}
+
+    // FIX: handle both array and single string
+    var obdIds=pl.obdIds;
+    if(!Array.isArray(obdIds))obdIds=[obdIds];
+    var obdNos=pl.obdNos;
+    if(!Array.isArray(obdNos))obdNos=[obdNos];
+
+    var obdId=obdIds[0];
+    var pd=DB.find('picking_done',obdId);
+    if(!pd){showToast('Picking data not found for OBD. It may have been cleared.','error');return;}
+
+    var expected=[];
+    (pd.details||[]).forEach(function(d){
+        var done=0;
+        (pl.scannedItems||[]).forEach(function(s){if(s.ean===d.ean&&s.inOBD)done+=s.qty;});
+        expected.push({obdNo:d.obdNo,material:d.material,ean:d.ean,requiredQty:d.pickedQty,scannedQty:done});
+    });
+
+    window._loadScanData={
+        obdId:obdIds,
+        obdNo:obdNos,
+        vehicleNo:pl.vehicleNo,
+        securityNo:pl.securityNo||'',
+        expected:expected,
+        scannedItems:JSON.parse(JSON.stringify(pl.scannedItems||[])),
+        partialLoadId:partialLoadId,
+        source:'continue',
+        isMulti:obdIds.length>1
+    };
+    renderLoadingScanModal();
+}
+
+// ★★★ FIXED: Scan Modal — proper format with Match/Not in OBD ★★★
+function renderLoadingScanModal(){
+    var ld=window._loadScanData;if(!ld)return;
+    var obdTags='';
+    if(ld.isMulti&&Array.isArray(ld.obdNo)){
+        ld.obdNo.forEach(function(n){obdTags+='<span class="badge badge-info" style="font-size:9px">'+esc(n)+'</span>';});
+    }else{
+        var singleNo=Array.isArray(ld.obdNo)?ld.obdNo[0]:ld.obdNo;
+        obdTags='<span class="badge badge-info">'+esc(singleNo)+'</span>';
+    }
+
+    var h='<div style="margin-bottom:12px;display:flex;flex-wrap:wrap;gap:8px;align-items:center">';
+    h+='<div style="padding:6px 12px;background:var(--accent-dim);border-radius:6px;display:flex;flex-wrap:wrap;gap:4px;align-items:center"><strong style="color:var(--accent);font-size:11px">OBDs:</strong> '+obdTags+'</div>';
+    h+='<div style="padding:6px 12px;background:var(--bg-secondary);border-radius:6px"><i class="bx bx-truck"></i> '+esc(ld.vehicleNo)+'</div>';
+    h+='<div style="padding:6px 12px;background:var(--bg-secondary);border-radius:6px"><i class="bx bx-shield-quarter"></i> '+esc(ld.securityNo)+'</div>';
+    if(ld.source==='continue')h+='<div style="padding:6px 12px;background:rgba(255,165,2,0.12);border-radius:6px;color:var(--warning)"><i class="bx bx-reload"></i> Continuing</div>';
+    h+='</div>';
+
+    // Scan input
+    h+='<div class="search-box" style="margin-bottom:8px"><i class="bx bx-search"></i><input type="text" id="loadScanInput" placeholder="Scan EAN..." onkeydown="if(event.key===\'Enter\')doLoadScan()" autofocus></div>';
+    h+='<div style="display:flex;gap:6px;margin-bottom:12px">';
+    h+='<button class="btn btn-glass btn-sm" onclick="APP.scanCallback=function(c){document.getElementById(\'loadScanInput\').value=c;doLoadScan();};document.getElementById(\'scannerModal\').style.display=\'flex\'"><i class="bx bx-qr"></i> Scanner</button>';
+    h+='<button class="btn btn-glass btn-sm" onclick="showManualLoadEntry()"><i class="bx bx-plus"></i> Manual Entry</button>';
+    h+='</div>';
+
+    // ★ Scanned Items Table — EAN | Material | Description | Qty | Status | X
+    h+='<div class="table-wrapper" style="max-height:280px;overflow-y:auto"><table class="data-table"><thead><tr><th>#</th><th>EAN</th><th>Material</th><th>Description</th><th>Qty</th><th>Status</th><th>X</th></tr></thead><tbody id="loadScanBody"></tbody></table></div>';
+
+    // Summary
+    h+='<div id="loadScanSummary" style="margin-top:12px"></div>';
+
+    // Actions
+    h+='<div class="form-actions" style="margin-top:12px">';
+    h+='<button class="btn btn-glass" onclick="savePartialLoad()"><i class="bx bx-save"></i> Partial Load</button>';
+    h+='<button class="btn btn-glass" style="background:var(--accent);color:#000;font-weight:600" onclick="submitFinalLoad()"><i class="bx bx-check-double"></i> Submit Loading</button>';
+    h+='</div>';
+
+    var title=ld.isMulti?'Loading Scan — '+esc(ld.vehicleNo):'Loading Scan — '+esc(Array.isArray(ld.obdNo)?ld.obdNo[0]:ld.obdNo);
+    showModal(title,h,'xl','<button class="btn btn-glass" onclick="closeModal()">Cancel</button>');
+    renderLoadScanTable();
+}
+
+// ★★★ FIXED: doLoadScan — auto fill material & description ★★★
+function doLoadScan(){
+    var inp=document.getElementById('loadScanInput');if(!inp)return;
+    var val=inp.value.trim();inp.value='';if(!val)return;
+    var ld=window._loadScanData;if(!ld)return;
+    var uv=val.toUpperCase();
+
+    // Find first unmatched expected item
+    var found=null;
+    for(var i=0;i<ld.expected.length;i++){
+        var e=ld.expected[i];
+        if(e.ean&&e.ean.toUpperCase()===uv&&e.scannedQty<e.requiredQty){found=e;break;}
+    }
+
+    // Get material master for auto-fill
+    var mm=DB.filter('material_master',function(m){return m.ean&&m.ean.toUpperCase()===uv;});
+    var matName=mm.length?(mm[0].material||''):'';
+    var matDesc=mm.length?(mm[0].description||''):'';
+
+    if(found){
+        found.scannedQty++;
+        ld.scannedItems.push({
+            ean:found.ean,
+            material:found.material||matName,
+            description:matDesc,
+            qty:1,
+            inOBD:true,
+            obdNo:found.obdNo,
+            scannedAt:new Date().toISOString()
+        });
+        showToast(found.material+' — Match ✓','success');
+    }else{
+        ld.scannedItems.push({
+            ean:uv,
+            material:matName||val,
+            description:matDesc,
+            qty:1,
+            inOBD:false,
+            obdNo:'—',
+            scannedAt:new Date().toISOString()
+        });
+        showToast((matName||val)+' — Not in OBD ✗','warning');
+    }
+    renderLoadScanTable();
+    setTimeout(function(){var i=document.getElementById('loadScanInput');if(i)i.focus();},100);
+}
+
+// ★★★ FIXED: Manual Entry with auto-fill ★★★
+function showManualLoadEntry(){
+    var h='<div class="form-row">';
+    h+='<div class="form-group"><label>EAN</label><input type="text" id="manLoadEan" class="form-input" placeholder="Scan or type EAN" style="font-family:var(--font-display)" onblur="autoFillManualLoad()"></div>';
+    h+='<div class="form-group"><label>Material Name</label><input type="text" id="manLoadMat" class="form-input" placeholder="Auto-filled or type"></div>';
+    h+='<div class="form-group"><label>Description</label><input type="text" id="manLoadDesc" class="form-input" placeholder="Auto-filled or type"></div>';
+    h+='<div class="form-group"><label>Qty</label><input type="number" id="manLoadQty" class="form-input" value="1" min="1"></div>';
+    h+='</div>';
+    showModal('Manual Entry',h,'sm',
+        '<button class="btn btn-glass" onclick="closeModal();renderLoadingScanModal()">Cancel</button>'+
+        '<button class="btn btn-glass" onclick="addManualLoadItem()"><i class="bx bx-check"></i> Add</button>');
+}
+
+function autoFillManualLoad(){
+    var ean=(document.getElementById('manLoadEan').value||'').trim().toUpperCase();
+    if(!ean||ean.length<5)return;
+    var mm=DB.filter('material_master',function(m){return m.ean&&m.ean.toUpperCase()===ean;});
+    if(mm.length){
+        if(!document.getElementById('manLoadMat').value)document.getElementById('manLoadMat').value=mm[0].material||'';
+        if(!document.getElementById('manLoadDesc').value)document.getElementById('manLoadDesc').value=mm[0].description||'';
+    }
+}
+
+function addManualLoadItem(){
+    var ean=(document.getElementById('manLoadEan').value||'').trim().toUpperCase();
+    var mat=(document.getElementById('manLoadMat').value||'').trim();
+    var desc=(document.getElementById('manLoadDesc').value||'').trim();
+    var qty=parseInt(document.getElementById('manLoadQty').value)||0;
+    if(!mat&&!ean){showToast('Enter EAN or Material','error');return;}
+    if(qty<=0){showToast('Enter qty','error');return;}
+    var ld=window._loadScanData;
+    var inOBD=false,obdNo='—';
+    ld.expected.forEach(function(e){
+        if((e.ean&&e.ean.toUpperCase()===ean)||(e.material||'').toUpperCase()===mat.toUpperCase()){
+            inOBD=true;obdNo=e.obdNo;e.scannedQty+=qty;
+        }
+    });
+    ld.scannedItems.push({ean:ean,material:mat,description:desc,qty:qty,inOBD:inOBD,obdNo:obdNo,scannedAt:new Date().toISOString()});
+    closeModal();renderLoadingScanModal();
+    showToast((inOBD?'Match ✓ ':'Not in OBD ✗ — ')+mat+' x '+qty,'info');
+}
+
+function updateLoadScanQty(idx,nq){
+    var ld=window._loadScanData;if(!ld)return;
+    var item=ld.scannedItems[idx];if(!item)return;
+    nq=parseInt(nq)||1;if(nq<1)nq=1;
+    var diff=nq-item.qty;
+    if(item.inOBD)ld.expected.forEach(function(e){if(e.ean===item.ean)e.scannedQty+=diff;});
+    item.qty=nq;renderLoadScanTable();
+}
+
+function removeLoadScanItem(idx){
+    var ld=window._loadScanData;if(!ld)return;
+    var item=ld.scannedItems[idx];if(!item)return;
+    if(item.inOBD)ld.expected.forEach(function(e){if(e.ean===item.ean)e.scannedQty-=item.qty;});
+    ld.scannedItems.splice(idx,1);renderLoadScanTable();
+}
+
+// ★★★ FIXED: Render Scan Table — EAN | Material | Description | Qty | Match/Not in OBD ★★★
+function renderLoadScanTable(){
+    var ld=window._loadScanData;if(!ld)return;
+    var body=document.getElementById('loadScanBody');if(!body)return;
+    var h='';
+    ld.scannedItems.forEach(function(s,i){
+        var rowClass=s.inOBD?'':'scan-row-red';
+        // Status badge
+        var statusBadge=s.inOBD
+            ?'<span class="badge badge-success" style="font-size:9px;padding:2px 6px"><i class="bx bx-check" style="font-size:10px"></i> Match</span>'
+            :'<span class="badge badge-danger" style="font-size:9px;padding:2px 6px"><i class="bx bx-x" style="font-size:10px"></i> Not in OBD</span>';
+
+        h+='<tr class="'+rowClass+'">';
+        h+='<td style="font-size:11px;color:var(--text-muted);text-align:center;width:30px">'+(i+1)+'</td>';
+        h+='<td style="font-family:var(--font-display);font-size:10px;width:120px">'+esc(s.ean)+'</td>';
+        h+='<td style="font-size:12px;font-weight:500">'+esc(s.material)+'</td>';
+        h+='<td style="font-size:11px;color:var(--text-muted);max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(s.description)+'</td>';
+        // Editable Qty
+        h+='<td style="width:70px"><input type="number" value="'+s.qty+'" min="1" style="width:55px;padding:4px 6px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);text-align:center;font-size:12px;font-family:var(--font-display)" onchange="updateLoadScanQty('+i+',parseInt(this.value)||1)"></td>';
+        // Status
+        h+='<td style="text-align:center;width:100px">'+statusBadge+'</td>';
+        // Delete
+        h+='<td style="width:30px;text-align:center"><button class="btn btn-danger btn-sm" style="width:24px;height:24px;padding:0;min-width:24px" onclick="removeLoadScanItem('+i+')"><i class="bx bx-trash" style="font-size:10px"></i></button></td>';
+        h+='</tr>';
+    });
+    if(!ld.scannedItems.length)h='<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:24px"><i class="bx bx-scan" style="font-size:24px;display:block;margin-bottom:6px;opacity:0.3"></i>Scan EAN to start loading</td></tr>';
+    body.innerHTML=h;
+
+    // Summary
+    var sd=document.getElementById('loadScanSummary');if(!sd)return;
+    var totalS=0,matchQ=0,notInOBDQ=0,misCount=0;
+    ld.scannedItems.forEach(function(s){totalS+=s.qty;if(s.inOBD)matchQ+=s.qty;else notInOBDQ+=s.qty;});
+    ld.expected.forEach(function(e){
+        if(e.scannedQty>0&&e.scannedQty!==e.requiredQty)misCount++;
+        if(e.scannedQty===0&&e.requiredQty>0)misCount++;
+    });
+    var sh='<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">';
+    sh+='<div style="text-align:center;padding:8px;background:var(--bg-secondary);border-radius:6px"><div style="font-size:18px;font-weight:700;color:var(--accent);font-family:var(--font-display)">'+totalS+'</div><div style="font-size:10px;color:var(--text-muted)">Scanned</div></div>';
+    sh+='<div style="text-align:center;padding:8px;background:rgba(46,213,115,0.1);border-radius:6px"><div style="font-size:18px;font-weight:700;color:var(--success);font-family:var(--font-display)">'+matchQ+'</div><div style="font-size:10px;color:var(--text-muted)">Match</div></div>';
+    sh+='<div style="text-align:center;padding:8px;background:rgba(255,71,87,0.1);border-radius:6px"><div style="font-size:18px;font-weight:700;color:var(--danger);font-family:var(--font-display)">'+notInOBDQ+'</div><div style="font-size:10px;color:var(--text-muted)">Not in OBD</div></div>';
+    sh+='<div style="text-align:center;padding:8px;background:'+(misCount?'rgba(255,71,87,0.1)':'rgba(46,213,115,0.1)')+';border-radius:6px"><div style="font-size:18px;font-weight:700;color:'+(misCount?'var(--danger)':'var(--success)')+';font-family:var(--font-display)">'+(misCount===0?'✓':'⚠ '+misCount)+'</div><div style="font-size:10px;color:var(--text-muted)">Mismatch</div></div>';
+    sh+='</div>';sd.innerHTML=sh;
+}
+
+// --- Partial Load ---
+function savePartialLoad(){
+    var ld=window._loadScanData;if(!ld)return;
+    if(!ld.scannedItems.length){showToast('Scan at least one item','error');return;}
+    var obdIds=ld.isMulti?ld.obdId:(Array.isArray(ld.obdId)?ld.obdId:[ld.obdId]);
+    var obdNos=ld.isMulti?ld.obdNo:(Array.isArray(ld.obdNo)?ld.obdNo:[ld.obdNo]);
+    var loadNo='';
+    if(ld.source==='continue'&&ld.partialLoadId){
+        var old=DB.find('loaded_vehicles',ld.partialLoadId);loadNo=old?old.loadNo:'';
+        DB.update('loaded_vehicles',ld.partialLoadId,{scannedItems:ld.scannedItems,lastScannedAt:new Date().toISOString()});
+    }else{
+        loadNo=genLoadNo();
+        DB.add('loaded_vehicles',{loadNo:loadNo,vehicleNo:ld.vehicleNo,securityNo:ld.securityNo,obdIds:obdIds,obdNos:obdNos,loadedBy:APP.currentUser.id,loadedByName:APP.currentUser.name,loadedAt:new Date().toISOString(),lastScannedAt:new Date().toISOString(),scannedItems:ld.scannedItems,loadStatus:'Partial',mismatch:false});
+    }
+    logAction('Loading','PARTIAL',obdNos.join(', ')+' partial. Load: '+loadNo);
+    showToast('Partial saved: '+loadNo,'success');closeModal();renderStartLoading();
+}
+
+// --- Submit Final ---
+function submitFinalLoad(){
+    var ld=window._loadScanData;if(!ld)return;
+    if(!ld.scannedItems.length){showToast('Scan at least one item','error');return;}
+    var mismatch=hasMismatch(ld);
+    var hasNotInOBD=ld.scannedItems.some(function(s){return !s.inOBD;});
+    if(mismatch||hasNotInOBD){showMismatchBlock(ld);return;}
+    doFinalSubmit(ld);
+}
+
+function hasMismatch(ld){var has=false;ld.expected.forEach(function(e){if(e.scannedQty!==e.requiredQty)has=true;});return has;}
+
+function showMismatchBlock(ld){
+    var mh='<div style="margin-bottom:12px;padding:12px;background:rgba(255,71,87,0.1);border:1px solid var(--danger);border-radius:8px">';
+    mh+='<div style="font-weight:700;color:var(--danger);margin-bottom:8px"><i class="bx bx-error-circle"></i> Cannot Submit — Mismatch Found!</div>';
+    ld.expected.forEach(function(e){
+        if(e.scannedQty!==e.requiredQty){
+            var diff=e.requiredQty-e.scannedQty;
+            mh+='<div style="font-size:11px;padding:2px 0;color:var(--text-muted)">→ '+esc(e.material)+': Expected <strong>'+e.requiredQty+'</strong>, Scanned <strong style="color:'+(diff>0?'var(--danger)':'var(--warning)')+'">'+e.scannedQty+'</strong>, Diff: <strong style="color:var(--danger)">'+(diff>0?'-'+diff:'+'+Math.abs(diff))+'</strong></div>';
+        }
+    });
+    var notInOBD=ld.scannedItems.filter(function(s){return !s.inOBD;});
+    if(notInOBD.length){
+        mh+='<div style="font-size:12px;margin-top:6px;color:var(--warning)"><strong>Extra items (Not in OBD):</strong></div>';
+        notInOBD.forEach(function(s){mh+='<div style="font-size:11px;padding:2px 0;color:var(--text-muted)">→ '+esc(s.material)+' ('+esc(s.ean)+') x '+s.qty+'</div>';});
+    }
+    mh+='</div>';
+    mh+='<div class="form-group"><label>Reason for mismatch <span class="req">*</span></label><textarea id="mismatchReason" class="form-input" placeholder="Explain why mismatch exists..."></textarea></div>';
+    showModal('Mismatch — Approval Required',mh,'lg',
+        '<button class="btn btn-glass" onclick="closeModal();renderLoadingScanModal()"><i class="bx bx-arrow-back"></i> Back</button>'+
+        '<button class="btn btn-glass" style="background:var(--warning);color:#000;font-weight:600" onclick="requestLoadApproval()"><i class="bx bx-send"></i> Request Admin Approval</button>');
+}
+
+function requestLoadApproval(){
+    var ld=window._loadScanData;if(!ld)return;
+    var reason=(document.getElementById('mismatchReason')||{}).value||'';
+    if(!reason.trim()){showToast('Enter reason','error');return;}
+    var obdIds=ld.isMulti?ld.obdId:(Array.isArray(ld.obdId)?ld.obdId:[ld.obdId]);
+    var obdNos=ld.isMulti?ld.obdNo:(Array.isArray(ld.obdNo)?ld.obdNo:[ld.obdNo]);
+    var loadNo=ld.partialLoadId?(DB.find('loaded_vehicles',ld.partialLoadId)||{}).loadNo||genLoadNo():genLoadNo();
+        var newApproval=DB.add('loading_approvals',{loadNo:loadNo,vehicleNo:ld.vehicleNo,securityNo:ld.securityNo,obdIds:obdIds,obdNos:obdNos,requestedBy:APP.currentUser.id,requestedByName:APP.currentUser.name,reason:reason,scannedItems:ld.scannedItems,expected:ld.expected,status:'Pending',createdAt:new Date().toISOString()});
+    if(ld.source==='continue'&&ld.partialLoadId)DB.remove('loaded_vehicles',ld.partialLoadId);
+    addNotif('Loading Approval: '+loadNo+' for '+ld.vehicleNo,'warning',null,newApproval.id,'qty-mismatch');
+    logAction('Loading','APPROVAL_REQ',loadNo+' requested by '+APP.currentUser.name);
+    showToast('Approval request sent!','success');closeModal();renderStartLoading();
+}
+
+function doFinalSubmit(ld){
+    var obdIds=ld.isMulti?ld.obdId:(Array.isArray(ld.obdId)?ld.obdId:[ld.obdId]);
+    var obdNos=ld.isMulti?ld.obdNo:(Array.isArray(ld.obdNo)?ld.obdNo:[ld.obdNo]);
+    var loadNo='';
+    if(ld.source==='continue'&&ld.partialLoadId){
+        var old=DB.find('loaded_vehicles',ld.partialLoadId);loadNo=old?old.loadNo:genLoadNo();
+        DB.update('loaded_vehicles',ld.partialLoadId,{loadNo:loadNo,scannedItems:ld.scannedItems,loadStatus:'Fully Loaded',mismatch:false,loadedAt:new Date().toISOString(),lastScannedAt:new Date().toISOString()});
+    }else{
+        loadNo=genLoadNo();
+        DB.add('loaded_vehicles',{loadNo:loadNo,vehicleNo:ld.vehicleNo,securityNo:ld.securityNo,obdIds:obdIds,obdNos:obdNos,loadedBy:APP.currentUser.id,loadedByName:APP.currentUser.name,loadedAt:new Date().toISOString(),lastScannedAt:new Date().toISOString(),scannedItems:ld.scannedItems,loadStatus:'Fully Loaded',mismatch:false});
+    }
+    obdIds.forEach(function(oid){
+        DB.filter('loading_assignments',function(a){return a.status==='Assigned'&&(a.obdIds||[]).indexOf(oid)>-1;}).forEach(function(a){
+            var ni=(a.obdIds||[]).filter(function(o){return o!==oid;});
+            var nn=(a.obdNos||[]).filter(function(n,i){return a.obdIds[i]!==oid;});
+            if(!ni.length)DB.update('loading_assignments',a.id,{status:'Done'});else DB.update('loading_assignments',a.id,{obdIds:ni,obdNos:nn});
+        });
+    });
+    var mis=[];ld.expected.forEach(function(e){if(e.scannedQty!==e.requiredQty)mis.push({obdNo:e.obdNo,material:e.material,ean:e.ean,expectedQty:e.requiredQty,scannedQty:e.scannedQty,diff:e.requiredQty-e.scannedQty});});
+    ld.scannedItems.filter(function(s){return !s.inOBD;}).forEach(function(s){mis.push({obdNo:'—',material:s.material,ean:s.ean,expectedQty:0,scannedQty:s.qty,diff:-s.qty});});
+    if(mis.length)DB.add('loading_data',{loadNo:loadNo,vehicleNo:ld.vehicleNo,mismatches:mis,createdAt:new Date().toISOString()});
+    logAction('Loading','DONE',loadNo+' for '+ld.vehicleNo);
+    addNotif('Loading '+loadNo+' completed by '+APP.currentUser.name,'success');
+    showToast('Loading '+loadNo+' submitted!','success');closeModal();renderStartLoading();
+}
+
+function genLoadNo(){
+    var now=new Date();var prefix='LOAD-'+now.getFullYear()+String(now.getMonth()+1).padStart(2,'0');
+    var c1=DB.filter('loaded_vehicles',function(l){return(l.loadNo||'').indexOf(prefix)===0;}).length;
+    var c2=DB.filter('loading_approvals',function(a){return(a.loadNo||'').indexOf(prefix)===0;}).length;
+    return prefix+'-'+String(Math.max(c1,c2)+1).padStart(3,'0');
 }
 
 // --- Loading Done ---
 function renderLoadingDone(){
-    var loaded=DB.get('loaded_vehicles').reverse();
-    var h='<div class="section-header"><h2><i class="bx bx-check-circle"></i> Loaded Vehicles ('+loaded.length+')</h2>';
+   var all=DB.get('loaded_vehicles').filter(function(l){return l.type!=='pickandload';}).reverse();
+    var approved=DB.filter('loading_approvals',function(a){return a.status==='Approved';});
+    var h='<div class="section-header"><h2><i class="bx bx-check-circle"></i> Loaded Vehicles ('+(all.length+approved.length)+')</h2>';
     h+='<div style="display:flex;gap:6px"><button class="btn btn-glass" onclick="exportLoadingExcel()"><i class="bx bx-download"></i> Excel</button><button class="btn btn-glass" onclick="exportLoadingPDF()"><i class="bx bx-file"></i> PDF</button></div></div>';
-    h+='<div class="search-box"><i class="bx bx-search"></i><input type="text" id="loadDoneSearch" placeholder="Search vehicle, load no..." oninput="searchLoadDone()"></div>';
-    h+='<div id="loadDoneTable">'+buildLoadDoneTable(loaded)+'</div>';
+    h+='<div class="search-box"><i class="bx bx-search"></i><input type="text" id="loadDoneSearch" placeholder="Search LOAD-202601, vehicle, OBD..." oninput="searchLoadDone()"></div>';
+    h+='<div id="loadDoneTable">'+buildLoadDoneTable(all,approved)+'</div>';
     setHtml(h);
 }
-function buildLoadDoneTable(loaded){
-    var h='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Load No</th><th>Vehicle</th><th>Materials</th><th>Loaded By</th><th>Time</th><th>Actions</th></tr></thead><tbody>';
-    if(!loaded.length)h+='<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:24px">No loaded vehicles</td></tr>';
-    else loaded.forEach(function(l){
-        h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(l.loadNo)+'</td><td><strong>'+esc(l.vehicleNo)+'</strong></td><td><span class="badge badge-info">'+(l.materials||[]).length+'</span></td><td>'+esc(l.loadedByName)+'</td><td style="font-size:11px;color:var(--text-muted)">'+fmtDT(l.loadedAt)+'</td><td><button class="btn btn-glass btn-sm" onclick="viewLoadDetail(\''+l.id+'\')"><i class="bx bx-eye"></i></button></td></tr>';
+
+function buildLoadDoneTable(loaded,approved){
+    approved=approved||[];
+    var items=[];
+    loaded.forEach(function(l){items.push({t:'load',d:l});});
+    approved.forEach(function(a){items.push({t:'appr',d:a});});
+    items.sort(function(a,b){return new Date(b.d.loadedAt||b.d.createdAt)-new Date(a.d.loadedAt||a.d.createdAt);});
+    var h='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Load No</th><th>Vehicle</th><th>Security</th><th>OBDs</th><th>Items</th><th>Status</th><th>By</th><th>Time</th><th>Actions</th></tr></thead><tbody>';
+    if(!items.length)h+='<tr><td colspan="9" style="text-align:center;color:var(--text-muted);padding:24px">No loaded vehicles</td></tr>';
+    else items.forEach(function(it){
+        var l=it.d;
+        var sb=l.loadStatus==='Fully Loaded'?'<span class="badge badge-success">Full</span>':(l.loadStatus==='Partial'?'<span class="badge badge-warning">Partial</span>':'<span class="badge badge-accent">Approved</span>');
+        var ot='';(l.obdNos||[]).forEach(function(n){ot+='<span class="badge badge-info" style="margin:1px;font-size:9px">'+esc(n)+'</span>';});
+        var by=esc(l.loadedByName||l.requestedByName||'-');
+        var tm=fmtDT(l.loadedAt||l.createdAt);
+        var fn=it.t==='load'?'viewLoadDetail(\''+l.id+'\')':'viewApprovalDetail(\''+l.id+'\')';
+        h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(l.loadNo)+'</td><td><strong>'+esc(l.vehicleNo)+'</strong></td><td style="font-size:11px">'+esc(l.securityNo||'-')+'</td><td>'+ot+'</td><td><span class="badge badge-info">'+(l.scannedItems||[]).length+'</span></td><td>'+sb+'</td><td style="font-size:11px">'+by+'</td><td style="font-size:10px;color:var(--text-muted)">'+tm+'</td><td><button class="btn btn-glass btn-sm" onclick="'+fn+'"><i class="bx bx-eye"></i></button></td></tr>';
     });
     h+='</tbody></table></div>';return h;
 }
+
 function searchLoadDone(){
-    var q=document.getElementById('loadDoneSearch').value.trim().toLowerCase();
-    var loaded=DB.get('loaded_vehicles').reverse();
-    if(q)loaded=loaded.filter(function(l){return(l.vehicleNo||'').toLowerCase().indexOf(q)>-1||(l.loadNo||'').toLowerCase().indexOf(q)>-1;});
-    document.getElementById('loadDoneTable').innerHTML=buildLoadDoneTable(loaded);
+    var q=(document.getElementById('loadDoneSearch').value||'').trim().toUpperCase();
+    var all=DB.get('loaded_vehicles').reverse();
+    var approved=DB.filter('loading_approvals',function(a){return a.status==='Approved';});
+    if(q){
+        all=all.filter(function(l){return(l.loadNo||'').toUpperCase().indexOf(q)>-1||(l.vehicleNo||'').toUpperCase().indexOf(q)>-1||(l.obdNos||[]).join(',').toUpperCase().indexOf(q)>-1;});
+        approved=approved.filter(function(a){return(a.loadNo||'').toUpperCase().indexOf(q)>-1||(a.vehicleNo||'').toUpperCase().indexOf(q)>-1;});
+    }
+    document.getElementById('loadDoneTable').innerHTML=buildLoadDoneTable(all,approved);
 }
+
 function viewLoadDetail(id){
     var l=DB.find('loaded_vehicles',id);if(!l)return;
-    var h='<div style="margin-bottom:12px"><strong>Load No:</strong> <span style="color:var(--accent);font-family:var(--font-display)">'+esc(l.loadNo)+'</span> | <strong>Vehicle:</strong> '+esc(l.vehicleNo)+'</div>';
-    h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD</th><th>Material</th><th>EAN</th><th>Expected</th><th>Scanned</th><th>Diff</th></tr></thead><tbody>';
-    (l.materials||[]).forEach(function(m){
-        var cls=m.diff===0?'qty-match':'qty-mismatch';
-        h+='<tr class="'+(m.diff===0?'':'scan-row-red')+'"><td>'+esc(m.obdNo)+'</td><td>'+esc(m.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(m.ean)+'</td><td>'+m.expectedQty+'</td><td>'+m.scannedQty+'</td><td class="'+cls+'">'+(m.diff>0?'-'+m.diff:(m.diff<0?'+'+Math.abs(m.diff):'0'))+'</td></tr>';
+    var h='<div style="margin-bottom:12px;display:flex;flex-wrap:wrap;gap:10px">';
+    h+='<div><strong>Load:</strong> <span style="color:var(--accent);font-family:var(--font-display)">'+esc(l.loadNo)+'</span></div>';
+    h+='<div><strong>Vehicle:</strong> '+esc(l.vehicleNo)+'</div>';
+    h+='<div><strong>Security:</strong> '+esc(l.securityNo||'-')+'</div>';
+    h+='<div><strong>Status:</strong> '+(l.loadStatus==='Fully Loaded'?'<span class="badge badge-success">Fully Loaded</span>':'<span class="badge badge-warning">Partial</span>')+'</div>';
+    h+='<div><strong>By:</strong> '+esc(l.loadedByName)+'</div>';
+    h+='<div><strong>Time:</strong> '+fmtDT(l.loadedAt)+'</div>';
+    h+='</div>';
+    h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>EAN</th><th>Material</th><th>Description</th><th>OBD</th><th>Qty</th><th>Status</th></tr></thead><tbody>';
+    (l.scannedItems||[]).forEach(function(s,i){
+        var rc=s.inOBD?'':'scan-row-red';
+        var st=s.inOBD?'<span class="badge badge-success" style="font-size:9px">In OBD</span>':'<span class="badge badge-danger" style="font-size:9px">Not in OBD</span>';
+        h+='<tr class="'+rc+'"><td>'+(i+1)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(s.ean)+'</td><td>'+esc(s.material)+'</td><td style="font-size:11px;color:var(--text-muted)">'+esc(s.description)+'</td><td style="font-size:11px">'+esc(s.obdNo)+'</td><td><strong>'+s.qty+'</strong></td><td>'+st+'</td></tr>';
     });
     h+='</tbody></table></div>';
-    showModal('Loading Detail — '+l.loadNo,h,'lg','<button class="btn btn-glass" onclick="closeModal()">Close</button>');
+    showModal('Loading Detail — '+l.loadNo,h,'xl','<button class="btn btn-glass" onclick="closeModal()">Close</button>');
 }
-function exportLoadingExcel(){
-    var loaded=DB.get('loaded_vehicles');var rows=[['Load No','Vehicle','Material','EAN','Expected','Scanned','Diff','By','Time']];
-    loaded.forEach(function(l){(l.materials||[]).forEach(function(m){rows.push([l.loadNo,l.vehicleNo,m.material,m.ean,m.expectedQty,m.scannedQty,m.diff,l.loadedByName,fmtDT(l.loadedAt)]);});});
-    var ws=XLSX.utils.aoa_to_sheet(rows);var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Loading');XLSX.writeFile(wb,'Loading_Done_'+today()+'.xlsx');showToast('Excel downloaded!','success');
-}
-function exportLoadingPDF(){
-    var loaded=DB.get('loaded_vehicles');var rows=[];
-    loaded.forEach(function(l){(l.materials||[]).forEach(function(m){rows.push([l.loadNo,l.vehicleNo,m.material,m.ean,m.expectedQty,m.scannedQty,m.diff,l.loadedByName,fmtDT(l.loadedAt)]);});});
-    var pdf=new jspdf.jsPDF({orientation:'landscape'});pdf.setFontSize(14);pdf.text('Loading Report — VIP INDUSTRIES MD20',14,15);pdf.setFontSize(8);pdf.text('Generated: '+fmtDT(new Date()),14,22);
-    pdf.autoTable({startY:28,head:[['Load No','Vehicle','Material','EAN','Exp','Scan','Diff','By','Time']],body:rows,theme:'grid',headStyles:{fillColor:[0,180,120]},styles:{fontSize:7}});
-    pdf.save('Loading_Report_'+today()+'.pdf');showToast('PDF downloaded!','success');
+
+function viewApprovalDetail(id){
+    var a=DB.find('loading_approvals',id);if(!a)return;
+    var h='<div style="margin-bottom:12px;padding:12px;background:var(--bg-secondary);border-radius:8px">';
+    h+='<div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:6px">';
+    h+='<div><strong>Load:</strong> <span style="color:var(--accent);font-family:var(--font-display)">'+esc(a.loadNo)+'</span></div>';
+    h+='<div><strong>Vehicle:</strong> '+esc(a.vehicleNo)+'</div>';
+    h+='<div><strong>Security:</strong> '+esc(a.securityNo||'-')+'</div>';
+    h+='<div><span class="badge badge-success">Approved</span></div>';
+    h+='</div>';
+    h+='<div><strong>Requested By:</strong> '+esc(a.requestedByName)+' | <strong>Reason:</strong> <span style="color:var(--warning)">'+esc(a.reason)+'</span></div>';
+    h+='</div>';
+    // Expected vs Scanned
+    if(a.expected){
+        h+='<div class="card-title" style="margin-bottom:6px"><i class="bx bx-list-check"></i> Expected vs Scanned</div>';
+        h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>EAN</th><th>Expected</th><th>Scanned</th><th>Diff</th></tr></thead><tbody>';
+        (a.expected||[]).forEach(function(e){
+            var d=e.requiredQty-e.scannedQty;var rc=d===0?'':'scan-row-red';
+            h+='<tr class="'+rc+'"><td>'+esc(e.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(e.ean)+'</td><td>'+e.requiredQty+'</td><td><strong>'+(e.scannedQty||0)+'</strong></td><td class="'+(d===0?'qty-match':'qty-mismatch')+'">'+(d===0?'0':(d>0?'-'+d:'+'+Math.abs(d)))+'</td></tr>';
+        });
+        h+='</tbody></table></div>';
+    }
+    h+='<div class="table-wrapper" style="margin-top:10px"><table class="data-table"><thead><tr><th>#</th><th>EAN</th><th>Material</th><th>Qty</th><th>In OBD</th></tr></thead><tbody>';
+    (a.scannedItems||[]).forEach(function(s,i){
+        h+='<tr class="'+(s.inOBD?'':'scan-row-red')+'"><td>'+(i+1)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(s.ean)+'</td><td>'+esc(s.material)+'</td><td>'+s.qty+'</td><td>'+(s.inOBD?'<span class="badge badge-success" style="font-size:9px">Yes</span>':'<span class="badge badge-danger" style="font-size:9px">No</span>')+'</td></tr>';
+    });
+    h+='</tbody></table></div>';
+    showModal('Approved Loading — '+a.loadNo,h,'xl','<button class="btn btn-glass" onclick="closeModal()">Close</button>');
 }
 
 // --- Qty Mismatch ---
 function renderQtyMismatch(){
     var shorts=DB.get('short_reports').reverse();
-    var loadMismatches=DB.get('loading_data').reverse();
-    var h='<div class="section-header"><h2><i class="bx bx-error-circle"></i> Quantity Mismatch Reports</h2>';
+    var loadMis=DB.get('loading_data').reverse();
+    var pending=DB.filter('loading_approvals',function(a){return a.status==='Pending';});
+    var rejected=DB.filter('loading_approvals',function(a){return a.status==='Rejected';});
+    var h='<div class="section-header"><h2><i class="bx bx-error-circle"></i> Quantity Mismatch</h2>';
     h+='<div style="display:flex;gap:6px"><button class="btn btn-glass" onclick="exportMismatchExcel()"><i class="bx bx-download"></i> Excel</button><button class="btn btn-glass" onclick="exportMismatchPDF()"><i class="bx bx-file"></i> PDF</button></div></div>';
-
-    // Short reports (unloading)
-    h+='<div class="card"><div class="card-title"><i class="bx bx-error" style="color:var(--danger)"></i> Unloading Short Reports ('+shorts.length+')</div>';
-    if(!shorts.length)h+='<div style="color:var(--text-muted);padding:16px;text-align:center">No shorts</div>';
-    else{
-        h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Short No</th><th>Vehicle/OBD</th><th>Invoice</th><th>Material</th><th>Expected</th><th>Actual</th><th>Short</th><th>Posted</th></tr></thead><tbody>';
-        shorts.forEach(function(s){
-            (s.items||[]).forEach(function(it){
-                h+='<tr class="scan-row-red"><td style="font-family:var(--font-display);font-size:10px">'+esc(s.shortNo)+'</td><td>'+esc(s.vehicleNo)+'</td><td>'+esc(it.invoiceNo)+'</td><td>'+esc(it.material)+'</td><td>'+it.expected+'</td><td>'+it.scanned+'</td><td class="qty-mismatch">-'+it.short+'</td><td>'+(s.posted?'<span class="badge badge-success">Yes</span>':'<span class="badge badge-warning">No</span>')+'</td></tr>';
-            });
-        });
-        h+='</tbody></table></div>';
-    }
-    h+='</div>';
-
-    // Loading mismatches
-    h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-error" style="color:var(--warning)"></i> Loading Mismatches ('+loadMismatches.length+')</div>';
-    if(!loadMismatches.length)h+='<div style="color:var(--text-muted);padding:16px;text-align:center">No mismatches</div>';
-    else{
-        h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Load No</th><th>Vehicle</th><th>Material</th><th>Expected</th><th>Scanned</th><th>Diff</th></tr></thead><tbody>';
-        loadMismatches.forEach(function(lm){
-            (lm.mismatches||[]).forEach(function(m){
-                if(m.diff!==0){
-                    h+='<tr class="'+(m.diff<0?'scan-row-red':'scan-row-red')+'"><td style="font-family:var(--font-display);font-size:10px">'+esc(lm.loadNo)+'</td><td>'+esc(lm.vehicleNo)+'</td><td>'+esc(m.material)+'</td><td>'+m.expectedQty+'</td><td>'+m.scannedQty+'</td><td class="qty-mismatch">'+(m.diff>0?'-'+m.diff:'+'+Math.abs(m.diff))+'</td></tr>';
-                }
-            });
-        });
-        h+='</tbody></table></div>';
-    }
-    h+='</div>';
+    h+='<div class="search-box" style="margin-bottom:12px"><i class="bx bx-search"></i><input type="text" id="mismatchSearch" placeholder="Search LOAD-202601, vehicle, OBD..." oninput="searchMismatch()"></div>';
+    h+='<div id="mismatchContent">'+buildMismatchHTML(shorts,loadMis,pending,rejected)+'</div>';
     setHtml(h);
 }
+
+function buildMismatchHTML(shorts,loadMis,pending,rejected){
+    var h='';
+    // Pending Approvals
+    if(pending.length){
+        h+='<div class="card"><div class="card-title"><i class="bx bx-time-five" style="color:var(--warning)"></i> Pending Approvals ('+pending.length+')</div>';
+        h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Load No</th><th>Vehicle</th><th>OBD</th><th>By</th><th>Reason</th><th>Time</th><th>Actions</th></tr></thead><tbody>';
+        pending.forEach(function(a){
+            h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(a.loadNo)+'</td><td>'+esc(a.vehicleNo)+'</td><td>'+(a.obdNos||[]).map(function(n){return '<span class="badge badge-info" style="font-size:9px">'+esc(n)+'</span>';}).join(' ')+'</td><td>'+esc(a.requestedByName)+'</td><td style="font-size:11px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(a.reason)+'</td><td style="font-size:10px;color:var(--text-muted)">'+fmtDT(a.createdAt)+'</td>';
+            h+='<td><div class="table-actions"><button class="btn btn-glass btn-sm" onclick="viewApprovalRequest(\''+a.id+'\')"><i class="bx bx-eye"></i></button>';
+            if(chkAct('canApprove'))h+='<button class="btn btn-glass btn-sm" style="color:var(--success)" onclick="approveLoading(\''+a.id+'\')"><i class="bx bx-check"></i></button><button class="btn btn-danger btn-sm" onclick="rejectLoading(\''+a.id+'\')"><i class="bx bx-x"></i></button>';
+            h+='</div></td></tr>';
+        });
+        h+='</tbody></table></div></div>';
+    }
+    // Rejected
+    if(rejected.length){
+        h+='<div class="card" style="margin-top:12px"><div class="card-title"><i class="bx bx-x-circle" style="color:var(--danger)"></i> Rejected ('+rejected.length+')</div>';
+        h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Load No</th><th>Vehicle</th><th>OBD</th><th>By</th><th>Reason</th><th>Time</th><th>Actions</th></tr></thead><tbody>';
+        rejected.forEach(function(a){
+            h+='<tr class="scan-row-red"><td style="font-family:var(--font-display);font-size:11px;color:var(--danger)">'+esc(a.loadNo)+'</td><td>'+esc(a.vehicleNo)+'</td><td>'+(a.obdNos||[]).map(function(n){return '<span class="badge badge-info" style="font-size:9px">'+esc(n)+'</span>';}).join(' ')+'</td><td>'+esc(a.requestedByName)+'</td><td style="font-size:11px">'+esc(a.reason)+'</td><td style="font-size:10px;color:var(--text-muted)">'+fmtDT(a.createdAt)+'</td><td><button class="btn btn-glass btn-sm" onclick="viewApprovalRequest(\''+a.id+'\')"><i class="bx bx-eye"></i></button></td></tr>';
+        });
+        h+='</tbody></table></div></div>';
+    }
+    // Loading Mismatches
+    h+='<div class="card" style="margin-top:12px"><div class="card-title"><i class="bx bx-error" style="color:var(--warning)"></i> Loading Mismatches ('+loadMis.length+')</div>';
+    if(!loadMis.length)h+='<div style="color:var(--text-muted);padding:16px;text-align:center">No loading mismatches</div>';
+    else{
+        h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Load No</th><th>Vehicle</th><th>Material</th><th>EAN</th><th>Expected</th><th>Scanned</th><th>Diff</th><th>Actions</th></tr></thead><tbody>';
+        loadMis.forEach(function(lm){
+            (lm.mismatches||[]).forEach(function(m){
+                h+='<tr class="scan-row-red"><td style="font-family:var(--font-display);font-size:10px;color:var(--accent)">'+esc(lm.loadNo)+'</td><td>'+esc(lm.vehicleNo)+'</td><td>'+esc(m.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(m.ean||'')+'</td><td>'+m.expectedQty+'</td><td>'+m.scannedQty+'</td><td class="qty-mismatch">'+(m.diff>0?'-'+m.diff:'+'+Math.abs(m.diff))+'</td><td><button class="btn btn-glass btn-sm" onclick="viewMismatchDetail(\''+lm.id+'\')"><i class="bx bx-eye"></i></button></td></tr>';
+            });
+        });
+        h+='</tbody></table></div>';
+    }
+    h+='</div>';
+    // Unloading Shorts
+    h+='<div class="card" style="margin-top:12px"><div class="card-title"><i class="bx bx-error" style="color:var(--danger)"></i> Unloading Shorts ('+shorts.length+')</div>';
+    if(!shorts.length)h+='<div style="color:var(--text-muted);padding:16px;text-align:center">No shorts</div>';
+    else{
+        h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Short No</th><th>Vehicle</th><th>Invoice</th><th>Material</th><th>EAN</th><th>Expected</th><th>Actual</th><th>Short</th><th>Posted</th><th>Actions</th></tr></thead><tbody>';
+        shorts.forEach(function(s){
+            (s.items||[]).forEach(function(it){
+                h+='<tr class="scan-row-red"><td style="font-family:var(--font-display);font-size:10px">'+esc(s.shortNo)+'</td><td>'+esc(s.vehicleNo)+'</td><td>'+esc(it.invoiceNo)+'</td><td>'+esc(it.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(it.ean||'')+'</td><td>'+it.expected+'</td><td>'+it.scanned+'</td><td class="qty-mismatch">-'+it.short+'</td><td>'+(s.posted?'<span class="badge badge-success">Yes</span>':'<span class="badge badge-warning">No</span>')+'</td><td><button class="btn btn-glass btn-sm" onclick="viewShortDetail(\''+s.id+'\')"><i class="bx bx-eye"></i></button></td></tr>';
+            });
+        });
+        h+='</tbody></table></div>';
+    }
+    h+='</div>';return h;
+}
+
+function searchMismatch(){
+    var q=(document.getElementById('mismatchSearch').value||'').trim().toUpperCase();
+    var shorts=DB.get('short_reports').reverse();
+    var loadMis=DB.get('loading_data').reverse();
+    var pending=DB.filter('loading_approvals',function(a){return a.status==='Pending';});
+    var rejected=DB.filter('loading_approvals',function(a){return a.status==='Rejected';});
+    if(q){
+        loadMis=loadMis.filter(function(lm){return(lm.loadNo||'').toUpperCase().indexOf(q)>-1||(lm.vehicleNo||'').toUpperCase().indexOf(q)>-1;});
+        pending=pending.filter(function(a){return(a.loadNo||'').toUpperCase().indexOf(q)>-1||(a.vehicleNo||'').toUpperCase().indexOf(q)>-1;});
+        rejected=rejected.filter(function(a){return(a.loadNo||'').toUpperCase().indexOf(q)>-1||(a.vehicleNo||'').toUpperCase().indexOf(q)>-1;});
+        shorts=shorts.filter(function(s){return(s.shortNo||'').toUpperCase().indexOf(q)>-1||(s.vehicleNo||'').toUpperCase().indexOf(q)>-1;});
+    }
+    document.getElementById('mismatchContent').innerHTML=buildMismatchHTML(shorts,loadMis,pending,rejected);
+}
+
+function viewApprovalRequest(id){
+    var a=DB.find('loading_approvals',id);if(!a)return;
+    var h='<div style="margin-bottom:12px;padding:12px;background:var(--bg-secondary);border-radius:8px">';
+    h+='<div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:6px">';
+    h+='<div><strong>Load:</strong> <span style="color:var(--accent);font-family:var(--font-display)">'+esc(a.loadNo)+'</span></div>';
+    h+='<div><strong>Vehicle:</strong> '+esc(a.vehicleNo)+'</div>';
+    h+='<div><strong>Security:</strong> '+esc(a.securityNo||'-')+'</div>';
+    h+='<div><span class="badge '+(a.status==='Pending'?'badge-warning':(a.status==='Approved'?'badge-success':'badge-danger'))+'">'+esc(a.status)+'</span></div>';
+    h+='</div>';
+    h+='<div><strong>By:</strong> '+esc(a.requestedByName)+' | <strong>Time:</strong> '+fmtDT(a.createdAt)+'</div>';
+      h+='<div style="margin-top:4px"><strong>Reason:</strong> <span style="color:var(--warning)">'+esc(a.reason)+'</span></div>';
+    if(a.status==='Rejected')h+='<div style="margin-top:4px"><strong>Rejection Reason:</strong> <span style="color:var(--danger)">'+esc(a.rejectReason||'Not provided')+'</span></div>';
+    h+='</div>';
+    if(a.expected){
+        h+='<div class="card-title" style="margin-bottom:6px"><i class="bx bx-list-check"></i> Expected vs Scanned</div>';
+        h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>EAN</th><th>Expected</th><th>Scanned</th><th>Diff</th></tr></thead><tbody>';
+        (a.expected||[]).forEach(function(e){
+            var d=e.requiredQty-e.scannedQty;h+='<tr class="'+(d===0?'':'scan-row-red')+'"><td>'+esc(e.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(e.ean)+'</td><td>'+e.requiredQty+'</td><td><strong>'+(e.scannedQty||0)+'</strong></td><td class="'+(d===0?'qty-match':'qty-mismatch')+'">'+(d===0?'0':(d>0?'-'+d:'+'+Math.abs(d)))+'</td></tr>';
+        });
+        h+='</tbody></table></div>';
+    }
+    h+='<div class="card-title" style="margin:10px 0 6px"><i class="bx bx-scan"></i> All Scanned ('+(a.scannedItems||[]).length+')</div>';
+    h+='<div class="table-wrapper" style="max-height:200px;overflow-y:auto"><table class="data-table"><thead><tr><th>#</th><th>EAN</th><th>Material</th><th>Qty</th><th>In OBD</th></tr></thead><tbody>';
+    (a.scannedItems||[]).forEach(function(s,i){h+='<tr class="'+(s.inOBD?'':'scan-row-red')+'"><td>'+(i+1)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(s.ean)+'</td><td>'+esc(s.material)+'</td><td>'+s.qty+'</td><td>'+(s.inOBD?'<span class="badge badge-success" style="font-size:9px">Yes</span>':'<span class="badge badge-danger" style="font-size:9px">No</span>')+'</td></tr>';});
+    h+='</tbody></table></div>';
+    var ft='<button class="btn btn-glass" onclick="closeModal()">Close</button>';
+    if(a.status==='Pending'&&chkAct('canApprove'))ft+='<button class="btn btn-glass" style="background:var(--success);color:#000" onclick="approveLoading(\''+a.id+'\')"><i class="bx bx-check"></i> Approve</button><button class="btn btn-danger" onclick="rejectLoading(\''+a.id+'\')"><i class="bx bx-x"></i> Reject</button>';
+    showModal('Approval — '+a.loadNo,h,'xl',ft);
+}
+
+function approveLoading(aid){
+    if(!confirm('Approve this loading?'))return;
+    var a=DB.find('loading_approvals',aid);if(!a)return;
+    DB.update('loading_approvals',aid,{status:'Approved',approvedBy:APP.currentUser?APP.currentUser.id:'',approvedByName:APP.currentUser?APP.currentUser.name:'',approvedAt:new Date().toISOString()});
+    DB.add('loaded_vehicles',{loadNo:a.loadNo,vehicleNo:a.vehicleNo,securityNo:a.securityNo,obdIds:a.obdIds,obdNos:a.obdNos,loadedBy:a.requestedBy,loadedByName:a.requestedByName,loadedAt:new Date().toISOString(),lastScannedAt:new Date().toISOString(),scannedItems:a.scannedItems,loadStatus:'Fully Loaded',mismatch:true,approvedById:aid});
+    var mis=[];(a.expected||[]).forEach(function(e){if(e.scannedQty!==e.requiredQty)mis.push({obdNo:e.obdNo,material:e.material,ean:e.ean,expectedQty:e.requiredQty,scannedQty:e.scannedQty,diff:e.requiredQty-e.scannedQty});});
+    (a.scannedItems||[]).filter(function(s){return !s.inOBD;}).forEach(function(s){mis.push({obdNo:'—',material:s.material,ean:s.ean,expectedQty:0,scannedQty:s.qty,diff:-s.qty});});
+    if(mis.length)DB.add('loading_data',{loadNo:a.loadNo,vehicleNo:a.vehicleNo,mismatches:mis,createdAt:new Date().toISOString()});
+    (a.obdIds||[]).forEach(function(oid){
+        DB.filter('loading_assignments',function(as){return as.status==='Assigned'&&(as.obdIds||[]).indexOf(oid)>-1;}).forEach(function(as){
+            var ni=(as.obdIds||[]).filter(function(o){return o!==oid;});var nn=(as.obdNos||[]).filter(function(n,i){return as.obdIds[i]!==oid;});
+            if(!ni.length)DB.update('loading_assignments',as.id,{status:'Done'});else DB.update('loading_assignments',as.id,{obdIds:ni,obdNos:nn});
+        });
+    });
+    addNotif('Loading '+a.loadNo+' approved','success');
+    logAction('Loading','APPROVED',a.loadNo);
+    showToast('Approved!','success');
+    closeModal();
+    renderQtyMismatch();
+}
+
+function rejectLoading(aid){
+    if(!confirm('Reject this loading?'))return;
+    var a=DB.find('loading_approvals',aid);if(!a)return;
+    DB.update('loading_approvals',aid,{status:'Rejected',rejectedBy:APP.currentUser?APP.currentUser.id:'',rejectedByName:APP.currentUser?APP.currentUser.name:'',rejectedAt:new Date().toISOString()});
+    addNotif('Loading '+a.loadNo+' rejected','error');
+    logAction('Loading','REJECTED',a.loadNo+' rejected by '+APP.currentUser.name);
+    showToast('Rejected','error');closeModal();renderQtyMismatch();
+}
+
+function viewMismatchDetail(id){
+    var lm=DB.find('loading_data',id);if(!lm)return;
+    var h='<div style="margin-bottom:12px"><strong>Load:</strong> <span style="color:var(--accent);font-family:var(--font-display)">'+esc(lm.loadNo)+'</span> | <strong>Vehicle:</strong> '+esc(lm.vehicleNo)+'</div>';
+    h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>EAN</th><th>Expected</th><th>Scanned</th><th>Diff</th></tr></thead><tbody>';
+    (lm.mismatches||[]).forEach(function(m){
+        var cls=m.diff===0?'':'scan-row-red';
+        h+='<tr class="'+cls+'"><td>'+esc(m.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(m.ean||'')+'</td><td>'+m.expectedQty+'</td><td><strong>'+m.scannedQty+'</strong></td><td class="'+(m.diff===0?'qty-match':'qty-mismatch')+'">'+(m.diff>0?'-'+m.diff:'+'+Math.abs(m.diff))+'</td></tr>';
+    });
+    h+='</tbody></table></div>';
+    showModal('Mismatch Detail — '+lm.loadNo,h,'lg','<button class="btn btn-glass" onclick="closeModal()">Close</button>');
+}
+
+function viewShortDetail(id){
+    var s=DB.find('short_reports',id);if(!s)return;
+    var h='<div style="margin-bottom:12px"><strong>Short No:</strong> <span style="color:var(--danger);font-family:var(--font-display)">'+esc(s.shortNo)+'</span> | <strong>Vehicle:</strong> '+esc(s.vehicleNo)+'</div>';
+    h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Invoice</th><th>Material</th><th>EAN</th><th>Expected</th><th>Actual</th><th>Short</th></tr></thead><tbody>';
+    (s.items||[]).forEach(function(it){
+        h+='<tr class="scan-row-red"><td>'+esc(it.invoiceNo)+'</td><td>'+esc(it.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(it.ean||'')+'</td><td>'+it.expected+'</td><td>'+it.scanned+'</td><td class="qty-mismatch">-'+it.short+'</td></tr>';
+    });
+    h+='</tbody></table></div>';
+    showModal('Short Detail — '+s.shortNo,h,'lg','<button class="btn btn-glass" onclick="closeModal()">Close</button>');
+}
+
+function exportLoadingExcel(){
+    var loaded=DB.get('loaded_vehicles');var approved=DB.filter('loading_approvals',function(a){return a.status==='Approved';});
+    var rows=[['Load No','Vehicle','Security No','OBD','EAN','Material','Description','Qty','In OBD','Status','Loaded By','Time']];
+    loaded.forEach(function(l){
+        (l.scannedItems||[]).forEach(function(s){rows.push([l.loadNo,l.vehicleNo,l.securityNo||'',s.obdNo||'',s.ean,s.material,s.description||'',s.qty,s.inOBD?'Yes':'No',l.loadStatus,l.loadedByName,fmtDT(l.loadedAt)]);});
+    });
+    approved.forEach(function(a){
+        (a.scannedItems||[]).forEach(function(s){rows.push([a.loadNo,a.vehicleNo,a.securityNo||'',s.obdNo||'',s.ean,s.material,s.description||'',s.qty,s.inOBD?'Yes':'No','Approved (Mismatch)',a.requestedByName,fmtDT(a.createdAt)]);});
+    });
+    var ws=XLSX.utils.aoa_to_sheet(rows);var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Loading');XLSX.writeFile(wb,'Loading_Report_'+today()+'.xlsx');showToast('Excel downloaded!','success');
+}
+
+function exportLoadingPDF(){
+    var loaded=DB.get('loaded_vehicles');var approved=DB.filter('loading_approvals',function(a){return a.status==='Approved';});
+    var rows=[];
+    loaded.forEach(function(l){(l.scannedItems||[]).forEach(function(s){rows.push([l.loadNo,l.vehicleNo,l.securityNo||'',s.obdNo||'',s.ean,s.material,s.qty,s.inOBD?'Yes':'No',l.loadStatus,l.loadedByName,fmtDT(l.loadedAt)]);});});
+    approved.forEach(function(a){(a.scannedItems||[]).forEach(function(s){rows.push([a.loadNo,a.vehicleNo,a.securityNo||'',s.obdNo||'',s.ean,s.material,s.qty,s.inOBD?'Yes':'No','Approved',a.requestedByName,fmtDT(a.createdAt)]);});});
+    var pdf=new jspdf.jsPDF({orientation:'landscape'});pdf.setFontSize(14);pdf.text('Loading Report — VIP INDUSTRIES MD20',14,15);pdf.setFontSize(8);pdf.text('Generated: '+fmtDT(new Date()),14,22);
+    pdf.autoTable({startY:28,head:[['Load No','Vehicle','Security','OBD','EAN','Material','Qty','In OBD','Status','By','Time']],body:rows,theme:'grid',headStyles:{fillColor:[0,180,120]},styles:{fontSize:6}});
+    pdf.save('Loading_Report_'+today()+'.pdf');showToast('PDF downloaded!','success');
+}
+
 function exportMismatchExcel(){
-    var shorts=DB.get('short_reports');var rows=[['Short No','Vehicle','Invoice','Material','EAN','Expected','Actual','Short','Posted']];
-    shorts.forEach(function(s){(s.items||[]).forEach(function(it){rows.push([s.shortNo,s.vehicleNo,it.invoiceNo,it.material,it.ean,it.expected,it.scanned,it.short,s.posted?'Yes':'No']);});});
+    var shorts=DB.get('short_reports');var loadMis=DB.get('loading_data');var pending=DB.filter('loading_approvals',function(a){return a.status==='Pending';});
+    var rows=[['Type','Ref No','Vehicle','OBD','Material','EAN','Expected','Scanned','Diff','Status','Reason']];
+    shorts.forEach(function(s){(s.items||[]).forEach(function(it){rows.push(['Unloading Short',s.shortNo,s.vehicleNo,it.invoiceNo,it.material,it.ean,it.expected,it.scanned,-it.short,s.posted?'Posted':'Unposted','']);});});
+    loadMis.forEach(function(lm){(lm.mismatches||[]).forEach(function(m){rows.push(['Loading Mismatch',lm.loadNo,lm.vehicleNo,'',m.material,m.ean,m.expectedQty,m.scannedQty,m.diff,'Loaded','']);});});
+    pending.forEach(function(a){(a.expected||[]).forEach(function(e){if(e.scannedQty!==e.requiredQty)rows.push(['Loading Approval',a.loadNo,a.vehicleNo,(a.obdNos||[]).join(','),e.material,e.ean,e.requiredQty,e.scannedQty,e.requiredQty-e.scannedQty,'Pending',a.reason]);});});
     var ws=XLSX.utils.aoa_to_sheet(rows);var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Mismatch');XLSX.writeFile(wb,'Qty_Mismatch_'+today()+'.xlsx');showToast('Excel downloaded!','success');
 }
+
 function exportMismatchPDF(){
-    var shorts=DB.get('short_reports');var rows=[];
-    shorts.forEach(function(s){(s.items||[]).forEach(function(it){rows.push([s.shortNo,s.vehicleNo,it.invoiceNo,it.material,it.ean,it.expected,it.scanned,it.short]);});});
-    var pdf=new jspdf.jsPDF({orientation:'landscape'});pdf.setFontSize(14);pdf.text('Quantity Mismatch Report — VIP INDUSTRIES MD20',14,15);
-    pdf.autoTable({startY:22,head:[['Short No','Vehicle','Invoice','Material','EAN','Exp','Act','Short']],body:rows,theme:'grid',headStyles:{fillColor:[220,38,38]},styles:{fontSize:7}});
+    var shorts=DB.get('short_reports');var loadMis=DB.get('loading_data');var pending=DB.filter('loading_approvals',function(a){return a.status==='Pending';});
+    var rows=[];
+    shorts.forEach(function(s){(s.items||[]).forEach(function(it){rows.push(['Unloading Short',s.shortNo,s.vehicleNo,it.invoiceNo,it.material,it.ean,it.expected,it.scanned,-it.short,s.posted?'Posted':'Pending']);});});
+    loadMis.forEach(function(lm){(lm.mismatches||[]).forEach(function(m){rows.push(['Loading Mismatch',lm.loadNo,lm.vehicleNo,'',m.material,m.ean,m.expectedQty,m.scannedQty,m.diff,'Loaded']);});});
+    pending.forEach(function(a){(a.expected||[]).forEach(function(e){if(e.scannedQty!==e.requiredQty)rows.push(['Loading Approval',a.loadNo,a.vehicleNo,(a.obdNos||[]).join(','),e.material,e.ean,e.requiredQty,e.scannedQty,e.requiredQty-e.scannedQty,'Pending']);});});
+    var pdf=new jspdf.jsPDF({orientation:'landscape'});pdf.setFontSize(14);pdf.text('Quantity Mismatch Report — VIP INDUSTRIES MD20',14,15);pdf.setFontSize(8);pdf.text('Generated: '+fmtDT(new Date()),14,22);
+    pdf.autoTable({startY:28,head:[['Type','Ref No','Vehicle','OBD','Material','EAN','Expected','Scanned','Diff','Status']],body:rows,theme:'grid',headStyles:{fillColor:[220,38,38]},styles:{fontSize:6}});
     pdf.save('Qty_Mismatch_'+today()+'.pdf');showToast('PDF downloaded!','success');
 }
+        
 
 // ==================== USER WORKING TIME ====================
 function renderUserWorkingTime(){

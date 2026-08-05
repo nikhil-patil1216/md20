@@ -17,27 +17,13 @@
     <link rel="stylesheet" href="style.css">
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
-
 </head>
 <body>
-
-    <!-- ===================== LOGIN PAGE ===================== -->
+    <!-- LOGIN PAGE -->
     <div id="loginPage">
-        <!-- Warehouse Background Image -->
-        <div class="login-bg-image"></div>
-        <div class="login-bg-overlay"></div>
-
-        <!-- Video background (uncomment below & comment above image divs to use video) -->
-        <!-- <video class="login-bg-video" autoplay muted loop playsinline>
-            <source src="https://cdn.pixabay.com/video/2020/07/30/45349-446689498_large.mp4" type="video/mp4">
-        </video>
-        <div class="login-bg-overlay"></div> -->
-
         <canvas id="matrixCanvas"></canvas>
         <div class="scan-line"></div>
-
         <div class="login-card">
-            <div class="login-hex"></div>
             <div class="login-brand">
                 <div class="brand-icon"><i class='bx bxs-building-house'></i></div>
                 <h1>VIP INDUSTRIES LIMITED <span>(MD20)</span></h1>
@@ -58,7 +44,7 @@
                         <input type="password" id="loginPass" placeholder="Enter password" required>
                     </div>
                 </div>
-                <button type="submit" class="btn-cyber-login">
+                <button type="submit" class="btn-glass-login">
                     <span>ACCESS SYSTEM</span>
                     <i class='bx bx-log-in'></i>
                 </button>
@@ -67,73 +53,20 @@
         </div>
     </div>
 
-    <!-- ===================== MAIN APP ===================== -->
+    <!-- MAIN APP -->
     <div id="mainApp" style="display:none">
-        <!-- Warehouse Background Image -->
-        <div class="main-app-bg"></div>
-        <div class="main-app-bg-overlay"></div>
-
-        <!-- Video background (uncomment below & comment above image divs to use video) -->
-        <!-- <video class="main-app-bg-video" autoplay muted loop playsinline>
-            <source src="https://cdn.pixabay.com/video/2020/07/30/45349-446689498_large.mp4" type="video/mp4">
-        </video>
-        <div class="main-app-bg-overlay"></div> -->
-
-        <!-- Sidebar -->
         <aside id="sidebar">
             <div class="sidebar-header">
                 <div class="sidebar-logo">
                     <i class='bx bxs-building-house'></i>
                     <div>
-                        <strong>VIP INDUSTRIES LIMITED</strong>
+                        <strong>VIP INDUSTRIES</strong>
                         <small>MD20 — WMS</small>
                     </div>
                 </div>
                 <button id="sidebarClose" class="sidebar-close-btn"><i class='bx bx-x'></i></button>
             </div>
-            <nav id="sidebarNav">
-                <a href="#" data-section="dashboard" class="nav-item active">
-                    <i class='bx bxs-dashboard'></i><span>Dashboard</span>
-                </a>
-                <div class="nav-group">
-                    <a href="#" data-section="inbound" class="nav-item has-sub">
-                        <i class='bx bxs-truck'></i><span>Inbound</span>
-                        <i class='bx bx-chevron-down sub-arrow'></i>
-                    </a>
-                    <div class="nav-sub" id="inboundSub">
-                        <a href="#" data-sub="vehicle-entry" class="nav-sub-item">Vehicle Entry</a>
-                        <a href="#" data-sub="pending-vehicle" class="nav-sub-item">Pending Vehicle</a>
-                        <a href="#" data-sub="unload-process" class="nav-sub-item">Unload Process</a>
-                    </div>
-                </div>
-                <a href="#" data-section="putaway" class="nav-item">
-                    <i class='bx bxs-package'></i><span>Putaway</span>
-                </a>
-                <a href="#" data-section="piv" class="nav-item">
-                    <i class='bx bxs-clipboard'></i><span>PIV</span>
-                </a>
-                <a href="#" data-section="location" class="nav-item">
-                    <i class='bx bxs-map-pin'></i><span>Location Master</span>
-                </a>
-                <a href="#" data-section="rack" class="nav-item">
-                    <i class='bx bxs-grid-alt'></i><span>Rack Master</span>
-                </a>
-                <a href="#" data-section="material" class="nav-item">
-                    <i class='bx bxs-label'></i><span>Material Master</span>
-                </a>
-                <a href="#" data-section="admin" class="nav-item">
-                    <i class='bx bxs-user-detail'></i><span>Admin</span>
-                </a>
-                <a href="#" data-section="settings" class="nav-item">
-                    <i class='bx bxs-cog'></i><span>Settings</span>
-                </a>
-                <a href="#" data-section="reports" class="nav-item">
-                    <i class='bx bxs-bar-chart-alt-2'></i><span>Reports</span>
-                </a>
-                <a href="#" data-section="audit" class="nav-item">
-                    <i class='bx bxs-receipt'></i><span>Audit Log</span>
-                </a>
-            </nav>
+            <nav id="sidebarNav"></nav>
             <div class="sidebar-footer">
                 <div class="dev-credit">
                     <i class='bx bx-code-alt'></i>
@@ -141,21 +74,12 @@
                 </div>
             </div>
         </aside>
-
-        <!-- Sidebar Overlay (Mobile) -->
         <div id="sidebarOverlay" class="sidebar-overlay"></div>
-
-        <!-- Main Content Area -->
         <div id="mainContent">
-            <!-- Shell Bar -->
             <header id="shellBar">
                 <div class="shell-left">
                     <button id="menuToggle" class="shell-btn"><i class='bx bx-menu'></i></button>
-                    <div id="breadcrumb">
-                        <span class="bc-item">VIP INDUSTRIES LIMITED MD20</span>
-                        <i class='bx bx-chevron-right'></i>
-                        <span class="bc-item active" id="bcCurrent">Dashboard</span>
-                    </div>
+                    <div id="breadcrumb"><span class="bc-item active" id="bcCurrent">Dashboard</span></div>
                 </div>
                 <div class="shell-center">
                     <div id="globalSearch" class="global-search">
@@ -167,13 +91,13 @@
                 <div class="shell-right">
                     <button id="notifBtn" class="shell-btn notif-btn">
                         <i class='bx bx-bell'></i>
-                        <span class="notif-badge" id="notifBadge">0</span>
+                        <span class="notif-badge" id="notifBadge" style="display:none">0</span>
                     </button>
                     <button id="themeToggle" class="shell-btn"><i class='bx bx-moon'></i></button>
                     <div class="user-menu" id="userMenu">
                         <div class="user-avatar" id="userAvatar">A</div>
                         <span id="userName">Admin</span>
-                        <i class="bx bx-chevron-down"></i>
+                        <i class='bx bx-chevron-down'></i>
                         <div class="user-dropdown" id="userDropdown">
                             <a href="#" id="ddProfile"><i class='bx bx-user'></i> Profile</a>
                             <a href="#" id="ddPassword"><i class='bx bx-lock'></i> Change Password</a>
@@ -183,8 +107,6 @@
                     </div>
                 </div>
             </header>
-
-            <!-- Notification Panel -->
             <div id="notifPanel" class="notif-panel">
                 <div class="notif-header">
                     <h3>Notifications</h3>
@@ -192,70 +114,46 @@
                 </div>
                 <div id="notifList" class="notif-list"></div>
             </div>
-
-            <!-- Content Sections -->
-            <main id="contentArea">
-                <section id="section-dashboard" class="content-section active"></section>
-                <section id="section-inbound" class="content-section"></section>
-                <section id="section-putaway" class="content-section"></section>
-                <section id="section-piv" class="content-section"></section>
-                <section id="section-location" class="content-section"></section>
-                <section id="section-rack" class="content-section"></section>
-                <section id="section-material" class="content-section"></section>
-                <section id="section-admin" class="content-section"></section>
-                <section id="section-settings" class="content-section"></section>
-                <section id="section-reports" class="content-section"></section>
-                <section id="section-audit" class="content-section"></section>
-            </main>
+            <main id="contentArea"></main>
         </div>
     </div>
 
-    <!-- ===================== MODAL ===================== -->
+    <!-- MODAL -->
     <div id="modalOverlay" class="modal-overlay">
         <div id="modalContainer" class="modal-container"></div>
     </div>
 
-    <!-- ===================== SCANNER MODAL ===================== -->
-    <div id="scannerModal" class="modal-overlay" style="z-index:99999; display:none;">
+    <!-- SCANNER MODAL -->
+    <div id="scannerModal" class="modal-overlay" style="z-index:99999;display:none;">
         <div class="modal-container" style="max-width:420px;">
             <div class="modal-header">
                 <h3><i class='bx bx-qr-scan'></i> Scan Code</h3>
                 <button class="modal-close" onclick="closeScannerModal()"><i class="bx bx-x"></i></button>
             </div>
-            <div class="modal-body" style="text-align:center; padding:10px;">
-                <div style="margin-bottom:15px; display:flex; gap:10px; justify-content:center; flex-wrap:wrap;">
-                    <button class="btn btn-primary btn-sm" onclick="startCameraScan()"><i class="bx bx-camera"></i> Camera Scan</button>
-                    <button class="btn btn-secondary btn-sm" onclick="focusForBluetoothScanner()"><i class="bx bx-bluetooth"></i> Bluetooth/USB/Device</button>
+            <div class="modal-body" style="text-align:center;padding:10px;">
+                <div style="margin-bottom:15px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">
+                    <button class="btn btn-glass" onclick="startCameraScan()"><i class="bx bx-camera"></i> Camera</button>
+                    <button class="btn btn-glass" onclick="focusForBluetoothScanner()"><i class="bx bx-bluetooth"></i> Device</button>
                 </div>
-                <div id="qr-reader" style="width: 100%; border-radius: 8px; overflow: hidden; background:#000; min-height:50px;"></div>
+                <div id="qr-reader" style="width:100%;border-radius:8px;overflow:hidden;background:#000;min-height:50px;"></div>
                 <p style="color:var(--text-muted);margin-top:10px;font-size:12px;">Camera open hone pe barcode ko saamne rakhna.</p>
             </div>
         </div>
     </div>
 
-    <!-- ===================== TOAST ===================== -->
+    <!-- TOAST -->
     <div id="toastContainer" class="toast-container"></div>
 
-    <!-- ===================== BOTTOM NAV (Mobile) ===================== -->
+    <!-- BOTTOM NAV (Mobile) -->
     <div id="bottomNav" class="bottom-nav">
-        <a href="#" class="bnav-item active" data-bnav="dashboard">
-            <i class="bx bxs-dashboard"></i><span>Home</span>
-        </a>
-        <a href="#" class="bnav-item" data-bnav="inbound">
-            <i class="bx bxs-truck"></i><span>Inbound</span>
-        </a>
-        <a href="#" class="bnav-item" data-bnav="putaway">
-            <i class="bx bxs-package"></i><span>Putaway</span>
-        </a>
-        <a href="#" class="bnav-item" data-bnav="piv">
-            <i class="bx bxs-clipboard"></i><span>PIV</span>
-        </a>
-        <a href="#" class="bnav-item" data-bnav="more" id="bnavMore">
-            <i class="bx bx-grid-alt"></i><span>More</span>
-        </a>
+        <a href="#" class="bnav-item active" data-bnav="dashboard"><i class="bx bxs-dashboard"></i><span>Home</span></a>
+        <a href="#" class="bnav-item" data-bnav="inbound"><i class="bx bxs-truck"></i><span>Inbound</span></a>
+        <a href="#" class="bnav-item" data-bnav="picking"><i class="bx bxs-box"></i><span>Picking</span></a>
+        <a href="#" class="bnav-item" data-bnav="loading"><i class="bx bxs-truck"></i><span>Loading</span></a>
+        <a href="#" class="bnav-item" data-bnav="more" id="bnavMore"><i class="bx bx-grid-alt"></i><span>More</span></a>
     </div>
 
-    <!-- ===================== MORE PANEL (Mobile) ===================== -->
+    <!-- MORE PANEL (Mobile) -->
     <div id="morePanel" class="more-panel">
         <div class="more-panel-overlay" id="morePanelOverlay"></div>
         <div class="more-panel-content">
@@ -267,7 +165,7 @@
         </div>
     </div>
 
-    <!-- ===================== LOADER ===================== -->
+    <!-- LOADER -->
     <div id="pageLoader" class="page-loader" style="display:none">
         <div class="loader-content">
             <div class="loader-hex"></div>

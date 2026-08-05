@@ -1,48 +1,40 @@
 /* ============================================================
    VIP INDUSTRIES LIMITED MD20 — WMS COMPLETE SCRIPT
    Developed by Nikhil Patil
-   PART 1: Core Infrastructure + Complete Inbound Flow
    ============================================================ */
 
 // ==================== SUPABASE SYNC ====================
-let supabaseClient = null;
+var supabaseClient = null;
 try {
-    const SUPABASE_URL = 'https://whlqsapzywnadvkhfhzp.supabase.co';
-    const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndobHFzYXB6eXduYWR2a2hmaHpwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUxNjE4ODMsImV4cCI6MjEwMDczNzg4M30.YaNFKPQ9vmhKHYa0DtaZPbbM44IqgSlibPSABId_bno';
-    if (typeof supabase !== 'undefined' && SUPABASE_URL.includes('supabase.co')) {
+    var SUPABASE_URL = 'https://whlqsapzywnadvkhfhzp.supabase.co';
+    var SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndobHFzYXB6eXduYWR2a2hmaHpwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUxNjE4ODMsImV4cCI6MjEwMDczNzg4M30.YaNFKPQ9vmhKHYa0DtaZPbbM44IqgSlibPSABId_bno';
+    if (typeof supabase !== 'undefined' && SUPABASE_URL.indexOf('supabase.co') > -1) {
         supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
     }
 } catch(e) {}
 
-async function pushServerData(key, value) {
+function pushServer(key, val) {
     if (!supabaseClient) return;
-    try { await supabaseClient.from('app_data').upsert({ key: key, value: value }, { onConflict: 'key' }); } catch(e) {}
+    try { supabaseClient.from('app_data').upsert({key:key, value:val}, {onConflict:'key'}); } catch(e) {}
 }
-
-async function pullAllServerData() {
+function pullAll() {
     if (!supabaseClient) return;
     try {
-        var tables = ['users','location_master','material_master','rack_master','vehicles','invoices','invoice_materials','picking_reports','audit_log','notifications','difference_reports','obd_data','picking_assignments','loading_assignments','loading_data','user_sessions','grn_records','short_reports','receiving_docs','loaded_vehicles','picking_done','loading_users','location_requests'];
-        for (var i = 0; i < tables.length; i++) {
-            var t = tables[i];
-            var res = await supabaseClient.from('app_data').select('value').eq('key', t).single();
-            if (res.data && res.data.value) {
-                localStorage.setItem('wms_' + t, JSON.stringify(res.data.value));
-            }
-        }
+        var tables = ['users','location_master','material_master','rack_master','vehicles','invoices','invoice_materials','picking_reports','audit_log','notifications','difference_reports','obd_data','picking_assignments','loading_assignments','loading_data','user_sessions','grn_records','short_reports','unloading_records','loaded_vehicles','picking_done','loading_users','user_work_log'];
+        tables.forEach(function(t) {
+            supabaseClient.from('app_data').select('value').eq('key', t).single().then(function(res) {
+                if (res.data && res.data.value) localStorage.setItem('wms_'+t, JSON.stringify(res.data.value));
+            }).catch(function(){});
+        });
     } catch(e) {}
 }
-
-// Real-time sync
 if (supabaseClient) {
     try {
-        supabaseClient.channel('db-live-sync')
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'app_data' }, function(payload) {
-            if (payload.new && payload.new.key && payload.new.value) {
-                localStorage.setItem('wms_' + payload.new.key, JSON.stringify(payload.new.value));
+        supabaseClient.channel('wms-live').on('postgres_changes',{event:'*',schema:'public',table:'app_data'},function(p) {
+            if (p.new && p.new.key && p.new.value) {
+                localStorage.setItem('wms_'+p.new.key, JSON.stringify(p.new.value));
                 if (APP.currentUser && APP.currentSection) {
                     renderSection(APP.currentSection, APP.currentSub);
-                    showToast('Live Update: Data changed by another user', 'info');
                 }
             }
         }).subscribe();
@@ -51,8244 +43,3651 @@ if (supabaseClient) {
 
 // ==================== STATE ====================
 var APP = {
-    currentUser: null,
-    currentSection: 'dashboard',
-    currentSub: null,
+    currentUser: null, currentSection: 'dashboard', currentSub: null,
     theme: localStorage.getItem('wms_theme') || 'dark',
-    sessionStart: null,
-    SESSION_TIMEOUT: 30 * 60 * 1000,
-    WARNING_BEFORE: 5 * 60 * 1000,
-    locPage: 1, locPerPage: 15,
-    auditPage: 1, auditPerPage: 15,
-    reportPage: 1, reportPerPage: 15,
-    matPage: 1, matPerPage: 15
+    sessionStart: null, SESSION_TIMEOUT: 30*60*1000,
+    locPage:1, locPerPage:15, auditPage:1, auditPerPage:15, reportPage:1, reportPerPage:15, matPage:1, matPerPage:15,
+    scanCallback: null, html5QrCode: null
 };
 
-// ==================== DATABASE LAYER ====================
+// ==================== DATABASE ====================
 var DB = {
-    _key: function(k) { return 'wms_' + k; },
-    get: function(k) { try { return JSON.parse(localStorage.getItem(this._key(k)) || '[]'); } catch(e) { return []; } },
-    getObj: function(k) { try { return JSON.parse(localStorage.getItem(this._key(k)) || '{}'); } catch(e) { return {}; } },
-    set: function(k, v) { localStorage.setItem(this._key(k), JSON.stringify(v)); pushServerData(k, v); },
-    add: function(k, item) {
-        var data = this.get(k);
-        item.id = item.id || this.uid();
-        item.createdAt = item.createdAt || new Date().toISOString();
-        data.push(item);
-        this.set(k, data);
-        return item;
+    _k: function(k){return 'wms_'+k;},
+    get: function(k){try{return JSON.parse(localStorage.getItem(this._k(k))||'[]');}catch(e){return [];}},
+    getObj: function(k){try{return JSON.parse(localStorage.getItem(this._k(k))||'{}');}catch(e){return {};}},
+    set: function(k,v){localStorage.setItem(this._k(k),JSON.stringify(v));pushServer(k,v);},
+    add: function(k,item){
+        var d=this.get(k); item.id=item.id||this.uid(); item.createdAt=item.createdAt||new Date().toISOString();
+        d.push(item); this.set(k,d); return item;
     },
-    update: function(k, id, updates) {
-        var data = this.get(k);
-        var idx = -1;
-        for (var i = 0; i < data.length; i++) { if (data[i].id === id) { idx = i; break; } }
-        if (idx > -1) {
-            for (var key in updates) { data[idx][key] = updates[key]; }
-            data[idx].updatedAt = new Date().toISOString();
-            this.set(k, data);
-            return data[idx];
-        }
+    update: function(k,id,up){
+        var d=this.get(k),idx=-1;
+        for(var i=0;i<d.length;i++){if(d[i].id===id){idx=i;break;}}
+        if(idx>-1){for(var key in up){d[idx][key]=up[key];} d[idx].updatedAt=new Date().toISOString(); this.set(k,d); return d[idx];}
         return null;
     },
-    remove: function(k, id) { var data = this.get(k).filter(function(d) { return d.id !== id; }); this.set(k, data); },
-    find: function(k, id) { return this.get(k).filter(function(d) { return d.id === id; })[0] || null; },
-    filter: function(k, fn) { return this.get(k).filter(fn); },
-    count: function(k, fn) { return fn ? this.get(k).filter(fn).length : this.get(k).length; },
-    uid: function() { return Date.now().toString(36) + Math.random().toString(36).substr(2, 6); },
-    actionNo: function() { return 'ACT-' + Date.now().toString(36).toUpperCase(); },
-    reportNo: function() { return 'PR-' + new Date().getFullYear() + '-' + String(this.count('picking_reports') + 1).padStart(4, '0'); },
-    grnNo: function(invNo) { return 'GRN-' + (invNo || 'XXXX').replace(/\s/g, ''); },
-    shortNo: function() { return 'SRT-' + new Date().getFullYear() + '-' + String(this.count('short_reports') + 1).padStart(4, '0'); },
-    rcvNo: function() { return 'RCV-' + Date.now().toString(36).toUpperCase().substr(0, 8); },
-    loadNo: function(obdNo) { return 'LOAD-' + (obdNo || 'XXXX').replace(/\s/g, ''); }
+    remove: function(k,id){this.set(k,this.get(k).filter(function(d){return d.id!==id;}));},
+    find: function(k,id){return this.get(k).filter(function(d){return d.id===id;})[0]||null;},
+    filter: function(k,fn){return this.get(k).filter(fn);},
+    count: function(k,fn){return fn?this.get(k).filter(fn).length:this.get(k).length;},
+    uid: function(){return Date.now().toString(36)+Math.random().toString(36).substr(2,6);},
+    grnNo: function(inv){return 'GRN-'+(inv||'XXXX').replace(/\s/g,'').substring(0,20)+'-'+Date.now().toString(36).toUpperCase().substr(0,4);},
+    shortNo: function(){return 'SRT-'+new Date().getFullYear()+'-'+String(this.count('short_reports')+1).padStart(4,'0');},
+    loadNo: function(){return 'LOAD-'+Date.now().toString(36).toUpperCase().substr(0,8);},
+    unloadNo: function(){return 'UNL-'+Date.now().toString(36).toUpperCase().substr(0,8);},
+    obdNo: function(){return 'OBD-'+new Date().getFullYear()+'-'+String(this.count('obd_data')+1).padStart(4,'0');}
 };
 
 // ==================== UTILITIES ====================
-function formatDate(d) {
-    if (!d) return '-';
-    var dt = new Date(d);
-    return dt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
-}
-function formatDateTime(d) {
-    if (!d) return '-';
-    var dt = new Date(d);
-    return dt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) + ' ' +
-        dt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
-}
-function today() { return new Date().toISOString().split('T')[0]; }
-function escapeHtml(s) {
-    if (s === null || s === undefined) return '';
-    var div = document.createElement('div');
-    div.textContent = String(s);
-    return div.innerHTML;
-}
-function paginate(arr, page, perPage) {
-    var start = (page - 1) * perPage;
-    return { items: arr.slice(start, start + perPage), total: arr.length, pages: Math.ceil(arr.length / perPage) || 1 };
-}
-function renderPagination(currentPage, totalPages, onClickFn) {
-    if (totalPages <= 1) return '';
-    var html = '<div class="pagination">';
-    html += '<button class="page-btn" onclick="' + onClickFn + '(' + (currentPage - 1) + ')" ' + (currentPage <= 1 ? 'disabled' : '') + '><i class="bx bx-chevron-left"></i></button>';
-    for (var i = 1; i <= totalPages; i++) {
-        if (totalPages > 7 && i > 3 && i < totalPages - 2 && Math.abs(i - currentPage) > 1) {
-            if (i === 4 || i === totalPages - 3) html += '<span style="color:var(--text-muted);padding:0 4px">...</span>';
-            continue;
-        }
-        html += '<button class="page-btn ' + (i === currentPage ? 'active' : '') + '" onclick="' + onClickFn + '(' + i + ')">' + i + '</button>';
+function fmtDate(d){if(!d)return'-';var dt=new Date(d);return dt.toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'});}
+function fmtDT(d){if(!d)return'-';var dt=new Date(d);return dt.toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'})+' '+dt.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'});}
+function today(){return new Date().toISOString().split('T')[0];}
+function esc(s){if(s===null||s===undefined)return'';var d=document.createElement('div');d.textContent=String(s);return d.innerHTML;}
+function paginate(arr,page,pp){var s=(page-1)*pp;return{items:arr.slice(s,s+pp),total:arr.length,pages:Math.ceil(arr.length/pp)||1};}
+function renderPag(cur,tp,fn){
+    if(tp<=1)return'';
+    var h='<div class="pagination">';
+    h+='<button class="page-btn" onclick="'+fn+'('+(cur-1)+')" '+(cur<=1?'disabled':'')+'><i class="bx bx-chevron-left"></i></button>';
+    for(var i=1;i<=tp;i++){
+        if(tp>7&&i>3&&i<tp-2&&Math.abs(i-cur)>1){if(i===4||i===tp-3)h+='<span style="color:var(--text-muted);padding:0 3px">...</span>';continue;}
+        h+='<button class="page-btn '+(i===cur?'active':'')+'" onclick="'+fn+'('+i+')">'+i+'</button>';
     }
-    html += '<button class="page-btn" onclick="' + onClickFn + '(' + (currentPage + 1) + ')" ' + (currentPage >= totalPages ? 'disabled' : '') + '><i class="bx bx-chevron-right"></i></button>';
-    html += '</div>';
-    return html;
+    h+='<button class="page-btn" onclick="'+fn+'('+(cur+1)+')" '+(cur>=tp?'disabled':'')+'><i class="bx bx-chevron-right"></i></button></div>';
+    return h;
+}
+function timeDiff(start,end){
+    if(!start||!end)return'0m';
+    var ms=new Date(end)-new Date(start);
+    var m=Math.floor(ms/60000);
+    if(m<60)return m+'m';
+    var h=Math.floor(m/60);var rm=m%60;
+    return h+'h '+rm+'m';
 }
 
 // ==================== TOAST ====================
-function showToast(msg, type) {
-    type = type || 'info';
-    var icons = { success: 'bx-check-circle', error: 'bx-error-circle', warning: 'bx-error', info: 'bx-info-circle' };
-    var container = document.getElementById('toastContainer');
-    var toast = document.createElement('div');
-    toast.className = 'toast ' + type;
-    toast.innerHTML = '<i class="bx ' + (icons[type] || icons.info) + '"></i><span>' + escapeHtml(msg) + '</span>';
-    container.appendChild(toast);
-    setTimeout(function() {
-        toast.classList.add('removing');
-        setTimeout(function() { toast.remove(); }, 300);
-    }, 3500);
+function showToast(msg,type){
+    type=type||'info';
+    var icons={success:'bx-check-circle',error:'bx-error-circle',warning:'bx-error',info:'bx-info-circle'};
+    var c=document.getElementById('toastContainer');
+    var t=document.createElement('div');
+    t.className='toast '+type;
+    t.innerHTML='<i class="bx '+(icons[type]||icons.info)+'"></i><span>'+esc(msg)+'</span>';
+    c.appendChild(t);
+    setTimeout(function(){t.classList.add('removing');setTimeout(function(){t.remove();},250);},3500);
 }
 
 // ==================== MODAL ====================
-function showModal(title, bodyHtml, size, footerHtml) {
-    size = size || '';
-    footerHtml = footerHtml || '';
-    var overlay = document.getElementById('modalOverlay');
-    var container = document.getElementById('modalContainer');
-    container.className = 'modal-container' + (size ? ' modal-' + size : '');
-    container.innerHTML =
-        '<div class="modal-header"><h3>' + title + '</h3>' +
-        '<button class="modal-close" onclick="closeModal()"><i class="bx bx-x"></i></button></div>' +
-        '<div class="modal-body">' + bodyHtml + '</div>' +
-        (footerHtml ? '<div class="modal-footer">' + footerHtml + '</div>' : '');
-    overlay.classList.add('open');
+function showModal(title,body,size,footer){
+    size=size||'';footer=footer||'';
+    var o=document.getElementById('modalOverlay'),c=document.getElementById('modalContainer');
+    c.className='modal-container'+(size?' modal-'+size:'');
+    c.innerHTML='<div class="modal-header"><h3>'+title+'</h3><button class="modal-close" onclick="closeModal()"><i class="bx bx-x"></i></button></div><div class="modal-body">'+body+'</div>'+(footer?'<div class="modal-footer">'+footer+'</div>':'');
+    o.classList.add('open');
 }
-function closeModal() { document.getElementById('modalOverlay').classList.remove('open'); }
-document.getElementById('modalOverlay').addEventListener('click', function(e) { if (e.target === this) closeModal(); });
+function closeModal(){document.getElementById('modalOverlay').classList.remove('open');}
+document.getElementById('modalOverlay').addEventListener('click',function(e){if(e.target===this)closeModal();});
 
 // ==================== LOADER ====================
-function showLoader() { document.getElementById('pageLoader').style.display = 'flex'; }
-function hideLoader() { document.getElementById('pageLoader').style.display = 'none'; }
+function showLoader(){document.getElementById('pageLoader').style.display='flex';}
+function hideLoader(){document.getElementById('pageLoader').style.display='none';}
 
-// ==================== AUDIT LOG ====================
-function logAction(module, action, details) {
-    DB.add('audit_log', {
-        actionNo: DB.actionNo(), module: module, action: action, details: details,
-        userId: APP.currentUser ? APP.currentUser.id : 'system',
-        userName: APP.currentUser ? APP.currentUser.name : 'System',
-        dateTime: new Date().toISOString()
-    });
+// ==================== AUDIT ====================
+function logAction(mod,act,det){
+    DB.add('audit_log',{module:mod,action:act,details:det,userId:APP.currentUser?APP.currentUser.id:'system',userName:APP.currentUser?APP.currentUser.name:'System',dateTime:new Date().toISOString()});
+    logWorkTime(mod,act);
+}
+function logWorkTime(mod,act){
+    if(!APP.currentUser)return;
+    var logs=DB.get('user_work_log');
+    logs.push({userId:APP.currentUser.id,userName:APP.currentUser.name,module:mod,action:act,dateTime:new Date().toISOString()});
+    if(logs.length>5000)logs=logs.slice(-3000);
+    DB.set('user_work_log',logs);
 }
 
 // ==================== NOTIFICATIONS ====================
-function addNotification(msg, type, targetUser) {
-    type = type || 'info';
-    var notifs = DB.get('notifications');
-    notifs.unshift({ id: DB.uid(), message: msg, type: type, read: false, dateTime: new Date().toISOString(), targetUser: targetUser || null });
-    if (notifs.length > 100) notifs.length = 100;
-    DB.set('notifications', notifs);
-    updateNotifBadge();
+function addNotif(msg,type,target){
+    type=type||'info';
+    var n=DB.get('notifications');
+    n.unshift({id:DB.uid(),message:type,type:type,read:false,dateTime:new Date().toISOString(),targetUser:target||null,messageText:msg});
+    if(n.length>100)n.length=100;
+    DB.set('notifications',n);updateNotifBadge();
 }
-function updateNotifBadge() {
-    var count = 0;
-    var notifs = DB.get('notifications');
-    for (var i = 0; i < notifs.length; i++) {
-        if (!notifs[i].read) count++;
-    }
-    var badge = document.getElementById('notifBadge');
-    badge.textContent = count;
-    badge.style.display = count > 0 ? 'flex' : 'none';
+function updateNotifBadge(){
+    var c=0;var n=DB.get('notifications');
+    for(var i=0;i<n.length;i++){if(!n[i].read)c++;}
+    var b=document.getElementById('notifBadge');b.textContent=c;b.style.display=c>0?'flex':'none';
 }
-function renderNotifPanel() {
-    var list = document.getElementById('notifList');
-    var notifs = DB.get('notifications');
-    if (notifs.length === 0) {
-        list.innerHTML = '<div class="notif-empty"><i class="bx bx-bell-off"></i><p>No notifications</p></div>';
-        return;
+function renderNotifPanel(){
+    var list=document.getElementById('notifList');var n=DB.get('notifications');
+    if(!n.length){list.innerHTML='<div class="notif-empty"><i class="bx bx-bell-off"></i><p>No notifications</p></div>';return;}
+    var h='';var s=n.slice(0,25);
+    for(var i=0;i<s.length;i++){
+        h+='<div class="notif-item '+(s[i].read?'':'unread')+'"><div>'+esc(s[i].messageText||s[i].message)+'</div><div class="notif-time">'+fmtDT(s[i].dateTime)+'</div></div>';
     }
-    var html = '';
-    var show = notifs.slice(0, 30);
-    for (var i = 0; i < show.length; i++) {
-        var n = show[i];
-        html += '<div class="notif-item ' + (n.read ? '' : 'unread') + '" style="cursor:pointer" onclick="handleNotifClick(\'' + escapeHtml(n.message) + '\')">' +
-            '<div>' + escapeHtml(n.message) + '</div>' +
-            '<div class="notif-time">' + formatDateTime(n.dateTime) + '</div></div>';
-    }
-    list.innerHTML = html;
-    // Mark all as read
-    var all = DB.get('notifications');
-    for (var j = 0; j < all.length; j++) { all[j].read = true; }
-    DB.set('notifications', all);
-    updateNotifBadge();
-}
-function handleNotifClick(msg) {
-    document.getElementById('notifPanel').classList.remove('open');
-    // Smart navigation based on notification content
-    if (msg.indexOf('Approval') > -1 || msg.indexOf('approve') > -1) {
-        navigateTo('inbound', 'pending-vehicle');
-    } else if (msg.indexOf('Vehicle') > -1) {
-        navigateTo('inbound', 'pending-vehicle');
-    } else if (msg.indexOf('Picking') > -1) {
-        navigateTo('picking', 'picking-done');
-    } else if (msg.indexOf('Loading') > -1) {
-        navigateTo('loading', 'loading-done');
-    } else {
-        navigateTo('dashboard');
-    }
+    list.innerHTML=h;
+    var all=DB.get('notifications');for(var j=0;j<all.length;j++){all[j].read=true;}DB.set('notifications',all);updateNotifBadge();
 }
 
 // ==================== SEED DATA ====================
-function seedData() {
-    if (DB.get('users').length > 0) return;
-    DB.set('users', [
-        { id: 'u1', username: 'superadmin', password: 'super123', name: 'Super Admin', role: 'Super Admin', permissions: { modules: ['all'], actions: { canSecurityEntry: true, canUploadInvoice: true, canAssignVehicle: true, canStartUnloading: true, canPostVehicle: true, canApprove: true, canViewReports: true, canPutaway: true, canPIV: true, canPick: true, canLoad: true, canAdmin: true } } },
-        { id: 'u2', username: 'admin', password: 'admin123', name: 'Warehouse Admin', role: 'Admin', permissions: { modules: ['all'], actions: { canSecurityEntry: false, canUploadInvoice: true, canAssignVehicle: true, canStartUnloading: true, canPostVehicle: true, canApprove: true, canViewReports: true, canPutaway: true, canPIV: true, canPick: true, canLoad: true, canAdmin: true } } },
-        { id: 'u3', username: 'manager', password: 'mgr123', name: 'Warehouse Manager', role: 'Manager', permissions: { modules: ['dashboard','inbound','reports','audit','picking','loading'], actions: { canSecurityEntry: false, canUploadInvoice: true, canAssignVehicle: true, canStartUnloading: false, canPostVehicle: false, canApprove: true, canViewReports: true, canPutaway: false, canPIV: false, canPick: true, canLoad: true, canAdmin: false } } },
-        { id: 'u4', username: 'deo', password: 'deo123', name: 'Data Entry Operator', role: 'DEO', permissions: { modules: ['inbound'], actions: { canSecurityEntry: false, canUploadInvoice: true, canAssignVehicle: true, canStartUnloading: false, canPostVehicle: false, canApprove: false, canViewReports: false, canPutaway: false, canPIV: false, canPick: false, canLoad: false, canAdmin: false } } },
-        { id: 'u5', username: 'security', password: 'sec123', name: 'Security Guard', role: 'Security', permissions: { modules: ['security-gate'], actions: { canSecurityEntry: true, canUploadInvoice: false, canAssignVehicle: false, canStartUnloading: false, canPostVehicle: false, canApprove: false, canViewReports: false, canPutaway: false, canPIV: false, canPick: false, canLoad: false, canAdmin: false } } },
-        { id: 'u6', username: 'unloader', password: 'unl123', name: 'Unloading User', role: 'Unloading User', permissions: { modules: ['unloading-screen'], actions: { canSecurityEntry: false, canUploadInvoice: false, canAssignVehicle: false, canStartUnloading: true, canPostVehicle: true, canApprove: false, canViewReports: false, canPutaway: false, canPIV: false, canPick: false, canLoad: false, canAdmin: false } } },
-        { id: 'u7', username: 'picker', password: 'pick123', name: 'Picker User', role: 'Picker', permissions: { modules: ['picking'], actions: { canSecurityEntry: false, canUploadInvoice: false, canAssignVehicle: false, canStartUnloading: false, canPostVehicle: false, canApprove: false, canViewReports: false, canPutaway: false, canPIV: false, canPick: true, canLoad: false, canAdmin: false } } },
-        { id: 'u8', username: 'loader', password: 'load123', name: 'Loading User', role: 'Loader', permissions: { modules: ['loading'], actions: { canSecurityEntry: false, canUploadInvoice: false, canAssignVehicle: false, canStartUnloading: false, canPostVehicle: false, canApprove: false, canViewReports: false, canPutaway: false, canPIV: false, canPick: false, canLoad: true, canAdmin: false } } }
+function seedData(){
+    if(DB.get('users').length>0)return;
+    DB.set('users',[
+        {id:'u1',username:'superadmin',password:'super123',name:'Super Admin',role:'Super Admin',permissions:{modules:['all'],actions:{canSecurityEntry:true,canUploadInvoice:true,canAssignVehicle:true,canStartUnloading:true,canPostVehicle:true,canApprove:true,canViewReports:true,canPutaway:true,canPIV:true,canPick:true,canLoad:true,canAdmin:true}}},
+        {id:'u2',username:'admin',password:'admin123',name:'Warehouse Admin',role:'Admin',permissions:{modules:['all'],actions:{canSecurityEntry:false,canUploadInvoice:true,canAssignVehicle:true,canStartUnloading:false,canPostVehicle:true,canApprove:true,canViewReports:true,canPutaway:true,canPIV:true,canPick:true,canLoad:true,canAdmin:true}}},
+        {id:'u3',username:'manager',password:'mgr123',name:'Warehouse Manager',role:'Manager',permissions:{modules:['dashboard','inbound','reports','audit','picking','loading','user-time'],actions:{canSecurityEntry:false,canUploadInvoice:true,canAssignVehicle:true,canStartUnloading:false,canPostVehicle:false,canApprove:true,canViewReports:true,canPutaway:false,canPIV:false,canPick:true,canLoad:true,canAdmin:false}}},
+        {id:'u4',username:'deo',password:'deo123',name:'Data Entry Operator',role:'DEO',permissions:{modules:['inbound'],actions:{canSecurityEntry:false,canUploadInvoice:true,canAssignVehicle:true,canStartUnloading:false,canPostVehicle:false,canApprove:false,canViewReports:false,canPutaway:false,canPIV:false,canPick:false,canLoad:false,canAdmin:false}}},
+        {id:'u5',username:'security',password:'sec123',name:'Security Guard',role:'Security',permissions:{modules:['inbound','loading'],actions:{canSecurityEntry:true,canUploadInvoice:false,canAssignVehicle:false,canStartUnloading:false,canPostVehicle:false,canApprove:false,canViewReports:false,canPutaway:false,canPIV:false,canPick:false,canLoad:false,canAdmin:false}}},
+        {id:'u6',username:'unloader',password:'unl123',name:'Unloading User',role:'Unloader',permissions:{modules:['inbound'],actions:{canSecurityEntry:false,canUploadInvoice:false,canAssignVehicle:false,canStartUnloading:true,canPostVehicle:true,canApprove:false,canViewReports:false,canPutaway:false,canPIV:false,canPick:false,canLoad:false,canAdmin:false}}},
+        {id:'u7',username:'picker',password:'pick123',name:'Picker User',role:'Picker',permissions:{modules:['picking'],actions:{canSecurityEntry:false,canUploadInvoice:false,canAssignVehicle:false,canStartUnloading:false,canPostVehicle:false,canApprove:false,canViewReports:false,canPutaway:false,canPIV:false,canPick:true,canLoad:false,canAdmin:false}}},
+        {id:'u8',username:'loader',password:'load123',name:'Loading User',role:'Loader',permissions:{modules:['loading'],actions:{canSecurityEntry:false,canUploadInvoice:false,canAssignVehicle:false,canStartUnloading:false,canPostVehicle:false,canApprove:false,canViewReports:false,canPutaway:false,canPIV:false,canPick:false,canLoad:true,canAdmin:false}}}
     ]);
-    var materials = [
-        { material: 'VIP PREMIUM RICE 5KG', description: 'Premium Basmati Rice 5kg Pack', division: 'Rice', ean: '8901234567001', brand: 'VIP' },
-        { material: 'VIP GOLD WHEAT 10KG', description: 'Golden Wheat Atta 10kg', division: 'Flour', ean: '8901234567002', brand: 'VIP' },
-        { material: 'VIP SUGAR 1KG', description: 'Refined Sugar 1kg Pack', division: 'Sugar', ean: '8901234567003', brand: 'VIP' },
-        { material: 'VIP DAL TOOR 1KG', description: 'Toor Dal 1kg Pack', division: 'Pulses', ean: '8901234567004', brand: 'VIP' },
-        { material: 'VIP SALT 1KG', description: 'Iodized Salt 1kg', division: 'Salt', ean: '8901234567005', brand: 'VIP' },
-        { material: 'VIP OIL SUNFLOWER 1L', description: 'Sunflower Oil 1 Litre', division: 'Oil', ean: '8901234567006', brand: 'VIP' },
-        { material: 'VIP TEA 500G', description: 'Premium Tea 500g', division: 'Tea', ean: '8901234567007', brand: 'VIP' },
-        { material: 'VIP SPICE TURMERIC 100G', description: 'Turmeric Powder 100g', division: 'Spices', ean: '8901234567008', brand: 'VIP' },
-        { material: 'VIP CHOLE MASALA 200G', description: 'Chole Masala 200g Pack', division: 'Spices', ean: '8901234567009', brand: 'VIP' },
-        { material: 'VIP BASMATI RICE 25KG', description: 'Extra Long Basmati Rice 25kg', division: 'Rice', ean: '8901234567010', brand: 'VIP' }
+    var mats=[
+        {material:'VIP PREMIUM RICE 5KG',description:'Premium Basmati Rice 5kg',division:'Rice',ean:'8901234567001',brand:'VIP'},
+        {material:'VIP GOLD WHEAT 10KG',description:'Golden Wheat Atta 10kg',division:'Flour',ean:'8901234567002',brand:'VIP'},
+        {material:'VIP SUGAR 1KG',description:'Refined Sugar 1kg',division:'Sugar',ean:'8901234567003',brand:'VIP'},
+        {material:'VIP DAL TOOR 1KG',description:'Toor Dal 1kg',division:'Pulses',ean:'8901234567004',brand:'VIP'},
+        {material:'VIP SALT 1KG',description:'Iodized Salt 1kg',division:'Salt',ean:'8901234567005',brand:'VIP'},
+        {material:'VIP OIL SUNFLOWER 1L',description:'Sunflower Oil 1L',division:'Oil',ean:'8901234567006',brand:'VIP'},
+        {material:'VIP TEA 500G',description:'Premium Tea 500g',division:'Tea',ean:'8901234567007',brand:'VIP'},
+        {material:'VIP SPICE TURMERIC 100G',description:'Turmeric Powder 100g',division:'Spices',ean:'8901234567008',brand:'VIP'},
+        {material:'VIP CHOLE MASALA 200G',description:'Chole Masala 200g',division:'Spices',ean:'8901234567009',brand:'VIP'},
+        {material:'VIP BASMATI RICE 25KG',description:'Extra Long Basmati 25kg',division:'Rice',ean:'8901234567010',brand:'VIP'}
     ];
-    for (var i = 0; i < materials.length; i++) { DB.add('material_master', materials[i]); }
-    for (var r = 1; r <= 30; r++) { DB.add('rack_master', { rack: 'RACK-' + String(r).padStart(3, '0') }); }
-    DB.add('vehicles', { id: 'v1', vehicleNo: 'MH-12-AB-1234', lrNo: 'LR-2025-001', driverName: 'Rajesh Kumar', driverMobile: '9876543210', transportName: 'Fast Cargo', vehicleType: 'Unloading', status: 'Unloaded', reportedAt: new Date().toISOString() });
-    DB.add('vehicles', { id: 'v2', vehicleNo: 'GJ-05-CD-5678', lrNo: 'LR-2025-002', driverName: 'Amit Patel', driverMobile: '9123456789', transportName: 'Green Logistics', vehicleType: 'Unloading', status: 'Unload Pending', reportedAt: new Date().toISOString() });
-    DB.add('vehicles', { id: 'v3', vehicleNo: 'RJ-14-EF-9012', lrNo: 'LR-2025-003', driverName: 'Suresh Meena', driverMobile: '9988776655', transportName: 'Rajput Transport', vehicleType: 'Unloading', status: 'Unload Pending', reportedAt: new Date().toISOString() });
-    DB.add('invoices', { id: 'inv1', vehicleId: 'v2', invoiceNo: 'INV-2025-101', status: 'Pending' });
-    DB.add('invoice_materials', { id: 'im1', invoiceId: 'inv1', material: 'VIP PREMIUM RICE 5KG', ean: '8901234567001', qty: 50, unloadedQty: 0 });
-    DB.add('invoice_materials', { id: 'im2', invoiceId: 'inv1', material: 'VIP GOLD WHEAT 10KG', ean: '8901234567002', qty: 30, unloadedQty: 0 });
-    DB.add('invoice_materials', { id: 'im3', invoiceId: 'inv1', material: 'VIP SUGAR 1KG', ean: '8901234567003', qty: 100, unloadedQty: 0 });
-    DB.add('invoices', { id: 'inv2', vehicleId: 'v2', invoiceNo: 'INV-2025-102', status: 'Pending' });
-    DB.add('invoice_materials', { id: 'im4', invoiceId: 'inv2', material: 'VIP DAL TOOR 1KG', ean: '8901234567004', qty: 80, unloadedQty: 0 });
-    DB.add('invoice_materials', { id: 'im5', invoiceId: 'inv2', material: 'VIP SALT 1KG', ean: '8901234567005', qty: 120, unloadedQty: 0 });
-    DB.add('invoices', { id: 'inv3', vehicleId: 'v3', invoiceNo: 'INV-2025-103', status: 'Pending' });
-    DB.add('invoice_materials', { id: 'im6', invoiceId: 'inv3', material: 'VIP OIL SUNFLOWER 1L', ean: '8901234567006', qty: 60, unloadedQty: 0 });
-    DB.add('invoice_materials', { id: 'im7', invoiceId: 'inv3', material: 'VIP TEA 500G', ean: '8901234567007', qty: 40, unloadedQty: 0 });
-    var locData = [
-        { rack: 'RACK-001', ean: '8901234567001', material: 'VIP PREMIUM RICE 5KG', description: 'Premium Basmati Rice 5kg Pack', quantity: 20, packing: 'Bag', box: 'B001', action: 'PUTAWAY' },
-        { rack: 'RACK-002', ean: '8901234567002', material: 'VIP GOLD WHEAT 10KG', description: 'Golden Wheat Atta 10kg', quantity: 15, packing: 'Bag', box: 'B002', action: 'PUTAWAY' },
-        { rack: 'RACK-003', ean: '8901234567003', material: 'VIP SUGAR 1KG', description: 'Refined Sugar 1kg Pack', quantity: 50, packing: 'Box', box: 'B003', action: 'PUTAWAY' },
-        { rack: 'RACK-005', ean: '8901234567004', material: 'VIP DAL TOOR 1KG', description: 'Toor Dal 1kg Pack', quantity: 30, packing: 'Bag', box: 'B004', action: 'PIV' },
-        { rack: 'RACK-007', ean: '8901234567006', material: 'VIP OIL SUNFLOWER 1L', description: 'Sunflower Oil 1 Litre', quantity: 25, packing: 'Bottle', box: 'B005', action: 'PUTAWAY' },
-        { rack: 'RACK-009', ean: '8901234567007', material: 'VIP TEA 500G', description: 'Premium Tea 500g', quantity: 18, packing: 'Box', box: 'B006', action: 'PIV' }
+    mats.forEach(function(m){DB.add('material_master',m);});
+    for(var r=1;r<=30;r++){DB.add('rack_master',{rack:'RACK-'+String(r).padStart(3,'0')});}
+    // Sample vehicles
+    DB.add('vehicles',{id:'v1',vehicleNo:'MH-12-AB-1234',lrNo:'LR-2025-001',driverName:'Rajesh Kumar',driverMobile:'9876543210',transportName:'Fast Cargo',vehicleType:'Unloading',status:'Unload Pending',reportedAt:new Date().toISOString()});
+    DB.add('vehicles',{id:'v2',vehicleNo:'GJ-05-CD-5678',lrNo:'LR-2025-002',driverName:'Amit Patel',driverMobile:'9123456789',transportName:'Green Logistics',vehicleType:'Unloading',status:'Unload Pending',reportedAt:new Date().toISOString()});
+    DB.add('vehicles',{id:'v3',vehicleNo:'RJ-14-EF-9012',lrNo:'LR-2025-003',driverName:'Suresh Meena',driverMobile:'9988776655',transportName:'Rajput Transport',vehicleType:'Unloading',status:'Unload Pending',reportedAt:new Date().toISOString()});
+    // Sample invoices for v1
+    DB.add('invoices',{id:'inv1',vehicleId:'v1',invoiceNo:'INV-2025-101',status:'Pending'});
+    DB.add('invoice_materials',{id:'im1',invoiceId:'inv1',material:'VIP PREMIUM RICE 5KG',ean:'8901234567001',qty:50,unloadedQty:0});
+    DB.add('invoice_materials',{id:'im2',invoiceId:'inv1',material:'VIP GOLD WHEAT 10KG',ean:'8901234567002',qty:30,unloadedQty:0});
+    DB.add('invoice_materials',{id:'im3',invoiceId:'inv1',material:'VIP SUGAR 1KG',ean:'8901234567003',qty:100,unloadedQty:0});
+    DB.add('invoices',{id:'inv2',vehicleId:'v1',invoiceNo:'INV-2025-102',status:'Pending'});
+    DB.add('invoice_materials',{id:'im4',invoiceId:'inv2',material:'VIP DAL TOOR 1KG',ean:'8901234567004',qty:80,unloadedQty:0});
+    DB.add('invoice_materials',{id:'im5',invoiceId:'inv2',material:'VIP SALT 1KG',ean:'8901234567005',qty:120,unloadedQty:0});
+    // v2 invoices
+    DB.add('invoices',{id:'inv3',vehicleId:'v2',invoiceNo:'INV-2025-103',status:'Pending'});
+    DB.add('invoice_materials',{id:'im6',invoiceId:'inv3',material:'VIP OIL SUNFLOWER 1L',ean:'8901234567006',qty:60,unloadedQty:0});
+    DB.add('invoice_materials',{id:'im7',invoiceId:'inv3',material:'VIP TEA 500G',ean:'8901234567007',qty:40,unloadedQty:0});
+    // Sample locations
+    var locs=[
+        {rack:'RACK-001',ean:'8901234567001',material:'VIP PREMIUM RICE 5KG',description:'Premium Basmati Rice 5kg',quantity:20,packing:'Bag',box:'B001',action:'PUTAWAY'},
+        {rack:'RACK-002',ean:'8901234567002',material:'VIP GOLD WHEAT 10KG',description:'Golden Wheat Atta 10kg',quantity:15,packing:'Bag',box:'B002',action:'PUTAWAY'},
+        {rack:'RACK-003',ean:'8901234567003',material:'VIP SUGAR 1KG',description:'Refined Sugar 1kg',quantity:50,packing:'Box',box:'B003',action:'PUTAWAY'},
+        {rack:'RACK-005',ean:'8901234567004',material:'VIP DAL TOOR 1KG',description:'Toor Dal 1kg',quantity:30,packing:'Bag',box:'B004',action:'PIV'},
+        {rack:'RACK-007',ean:'8901234567006',material:'VIP OIL SUNFLOWER 1L',description:'Sunflower Oil 1L',quantity:25,packing:'Bottle',box:'B005',action:'PUTAWAY'},
+        {rack:'RACK-009',ean:'8901234567007',material:'VIP TEA 500G',description:'Premium Tea 500g',quantity:18,packing:'Box',box:'B006',action:'PIV'}
     ];
-    for (var j = 0; j < locData.length; j++) {
-        var l = locData[j];
-        DB.add('location_master', { date: today(), rack: l.rack, ean: l.ean, material: l.material, description: l.description, quantity: l.quantity, packing: l.packing, box: l.box, action: l.action, user: 'Admin', dateTime: new Date().toISOString() });
-    }
-    addNotification('Vehicle GJ-05-CD-5678 arrived — Pending Unload', 'warning');
-    addNotification('Vehicle RJ-14-EF-9012 arrived — Pending Unload', 'warning');
-    logAction('System', 'INIT', 'System initialized with seed data');
+    locs.forEach(function(l){DB.add('location_master',{date:today(),rack:l.rack,ean:l.ean,material:l.material,description:l.description,quantity:l.quantity,packing:l.packing,box:l.box,action:l.action,user:'Admin',dateTime:new Date().toISOString()});});
+    addNotif('Vehicle MH-12-AB-1234 arrived — Pending Unload','warning');
+    addNotif('Vehicle GJ-05-CD-5678 arrived — Pending Unload','warning');
+    logAction('System','INIT','System initialized with seed data');
 }
 
 // ==================== AUTH ====================
-function login(username, password) {
-    // Fast user sync from server (max 3 sec, then local login)
-    try {
-        if (supabaseClient) {
-            var userPromise = supabaseClient.from('app_data').select('value').eq('key', 'users');
-            var timeoutPromise = new Promise(function(_, reject) { setTimeout(function() { reject(new Error('Timeout')); }, 3000); });
-            Promise.race([userPromise, timeoutPromise]).then(function(res) {
-                if (res.data && res.data.length > 0 && res.data[0].value) {
-                    localStorage.setItem('wms_users', JSON.stringify(res.data[0].value));
-                }
-            }).catch(function() {});
-        }
-    } catch(e) {}
-
-    var users = DB.get('users');
-    var user = null;
-    for (var i = 0; i < users.length; i++) {
-        if (users[i].username === username && users[i].password === password) { user = users[i]; break; }
-    }
-    if (!user) { showToast('Invalid username or password', 'error'); return false; }
-    APP.currentUser = user;
-    APP.sessionStart = Date.now();
-    localStorage.setItem('wms_session', JSON.stringify({ userId: user.id, loginTime: new Date().toISOString() }));
-    // Track user session
-    DB.add('user_sessions', { userId: user.id, userName: user.name, loginTime: new Date().toISOString(), logoutTime: null, status: 'Active' });
-    logAction('Auth', 'LOGIN', 'User ' + user.name + ' logged in');
-    pullAllServerData();
-    return true;
+function doLogin(uname,pass){
+    var users=DB.get('users'),user=null;
+    for(var i=0;i<users.length;i++){if(users[i].username===uname&&users[i].password===pass){user=users[i];break;}}
+    if(!user){showToast('Invalid username or password','error');return false;}
+    APP.currentUser=user;APP.sessionStart=Date.now();
+    localStorage.setItem('wms_session',JSON.stringify({userId:user.id,loginTime:new Date().toISOString()}));
+    DB.add('user_sessions',{userId:user.id,userName:user.name,loginTime:new Date().toISOString(),logoutTime:null,status:'Active'});
+    logAction('Auth','LOGIN','User '+user.name+' logged in');
+    pullAll();return true;
 }
-
-function logout() {
-    if (APP.currentUser) {
-        logAction('Auth', 'LOGOUT', 'User ' + APP.currentUser.name + ' logged out');
-        // Close session
-        var sessions = DB.get('user_sessions');
-        for (var i = sessions.length - 1; i >= 0; i--) {
-            if (sessions[i].userId === APP.currentUser.id && !sessions[i].logoutTime) {
-                DB.update('user_sessions', sessions[i].id, { logoutTime: new Date().toISOString(), status: 'Logged Out' });
-                break;
+function doLogout(){
+    if(APP.currentUser){
+        logAction('Auth','LOGOUT','User '+APP.currentUser.name+' logged out');
+        var sessions=DB.get('user_sessions');
+        for(var i=sessions.length-1;i>=0;i--){
+            if(sessions[i].userId===APP.currentUser.id&&!sessions[i].logoutTime){
+                DB.update('user_sessions',sessions[i].id,{logoutTime:new Date().toISOString(),status:'Logged Out'});break;
             }
         }
     }
-    APP.currentUser = null;
-    localStorage.removeItem('wms_session');
-    document.getElementById('mainApp').style.display = 'none';
-    document.getElementById('loginPage').style.display = 'flex';
+    APP.currentUser=null;localStorage.removeItem('wms_session');
+    document.getElementById('mainApp').style.display='none';
+    document.getElementById('loginPage').style.display='flex';
 }
-
-function checkPermission(module) {
-    if (!APP.currentUser) return false;
-    if (APP.currentUser.permissions.modules.indexOf('all') > -1) return true;
-    return APP.currentUser.permissions.modules.indexOf(module) > -1;
+function chkPerm(mod){
+    if(!APP.currentUser)return false;
+    return APP.currentUser.permissions.modules.indexOf('all')>-1||APP.currentUser.permissions.modules.indexOf(mod)>-1;
 }
-function checkActionPerm(action) {
-    if (!APP.currentUser) return false;
-    if (APP.currentUser.role === 'Super Admin') return true;
-    return APP.currentUser.permissions.actions && APP.currentUser.permissions.actions[action] === true;
+function chkAct(act){
+    if(!APP.currentUser)return false;
+    if(APP.currentUser.role==='Super Admin')return true;
+    return APP.currentUser.permissions.actions&&APP.currentUser.permissions.actions[act]===true;
 }
 
 // ==================== SIDEBAR ====================
-function renderSidebar() {
-    if (!APP.currentUser) return;
-    var modules = [
-        { id: 'dashboard', icon: 'bxs-dashboard', label: 'Dashboard', subs: [] },
-        { id: 'inbound', icon: 'bxs-truck', label: 'Inbound', subs: [
-            { id: 'security-gate', label: 'Security Gate' },
-            { id: 'pending-vehicle', label: 'Pending Vehicle' },
-            { id: 'unloading-screen', label: 'Unloading Screen' },
-            { id: 'posting-pending', label: 'Posting Pending' },
-            { id: 'inbound-record', label: 'Inbound Record' }
+function renderSidebar(){
+    if(!APP.currentUser)return;
+    var mods=[
+        {id:'dashboard',icon:'bxs-dashboard',label:'Dashboard',subs:[]},
+        {id:'inbound',icon:'bxs-truck',label:'Inbound',subs:[
+            {id:'security-gate',label:'Security Gate'},
+            {id:'pending-vehicle',label:'Pending Vehicle'},
+            {id:'unloading-screen',label:'Unloading Screen'},
+            {id:'posting-pending',label:'Posting Pending'},
+            {id:'inbound-record',label:'Inbound Record'},
+            {id:'unloading-stock',label:'Unloading Stock'}
         ]},
-        { id: 'putaway', icon: 'bxs-package', label: 'Putaway', subs: [] },
-        { id: 'piv', icon: 'bxs-clipboard', label: 'PIV', subs: [] },
-        { id: 'location', icon: 'bxs-map-pin', label: 'Location Master', subs: [] },
-        { id: 'rack', icon: 'bxs-grid-alt', label: 'Rack Master', subs: [] },
-        { id: 'material', icon: 'bxs-label', label: 'Material Master', subs: [] },
-        { id: 'picking', icon: 'bxs-box', label: 'Picking', subs: [
-            { id: 'obd-upload', label: 'OBD Upload' },
-            { id: 'picking-assign', label: 'Picking Assign' },
-            { id: 'start-picking', label: 'Start Picking' },
-            { id: 'picking-done', label: 'Picking Done' }
+        {id:'putaway',icon:'bxs-package',label:'Putaway',subs:[]},
+        {id:'piv',icon:'bxs-clipboard',label:'PIV',subs:[]},
+        {id:'location',icon:'bxs-map-pin',label:'Location Master',subs:[]},
+        {id:'rack',icon:'bxs-grid-alt',label:'Rack Master',subs:[]},
+        {id:'material',icon:'bxs-label',label:'Material Master',subs:[]},
+        {id:'picking',icon:'bxs-box',label:'Picking',subs:[
+            {id:'obd-upload',label:'OBD Upload'},
+            {id:'picking-assign',label:'Picking Assign'},
+            {id:'start-picking',label:'Start Picking'},
+            {id:'picking-done',label:'Picking Done'}
         ]},
-        { id: 'loading', icon: 'bxs-truck', label: 'Loading', subs: [
-            { id: 'loading-assign', label: 'Loading Assign' },
-            { id: 'start-loading', label: 'Start Loading' },
-            { id: 'loading-done', label: 'Loaded Vehicles' },
-            { id: 'qty-mismatch', label: 'Qty Mismatch' }
+        {id:'loading',icon:'bxs-truck',label:'Loading',subs:[
+            {id:'loading-assign',label:'Loading Assign'},
+            {id:'start-loading',label:'Start Loading'},
+            {id:'loading-done',label:'Loaded Vehicles'},
+            {id:'qty-mismatch',label:'Qty Mismatch'}
         ]},
-        { id: 'user-time', icon: 'bx-time-five', label: 'User Working Time', subs: [] },
-        { id: 'admin', icon: 'bxs-user-detail', label: 'Admin', subs: [] },
-        { id: 'settings', icon: 'bxs-cog', label: 'Settings', subs: [] },
-        { id: 'reports', icon: 'bxs-bar-chart-alt-2', label: 'Reports', subs: [] },
-        { id: 'audit', icon: 'bxs-receipt', label: 'Audit Log', subs: [] }
+        {id:'user-time',icon:'bx-time-five',label:'User Working Time',subs:[]},
+        {id:'admin',icon:'bxs-user-detail',label:'Admin',subs:[]},
+        {id:'settings',icon:'bxs-cog',label:'Settings',subs:[]},
+        {id:'reports',icon:'bxs-bar-chart-alt-2',label:'Reports',subs:[]},
+        {id:'audit',icon:'bxs-receipt',label:'Audit Log',subs:[]}
     ];
-
-    var html = '';
-    for (var m = 0; m < modules.length; m++) {
-        var mod = modules[m];
-        var hasSub = mod.subs.length > 0;
-        var hasParentAccess = checkPermission(mod.id);
-        var hasAnySubAccess = false;
-        if (hasSub) {
-            for (var s = 0; s < mod.subs.length; s++) {
-                if (checkPermission(mod.subs[s].id)) { hasAnySubAccess = true; break; }
-            }
+    var h='';
+    mods.forEach(function(mod){
+        var hasSub=mod.subs.length>0;
+        var hasParent=chkPerm(mod.id);
+        var hasAnySub=false;
+        if(hasSub){mod.subs.forEach(function(s){if(chkPerm(s.id)){hasAnySub=true;}});}
+        if(!hasParent&&!hasAnySub)return;
+        h+='<div class="nav-group">';
+        h+='<a href="#" data-section="'+mod.id+'" class="nav-item'+(hasSub?' has-sub':'')+'">';
+        h+='<i class="bx '+mod.icon+'"></i><span>'+mod.label+'</span>';
+        if(hasSub)h+='<i class="bx bx-chevron-down sub-arrow"></i>';
+        h+='</a>';
+        if(hasSub){
+            h+='<div class="nav-sub" id="'+mod.id+'Sub">';
+            mod.subs.forEach(function(s){if(chkPerm(s.id))h+='<a href="#" data-sub="'+s.id+'" class="nav-sub-item">'+s.label+'</a>';});
+            h+='</div>';
         }
-        if (!hasParentAccess && !hasAnySubAccess) continue;
-
-        html += '<div class="nav-group">';
-        html += '<a href="#" data-section="' + mod.id + '" class="nav-item' + (hasSub ? ' has-sub' : '') + '">';
-        html += '<i class="bx ' + mod.icon + '"></i><span>' + mod.label + '</span>';
-        if (hasSub) html += '<i class="bx bx-chevron-down sub-arrow"></i>';
-        html += '</a>';
-        if (hasSub) {
-            html += '<div class="nav-sub" id="' + mod.id + 'Sub">';
-            for (var s2 = 0; s2 < mod.subs.length; s2++) {
-                if (checkPermission(mod.subs[s2].id)) {
-                    html += '<a href="#" data-sub="' + mod.subs[s2].id + '" class="nav-sub-item">' + mod.subs[s2].label + '</a>';
-                }
-            }
-            html += '</div>';
-        }
-        html += '</div>';
-    }
-    document.getElementById('sidebarNav').innerHTML = html;
-
-    // Bind click events
-    var navItems = document.querySelectorAll('#sidebarNav .nav-item');
-    for (var n = 0; n < navItems.length; n++) {
-        navItems[n].addEventListener('click', function(e) {
+        h+='</div>';
+    });
+    document.getElementById('sidebarNav').innerHTML=h;
+    // Bind events
+    document.querySelectorAll('#sidebarNav .nav-item').forEach(function(el){
+        el.addEventListener('click',function(e){
             e.preventDefault();
-            var section = this.getAttribute('data-section');
-            // Toggle sub-menu
-            if (this.classList.contains('has-sub')) {
+            var sec=this.getAttribute('data-section');
+            if(this.classList.contains('has-sub')){
                 this.classList.toggle('open');
-                var sub = this.nextElementSibling;
-                if (sub) sub.classList.toggle('open');
+                var sub=this.nextElementSibling;if(sub)sub.classList.toggle('open');
                 return;
             }
-            if (section) navigateTo(section);
+            if(sec)navTo(sec);
         });
-    }
-    var subItems = document.querySelectorAll('#sidebarNav .nav-sub-item');
-    for (var si = 0; si < subItems.length; si++) {
-        subItems[si].addEventListener('click', function(e) {
+    });
+    document.querySelectorAll('#sidebarNav .nav-sub-item').forEach(function(el){
+        el.addEventListener('click',function(e){
             e.preventDefault();
-            var sub = this.getAttribute('data-sub');
-            var parentGroup = this.closest('.nav-group');
-            var parentSection = parentGroup ? parentGroup.querySelector('.nav-item').getAttribute('data-section') : null;
-            if (sub && parentSection) navigateTo(parentSection, sub);
+            var sub=this.getAttribute('data-sub');
+            var pg=this.closest('.nav-group');
+            var psec=pg?pg.querySelector('.nav-item').getAttribute('data-section'):null;
+            if(sub&&psec)navTo(psec,sub);
         });
-    }
+    });
 }
 
 // ==================== NAVIGATION ====================
-function navigateTo(section, sub) {
-    sub = sub || null;
-    // Check parent or sub permission
-    if (!checkPermission(section) && !sub) {
-        showToast('Access Denied! Admin ne iska access nahi diya.', 'error');
-        return;
-    }
-    if (sub && !checkPermission(sub)) {
-        showToast('Access Denied!', 'error');
-        return;
-    }
-    APP.currentSection = section;
-    APP.currentSub = sub;
+var sectionNames={dashboard:'Dashboard',inbound:'Inbound',putaway:'Putaway',piv:'PIV',location:'Location Master',rack:'Rack Master',material:'Material Master',admin:'Admin',settings:'Settings',reports:'Reports',audit:'Audit Log',picking:'Picking',loading:'Loading','user-time':'User Working Time'};
+var subNames={'security-gate':'Security Gate','pending-vehicle':'Pending Vehicle','unloading-screen':'Unloading Screen','posting-pending':'Posting Pending','inbound-record':'Inbound Record','unloading-stock':'Unloading Stock','obd-upload':'OBD Upload','picking-assign':'Picking Assign','start-picking':'Start Picking','picking-done':'Picking Done','loading-assign':'Loading Assign','start-loading':'Start Loading','loading-done':'Loaded Vehicles','qty-mismatch':'Qty Mismatch'};
 
-    // Highlight nav
-    var allNav = document.querySelectorAll('.nav-item');
-    for (var i = 0; i < allNav.length; i++) { allNav[i].classList.remove('active'); }
-    var allSubNav = document.querySelectorAll('.nav-sub-item');
-    for (var j = 0; j < allSubNav.length; j++) { allSubNav[j].classList.remove('active'); }
-
-    var navItem = document.querySelector('.nav-item[data-section="' + section + '"]');
-    if (navItem) navItem.classList.add('active');
-    if (sub) {
-        var subItem = document.querySelector('.nav-sub-item[data-sub="' + sub + '"]');
-        if (subItem) subItem.classList.add('active');
-        // Open parent sub
-        if (navItem) { navItem.classList.add('open'); }
-        var parentSub = document.getElementById(section + 'Sub');
-        if (parentSub) parentSub.classList.add('open');
+function navTo(sec,sub){
+    sub=sub||null;
+    if(!chkPerm(sec)&&!sub){showToast('Access Denied!','error');return;}
+    if(sub&&!chkPerm(sub)){showToast('Access Denied!','error');return;}
+    APP.currentSection=sec;APP.currentSub=sub;
+    // Highlight
+    document.querySelectorAll('.nav-item').forEach(function(n){n.classList.remove('active');});
+    document.querySelectorAll('.nav-sub-item').forEach(function(n){n.classList.remove('active');});
+    var ni=document.querySelector('.nav-item[data-section="'+sec+'"]');
+    if(ni)ni.classList.add('active');
+    if(sub){
+        var si=document.querySelector('.nav-sub-item[data-sub="'+sub+'"]');
+        if(si)si.classList.add('active');
+        if(ni){ni.classList.add('open');}
+        var ps=document.getElementById(sec+'Sub');if(ps)ps.classList.add('open');
     }
-
     // Breadcrumb
-    var names = { dashboard:'Dashboard', inbound:'Inbound', putaway:'Putaway', piv:'PIV', location:'Location Master', rack:'Rack Master', material:'Material Master', admin:'Admin', settings:'Settings', reports:'Reports', audit:'Audit Log', picking:'Picking', loading:'Loading', 'user-time':'User Working Time' };
-    var subNames = { 'security-gate':'Security Gate', 'pending-vehicle':'Pending Vehicle', 'unloading-screen':'Unloading Screen', 'posting-pending':'Posting Pending', 'inbound-record':'Inbound Record', 'obd-upload':'OBD Upload', 'picking-assign':'Picking Assign', 'start-picking':'Start Picking', 'picking-done':'Picking Done', 'loading-assign':'Loading Assign', 'start-loading':'Start Loading', 'loading-done':'Loaded Vehicles', 'qty-mismatch':'Qty Mismatch' };
-    var bc = 'VIP INDUSTRIES LIMITED MD20 <i class="bx bx-chevron-right"></i> <span class="bc-item active">' + (names[section] || section) + '</span>';
-    if (sub) bc += ' <i class="bx bx-chevron-right"></i> <span class="bc-item active">' + (subNames[sub] || sub) + '</span>';
-    document.getElementById('breadcrumb').innerHTML = bc;
-
-    // Show section (create dynamically if not exists)
-    var allSections = document.querySelectorAll('.content-section');
-    for (var k = 0; k < allSections.length; k++) { allSections[k].classList.remove('active'); }
-    var sec = document.getElementById('section-' + section);
-    if (!sec) {
-        sec = document.createElement('section');
-        sec.id = 'section-' + section;
-        sec.className = 'content-section';
-        document.getElementById('contentArea').appendChild(sec);
-    }
-    sec.classList.add('active');
-
-    renderSection(section, sub);
+    var bc='<span class="bc-item">VIP MD20</span> <i class="bx bx-chevron-right" style="font-size:10px;color:var(--text-muted)"></i> <span class="bc-item active">'+(sectionNames[sec]||sec)+'</span>';
+    if(sub)bc+=' <i class="bx bx-chevron-right" style="font-size:10px;color:var(--text-muted)"></i> <span class="bc-item active">'+(subNames[sub]||sub)+'</span>';
+    document.getElementById('breadcrumb').innerHTML=bc;
+    // Section
+    var ca=document.getElementById('contentArea');
+    ca.innerHTML='<section class="content-section active" id="sec-content"></section>';
+    renderSection(sec,sub);
     closeSidebar();
+    // Bottom nav highlight
+    document.querySelectorAll('.bnav-item').forEach(function(b){b.classList.remove('active');});
+    var bnMap={dashboard:'dashboard',inbound:'inbound',picking:'picking',loading:'loading'};
+    var bn=bnMap[sec];
+    if(bn){var be=document.querySelector('.bnav-item[data-bnav="'+bn+'"]');if(be)be.classList.add('active');}
 }
 
-function renderSection(section, sub) {
-    var renderers = {
-        dashboard: renderDashboard,
-        inbound: function() { renderInbound(sub); },
-        putaway: renderPutaway,
-        piv: renderPIV,
-        location: renderLocationMaster,
-        rack: renderRackMaster,
-        material: renderMaterialMaster,
-        admin: renderAdmin,
-        settings: renderSettings,
-        reports: renderReports,
-        audit: renderAuditLog,
-        picking: function() { renderPicking(sub); },
-        loading: function() { renderLoading(sub); },
-        'user-time': renderUserWorkingTime
+function renderSection(sec,sub){
+    var r={
+        dashboard:renderDashboard,
+        inbound:function(){renderInbound(sub);},
+        putaway:renderPutaway,
+        piv:renderPIV,
+        location:renderLocationMaster,
+        rack:renderRackMaster,
+        material:renderMaterialMaster,
+        admin:renderAdmin,
+        settings:renderSettings,
+        reports:renderReports,
+        audit:renderAuditLog,
+        picking:function(){renderPicking(sub);},
+        loading:function(){renderLoading(sub);},
+        'user-time':renderUserWorkingTime
     };
-    if (renderers[section]) renderers[section]();
-    else {
-        var sec = document.getElementById('section-' + section);
-        if (sec) sec.innerHTML = '<div class="card"><div class="empty-state"><i class="bx bx-code-block"></i><p>Module coming soon...</p></div></div>';
-    }
+    var el=document.getElementById('sec-content');
+    if(!el){el=document.createElement('section');el.id='sec-content';el.className='content-section active';document.getElementById('contentArea').appendChild(el);}
+    if(r[sec])r[sec]();
+    else el.innerHTML='<div class="card"><div class="empty-state"><i class="bx bx-code-block"></i><p>Module coming soon...</p></div></div>';
 }
+
+function setHtml(html){var el=document.getElementById('sec-content');if(el)el.innerHTML=html;}
 
 // ==================== DASHBOARD ====================
-function renderDashboard() {
-    var vehicles = DB.get('vehicles');
-    var locations = DB.get('location_master');
-    var racks = DB.get('rack_master');
-    var todayStr = today();
-    var totalVehicles = vehicles.length;
-    var pendingUnload = 0, loadedCount = 0, postedCount = 0, postingPending = 0;
-    for (var i = 0; i < vehicles.length; i++) {
-        var s = vehicles[i].status;
-        if (s === 'Unload Pending' || s === 'Assigned') pendingUnload++;
-        if (s === 'Loaded' || s === 'Loading Done') loadedCount++;
-        if (s === 'Posted' || s === 'Unloaded') postedCount++;
-        if (s === 'Posting Pending Approval') postingPending++;
-    }
-    var todayPutaway = 0, todayPIV = 0;
-    for (var j = 0; j < locations.length; j++) {
-        if (locations[j].action === 'PUTAWAY' && locations[j].date === todayStr) todayPutaway++;
-        if (locations[j].action === 'PIV' && locations[j].date === todayStr) todayPIV++;
-    }
-    var occupiedRackSet = {};
-    for (var k = 0; k < locations.length; k++) { occupiedRackSet[locations[k].rack] = true; }
-    var occupiedRacks = 0;
-    for (var r = 0; r < racks.length; r++) { if (occupiedRackSet[racks[r].rack]) occupiedRacks++; }
-    var emptyRacks = racks.length - occupiedRacks;
-    var recentActivity = DB.get('audit_log').slice(-10).reverse();
-    var pendingV = [];
-    for (var p = 0; p < vehicles.length; p++) {
-        if (vehicles[p].status === 'Unload Pending' || vehicles[p].status === 'Assigned') pendingV.push(vehicles[p]);
-    }
+function renderDashboard(){
+    var vehs=DB.get('vehicles'),locs=DB.get('location_master'),racks=DB.get('rack_master'),td=today();
+    var pending=0,posted=0,postingPend=0,loaded=0;
+    vehs.forEach(function(v){
+        if(v.status==='Unload Pending'||v.status==='Assigned')pending++;
+        if(v.status==='Posted'||v.status==='Unloaded')posted++;
+        if(v.status==='Posting Pending Approval')postingPend++;
+        if(v.status==='Loading Done'||v.status==='Loaded')loaded++;
+    });
+    var todayPut=0,todayPIV=0;
+    locs.forEach(function(l){if(l.action==='PUTAWAY'&&l.date===td)todayPut++;if(l.action==='PIV'&&l.date===td)todayPIV++;});
+    var occSet={};locs.forEach(function(l){occSet[l.rack]=true;});
+    var occ=0;racks.forEach(function(r){if(occSet[r.rack])occ++;});
+    var empty=racks.length-occ;
+    var recent=DB.get('audit_log').slice(-8).reverse();
+    var pendV=vehs.filter(function(v){return v.status==='Unload Pending'||v.status==='Assigned';});
 
-    var html = '<div class="section-header"><h2><i class="bx bxs-dashboard"></i> Dashboard</h2>' +
-        '<div style="color:var(--text-muted);font-size:13px">' + formatDateTime(new Date()) + '</div></div>';
-    html += '<div class="kpi-grid">';
-    html += kpiCard('bxs-truck', totalVehicles, 'Total Vehicles');
-    html += kpiCard('bx-time-five', pendingUnload, 'Pending Unload');
-    html += kpiCard('bxs-package', todayPutaway, "Today's Putaway");
-    html += kpiCard('bxs-clipboard', todayPIV, "Today's PIV");
-    html += kpiCard('bxs-grid-alt', occupiedRacks, 'Occupied Racks');
-    html += kpiCard('bx-grid', emptyRacks, 'Empty Racks');
-    html += kpiCard('bxs-check-circle', postedCount, 'Posted GRN');
-    html += kpiCard('bx-error-circle', postingPending, 'Pending Approval');
-    html += '</div>';
-
-    html += '<div class="grid-2">';
+    var h='<div class="section-header"><h2><i class="bx bxs-dashboard"></i> Dashboard</h2><div style="color:var(--text-muted);font-size:12px">'+fmtDT(new Date())+'</div></div>';
+    h+='<div class="kpi-grid">';
+    h+=kpi('bxs-truck',vehs.length,'Total Vehicles','accent');
+    h+=kpi('bx-time-five',pending,'Pending Unload','warning');
+    h+=kpi('bxs-package',todayPut,"Today Putaway","info");
+    h+=kpi('bxs-clipboard',todayPIV,"Today PIV","accent2");
+    h+=kpi('bxs-grid-alt',occ,'Occupied Racks','success');
+    h+=kpi('bx-grid',empty,'Empty Racks','danger');
+    h+=kpi('bxs-check-circle',posted,'Posted GRN','accent');
+    h+=kpi('bx-error-circle',postingPend,'Pending Approval','warning');
+    h+=kpi('bxs-truck',loaded,'Loaded Vehicles','info');
+    h+='</div>';
+    h+='<div class="grid-2">';
     // Recent Activity
-    html += '<div class="card"><div class="card-title">Recent Activity</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>Action No</th><th>Module</th><th>Action</th><th>Time</th></tr></thead><tbody>';
-    if (recentActivity.length === 0) {
-        html += '<tr><td colspan="4" style="text-align:center;color:var(--text-muted);padding:30px">No activity yet</td></tr>';
-    } else {
-        for (var a = 0; a < recentActivity.length; a++) {
-            var act = recentActivity[a];
-            html += '<tr><td><span style="font-family:var(--font-display);font-size:11px;color:var(--accent)">' + escapeHtml(act.actionNo) + '</span></td>' +
-                '<td>' + escapeHtml(act.module) + '</td><td>' + escapeHtml(act.action) + '</td>' +
-                '<td style="font-size:12px;color:var(--text-muted)">' + formatDateTime(act.dateTime) + '</td></tr>';
-        }
-    }
-    html += '</tbody></table></div></div>';
-
+    h+='<div class="card"><div class="card-title"><i class="bx bx-history"></i> Recent Activity</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>Module</th><th>Action</th><th>User</th><th>Time</th></tr></thead><tbody>';
+    if(!recent.length)h+='<tr><td colspan="4" style="text-align:center;color:var(--text-muted);padding:24px">No activity yet</td></tr>';
+    else recent.forEach(function(a){h+='<tr><td>'+esc(a.module)+'</td><td>'+esc(a.action)+'</td><td>'+esc(a.userName)+'</td><td style="font-size:11px;color:var(--text-muted)">'+fmtDT(a.dateTime)+'</td></tr>';});
+    h+='</tbody></table></div></div>';
     // Pending Vehicles
-    html += '<div class="card"><div class="card-title">Pending Vehicles</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>Vehicle</th><th>Driver</th><th>Transport</th><th>Status</th></tr></thead><tbody>';
-    if (pendingV.length === 0) {
-        html += '<tr><td colspan="4" style="text-align:center;color:var(--text-muted);padding:30px">No pending vehicles</td></tr>';
-    } else {
-        for (var pv = 0; pv < pendingV.length; pv++) {
-            var v = pendingV[pv];
-            html += '<tr style="cursor:pointer" onclick="navigateTo(\'inbound\',\'pending-vehicle\')"><td><strong>' + escapeHtml(v.vehicleNo) + '</strong></td><td>' + escapeHtml(v.driverName || '-') + '</td>' +
-                '<td>' + escapeHtml(v.transportName || '-') + '</td><td><span class="badge badge-warning">' + escapeHtml(v.status) + '</span></td></tr>';
-        }
-    }
-    html += '</tbody></table></div></div>';
-    html += '</div>';
-    document.getElementById('section-dashboard').innerHTML = html;
+    h+='<div class="card"><div class="card-title"><i class="bx bx-time-five"></i> Pending Vehicles</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>Vehicle</th><th>LR No</th><th>Transport</th><th>Status</th></tr></thead><tbody>';
+    if(!pendV.length)h+='<tr><td colspan="4" style="text-align:center;color:var(--text-muted);padding:24px">No pending vehicles</td></tr>';
+    else pendV.forEach(function(v){h+='<tr style="cursor:pointer" onclick="navTo(\'inbound\',\'pending-vehicle\')"><td><strong>'+esc(v.vehicleNo)+'</strong></td><td>'+esc(v.lrNo||'-')+'</td><td>'+esc(v.transportName||'-')+'</td><td><span class="badge badge-warning">'+esc(v.status)+'</span></td></tr>';});
+    h+='</tbody></table></div></div></div>';
+    setHtml(h);
 }
-
-function kpiCard(icon, value, label) {
-    return '<div class="kpi-card" style="cursor:pointer" onclick="this.style.transform=\'scale(0.97)\'"><div class="kpi-icon"><i class="bx ' + icon + '"></i></div>' +
-        '<div class="kpi-value">' + value + '</div><div class="kpi-label">' + label + '</div></div>';
+function kpi(icon,val,label,color){
+    var colors={accent:'var(--accent)',warning:'var(--warning)',info:'var(--info)',accent2:'var(--accent2)',success:'var(--success)',danger:'var(--danger)'};
+    var c=colors[color]||colors.accent;
+    return '<div class="kpi-card"><div class="kpi-icon" style="background:'+c+'15;color:'+c+'"><i class="bx '+icon+'"></i></div><div class="kpi-value">'+val+'</div><div class="kpi-label">'+label+'</div></div>';
 }
 
 // ==================== INBOUND ====================
-
-// --- SECURITY GATE ---
-function renderSecurityGate() {
-    var html = '<div class="section-header"><h2><i class="bx bx-shield-quarter"></i> Security Gate Entry</h2></div>';
-    html += '<div class="card"><div class="card-title">Vehicle Reporting</div>';
-    html += '<div class="form-group" style="margin-bottom:16px"><label>Vehicle Type <span class="req">*</span></label>';
-    html += '<div style="display:flex;gap:12px;margin-top:6px">';
-    html += '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:10px 20px;border:2px solid var(--accent);border-radius:8px;background:var(--accent-dim);flex:1;justify-content:center;font-weight:600;color:var(--accent)"><input type="radio" name="vehType" value="Unloading" checked style="accent-color:var(--accent);width:18px;height:18px"> UNLOADING</label>';
-    html += '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:10px 20px;border:2px solid var(--border);border-radius:8px;flex:1;justify-content:center;font-weight:600;color:var(--text-secondary)"><input type="radio" name="vehType" value="Loading" style="accent-color:var(--accent2);width:18px;height:18px"> LOADING</label>';
-    html += '</div></div>';
-
-    html += '<div class="form-row">';
-    html += '<div class="form-group"><label>Vehicle Number <span class="req">*</span></label><input type="text" id="secVehicleNo" class="form-input" placeholder="e.g. MH-12-AB-1234" style="text-transform:uppercase"></div>';
-    html += '<div class="form-group" id="lrGroup"><label>LR Number <span class="req">*</span></label><input type="text" id="secLrNo" class="form-input" placeholder="e.g. LR-2025-001" style="border-color:var(--warning)"></div>';
-    html += '<div class="form-group"><label>Driver Name <span class="req">*</span></label><input type="text" id="secDriverName" class="form-input" placeholder="Driver full name"></div>';
-    html += '<div class="form-group"><label>Driver Mobile <span class="req">*</span></label><input type="tel" id="secDriverMobile" class="form-input" placeholder="10 digit" maxlength="10"></div>';
-    html += '<div class="form-group"><label>Transporter Name <span class="req">*</span></label><input type="text" id="secTransport" class="form-input" placeholder="Transport company"></div>';
-    html += '<div class="form-group"><label>Reporting Time</label><div class="form-input" style="background:var(--bg-secondary);color:var(--accent);font-weight:bold">' + formatDateTime(new Date()) + ' <small>(Auto)</small></div></div>';
-    html += '</div>';
-    html += '<div class="form-actions">';
-    if (checkActionPerm('canSecurityEntry')) {
-        html += '<button class="btn btn-primary" onclick="submitSecurityGate()"><i class="bx bx-check-circle"></i> Submit Vehicle</button>';
-    } else {
-        html += '<button class="btn btn-primary" disabled><i class="bx bx-block"></i> Access Denied</button>';
+function renderInbound(sub){
+    switch(sub){
+        case 'security-gate':renderSecurityGate();break;
+        case 'pending-vehicle':renderPendingVehicle();break;
+        case 'unloading-screen':renderUnloadingScreen();break;
+        case 'posting-pending':renderPostingPending();break;
+        case 'inbound-record':renderInboundRecord();break;
+        case 'unloading-stock':renderUnloadingStock();break;
+        default:renderPendingVehicle();
     }
-    html += '</div></div>';
-    return html;
 }
 
-// Toggle LR field based on vehicle type
-document.addEventListener('change', function(e) {
-    if (e.target.name === 'vehType') {
-        var lrGroup = document.getElementById('lrGroup');
-        if (lrGroup) {
-            lrGroup.style.display = e.target.value === 'Unloading' ? '' : 'none';
-        }
-        var labels = document.querySelectorAll('input[name="vehType"]');
-        for (var i = 0; i < labels.length; i++) {
-            var parent = labels[i].closest('label');
-            if (labels[i].checked) {
-                parent.style.borderColor = labels[i].value === 'Unloading' ? 'var(--accent)' : 'var(--accent2)';
-                parent.style.background = labels[i].value === 'Unloading' ? 'var(--accent-dim)' : 'var(--accent2-dim)';
-                parent.style.color = labels[i].value === 'Unloading' ? 'var(--accent)' : 'var(--accent2)';
-            } else {
-                parent.style.borderColor = 'var(--border)';
-                parent.style.background = 'transparent';
-                parent.style.color = 'var(--text-secondary)';
-            }
-        }
+// --- Security Gate (Entry By Added) ---
+function renderSecurityGate(){
+    var h='<div class="section-header"><h2><i class="bx bx-shield-quarter"></i> Security Gate Entry</h2></div>';
+    h+='<div class="card"><div class="card-title"><i class="bx bxs-truck"></i> Vehicle Reporting</div>';
+    h+='<div class="form-group" style="margin-bottom:16px"><label>Vehicle Type <span class="req">*</span></label>';
+    h+='<div style="display:flex;gap:10px;margin-top:6px">';
+    h+='<label style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:10px 18px;border:2px solid var(--accent);border-radius:var(--radius-sm);background:var(--accent-dim);flex:1;justify-content:center;font-weight:600;color:var(--accent)"><input type="radio" name="vehType" value="Unloading" checked style="accent-color:var(--accent);width:16px;height:16px"> UNLOADING</label>';
+    h+='<label style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:10px 18px;border:2px solid var(--border);border-radius:var(--radius-sm);flex:1;justify-content:center;font-weight:600;color:var(--text-secondary)"><input type="radio" name="vehType" value="Loading" style="accent-color:var(--accent2);width:16px;height:16px"> LOADING</label>';
+    h+='</div></div>';
+    h+='<div class="form-row">';
+    h+='<div class="form-group"><label>Vehicle Number <span class="req">*</span></label><input type="text" id="secVNo" class="form-input" placeholder="MH-12-AB-1234" style="text-transform:uppercase"></div>';
+    h+='<div class="form-group" id="lrGrp"><label>LR Number <span class="req">*</span></label><input type="text" id="secLR" class="form-input" placeholder="LR-2025-001" style="text-transform:uppercase"></div>';
+    h+='<div class="form-group"><label>Driver Name <span class="req">*</span></label><input type="text" id="secDriver" class="form-input" placeholder="Driver full name"></div>';
+    h+='<div class="form-group"><label>Driver Mobile <span class="req">*</span></label><input type="tel" id="secMobile" class="form-input" placeholder="10 digit" maxlength="10"></div>';
+    h+='<div class="form-group"><label>Transporter Name <span class="req">*</span></label><input type="text" id="secTransport" class="form-input" placeholder="Transport company"></div>';
+    h+='<div class="form-group"><label>Reporting Time</label><div class="form-input" style="background:var(--bg-secondary);color:var(--accent);font-weight:600">'+fmtDT(new Date())+' <small>(Auto)</small></div></div>';
+    h+='<div class="form-group"><label>Entry By</label><div class="form-input" style="background:var(--bg-secondary);color:var(--accent2);font-weight:600"><i class="bx bx-user-check"></i> '+(APP.currentUser?esc(APP.currentUser.name)+' ('+esc(APP.currentUser.role)+')':'Unknown')+'</div></div>';
+    h+='</div>';
+    h+='<div class="form-actions">';
+    if(chkAct('canSecurityEntry'))h+='<button class="btn btn-glass" onclick="submitSecGate()"><i class="bx bx-check-circle"></i> Submit Vehicle</button>';
+    else h+='<button class="btn btn-glass" disabled><i class="bx bx-block"></i> Access Denied</button>';
+    h+='</div></div>';
+    setHtml(h);
+}
+document.addEventListener('change',function(e){
+    if(e.target.name==='vehType'){
+        var lg=document.getElementById('lrGrp');if(lg)lg.style.display=e.target.value==='Unloading'?'':'none';
+        document.querySelectorAll('input[name="vehType"]').forEach(function(r){
+            var p=r.closest('label');
+            if(r.checked){p.style.borderColor=r.value==='Unloading'?'var(--accent)':'var(--accent2)';p.style.background=r.value==='Unloading'?'var(--accent-dim)':'var(--accent2-dim)';p.style.color=r.value==='Unloading'?'var(--accent)':'var(--accent2)';}
+            else{p.style.borderColor='var(--border)';p.style.background='transparent';p.style.color='var(--text-secondary)';}
+        });
     }
 });
-
-function submitSecurityGate() {
-    var vehType = document.querySelector('input[name="vehType"]:checked');
-    var vNo = document.getElementById('secVehicleNo').value.trim().toUpperCase();
-    var lrNo = document.getElementById('secLrNo').value.trim().toUpperCase();
-    var driverName = document.getElementById('secDriverName').value.trim();
-    var mobile = document.getElementById('secDriverMobile').value.trim();
-    var transport = document.getElementById('secTransport').value.trim();
-    if (!vNo || !driverName || !mobile || !transport) { showToast('All fields are required', 'error'); return; }
-    if (!/^\d{10}$/.test(mobile)) { showToast('Invalid 10-digit mobile number', 'error'); return; }
-    var type = vehType ? vehType.value : 'Unloading';
-
-    if (type === 'Unloading' && !lrNo) { showToast('LR Number is required for unloading vehicles', 'error'); return; }
-
-    // Check duplicate LR for unloading
-    if (type === 'Unloading') {
-        var lrExists = DB.filter('vehicles', function(v) { return v.lrNo && v.lrNo.toUpperCase() === lrNo; });
-        if (lrExists.length > 0) { showToast('ERROR: LR Number already exists!', 'error'); return; }
+function submitSecGate(){
+    var vt=document.querySelector('input[name="vehType"]:checked');
+    var vno=document.getElementById('secVNo').value.trim().toUpperCase();
+    var lr=document.getElementById('secLR').value.trim().toUpperCase();
+    var dr=document.getElementById('secDriver').value.trim();
+    var mb=document.getElementById('secMobile').value.trim();
+    var tp=document.getElementById('secTransport').value.trim();
+    if(!vno||!dr||!mb||!tp){showToast('All fields are required','error');return;}
+    if(!/^\d{10}$/.test(mb)){showToast('Invalid 10-digit mobile','error');return;}
+    var type=vt?vt.value:'Unloading';
+    if(type==='Unloading'&&!lr){showToast('LR Number required for unloading','error');return;}
+    if(type==='Unloading'){
+        var lrE=DB.filter('vehicles',function(v){return v.lrNo&&v.lrNo.toUpperCase()===lr;});
+        if(lrE.length>0){showToast('LR Number already exists!','error');return;}
     }
+    var status=type==='Unloading'?'Unload Pending':'Loading Pending';
+    DB.add('vehicles',{vehicleNo:vno,lrNo:lr||'',driverName:dr,driverMobile:mb,transportName:tp,vehicleType:type,status:status,reportedAt:new Date().toISOString(),entryBy:APP.currentUser?APP.currentUser.id:'',entryByName:APP.currentUser?APP.currentUser.name:''});
+    addNotif('New '+type+' Vehicle '+vno+' reported at gate by '+(APP.currentUser?APP.currentUser.name:'Unknown'),'warning');
+    logAction('Security Gate','ENTRY',type+' Vehicle '+vno+' LR:'+(lr||'N/A')+' By:'+(APP.currentUser?APP.currentUser.name:'Unknown'));
+    showToast('Vehicle submitted successfully!','success');
+    document.getElementById('secVNo').value='';document.getElementById('secLR').value='';
+    document.getElementById('secDriver').value='';document.getElementById('secMobile').value='';document.getElementById('secTransport').value='';
+}
 
-    var status = type === 'Unloading' ? 'Unload Pending' : 'Loading Pending';
-    DB.add('vehicles', {
-        vehicleNo: vNo, lrNo: lrNo || '', driverName: driverName, driverMobile: mobile,
-        transportName: transport, vehicleType: type, status: status,
-        reportedAt: new Date().toISOString()
+// --- Pending Vehicle (Entry By Column + Manual Assign with Suggestions) ---
+function renderPendingVehicle(){
+    var allV=DB.get('vehicles');
+    var unassigned=[],assigned=[],postPend=[];
+    allV.forEach(function(v){
+        if(v.vehicleType!=='Unloading')return;
+        if(v.status==='Posting Pending Approval')postPend.push(v);
+        else if(v.assignedTo&&v.status!=='Posted'&&v.status!=='Unloaded'&&v.status!=='Rejected')assigned.push(v);
+        else if(v.status==='Unload Pending')unassigned.push(v);
     });
-    addNotification('New ' + type + ' Vehicle ' + vNo + ' reported at gate.', type === 'Unloading' ? 'warning' : 'info');
-    logAction('Security Gate', 'ENTRY', type + ' Vehicle ' + vNo + ' reported. LR: ' + (lrNo || 'N/A'));
-    showToast('Vehicle submitted successfully!', 'success');
-    document.getElementById('secVehicleNo').value = '';
-    document.getElementById('secLrNo').value = '';
-    document.getElementById('secDriverName').value = '';
-    document.getElementById('secDriverMobile').value = '';
-    document.getElementById('secTransport').value = '';
+    var h='<div class="section-header"><h2><i class="bx bx-time-five"></i> Inbound Control Tower</h2>';
+    if(chkAct('canUploadInvoice'))h+='<button class="btn btn-glass" onclick="showBulkUpload()"><i class="bx bx-upload"></i> Bulk Upload</button>';
+    h+='</div>';
+    // Unassigned
+    h+='<div class="card"><div class="card-title"><i class="bx bx-clock"></i> Unassigned Vehicles ('+unassigned.length+')</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>Vehicle No</th><th>LR No</th><th>Transport</th><th>Invoices</th><th>Materials</th><th>Entry By</th><th>Actions</th></tr></thead><tbody>';
+    if(!unassigned.length)h+='<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:20px">No unassigned vehicles</td></tr>';
+    else unassigned.forEach(function(v){
+        var invs=DB.filter('invoices',function(i){return i.vehicleId===v.id;});
+        var matCount=0;invs.forEach(function(inv){matCount+=DB.filter('invoice_materials',function(m){return m.invoiceId===inv.id;}).length;});
+        h+='<tr><td><strong>'+esc(v.vehicleNo)+'</strong></td><td>'+esc(v.lrNo||'-')+'</td><td>'+esc(v.transportName||'-')+'</td><td><span class="badge badge-info">'+invs.length+'</span></td><td><span class="badge badge-accent">'+matCount+'</span></td><td style="font-size:11px;color:var(--text-secondary)">'+esc(v.entryByName||'-')+'</td><td><div class="table-actions">';
+        if(chkAct('canUploadInvoice'))h+='<button class="btn btn-glass btn-sm" onclick="showUploadInvoice(\''+v.id+'\')"><i class="bx bx-upload"></i> Invoice</button>';
+        if(chkAct('canAssignVehicle'))h+='<button class="btn btn-glass btn-sm" onclick="showAssignUnloading(\''+v.id+'\')"><i class="bx bx-user-plus"></i> Assign</button>';
+        h+='</div></td></tr>';
+    });
+    h+='</tbody></table></div></div>';
+    // Assigned
+    h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-user-check"></i> Assigned Vehicles ('+assigned.length+')</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>Vehicle No</th><th>LR No</th><th>Assigned To</th><th>Invoices</th><th>Entry By</th><th>Actions</th></tr></thead><tbody>';
+    if(!assigned.length)h+='<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:20px">No assigned vehicles</td></tr>';
+    else assigned.forEach(function(v){
+        var invs=DB.filter('invoices',function(i){return i.vehicleId===v.id;});
+        h+='<tr><td><strong>'+esc(v.vehicleNo)+'</strong></td><td>'+esc(v.lrNo||'-')+'</td><td>'+esc(v.assignedToName||'-')+'</td><td><span class="badge badge-info">'+invs.length+'</span></td><td style="font-size:11px;color:var(--text-secondary)">'+esc(v.entryByName||'-')+'</td><td><div class="table-actions">';
+        if(chkAct('canAssignVehicle'))h+='<button class="btn btn-danger btn-sm" onclick="unassignVehicle(\''+v.id+'\')"><i class="bx bx-user-minus"></i> Unassign</button>';
+        h+='</div></td></tr>';
+    });
+    h+='</tbody></table></div></div>';
+    // Posting Pending
+    if(postPend.length>0){
+        h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-error-circle" style="color:var(--warning)"></i> Posting Pending Approval ('+postPend.length+')</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>Vehicle No</th><th>LR No</th><th>Unload No</th><th>Submitted By</th><th>Actions</th></tr></thead><tbody>';
+        postPend.forEach(function(v){
+            h+='<tr><td><strong>'+esc(v.vehicleNo)+'</strong></td><td>'+esc(v.lrNo||'-')+'</td><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(v.unloadNo||'-')+'</td><td>'+esc(v.unloadedByName||'-')+'</td><td><div class="table-actions">';
+            if(chkAct('canPostVehicle'))h+='<button class="btn btn-glass btn-sm" onclick="postVehicle(\''+v.id+'\')"><i class="bx bx-check-double"></i> Post</button>';
+            h+='<button class="btn btn-glass btn-sm" onclick="viewUnloadingDetail(\''+v.id+'\')"><i class="bx bx-eye"></i> View</button>';
+            h+='</div></td></tr>';
+        });
+        h+='</tbody></table></div></div>';
+    }
+    setHtml(h);
 }
 
-// --- BULK INVOICE UPLOAD ---
-function showBulkInvoiceUpload() {
-    var html = '<div class="form-group"><label>Upload Bulk Data (Excel) <span class="req">*</span></label>' +
-        '<label class="btn btn-warning btn-sm" style="cursor:pointer"><i class="bx bx-upload"></i> Choose File' +
-        '<input type="file" id="bulkInvFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="document.getElementById(\'bulkInvName\').innerText=this.files[0].name"></label>' +
-        '<div id="bulkInvName" style="font-size:12px;color:var(--text-muted);margin-top:5px">No file chosen</div></div>' +
-        '<div style="background:var(--bg-secondary);padding:12px;border-radius:6px;font-size:12px;color:var(--text-muted);border:1px dashed var(--warning)">' +
-        '<strong style="color:var(--warning)">Excel Format (Row 1 = Header):</strong><br>' +
-        'Vehicle No | LR No | Invoice No | Customer | Material Code | Description | Qty</div>';
-    showModal('Bulk Upload Invoices & Materials', html, 'md',
-        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-        '<button class="btn btn-primary" onclick="processBulkInvoiceUpload()"><i class="bx bx-check-double"></i> Upload</button>');
+// Upload Invoice (unchanged)
+function showUploadInvoice(vehId){
+    var v=DB.find('vehicles',vehId);if(!v)return;
+    var h='<div class="form-group"><label>Invoice Number <span class="req">*</span></label><input type="text" id="singleInvNo" class="form-input" placeholder="INV-2025-XXX" style="text-transform:uppercase"></div>';
+    h+='<div class="form-group"><label>Customer</label><input type="text" id="singleInvCust" class="form-input" placeholder="Customer name"></div>';
+    h+='<hr class="cyber-line"><div class="card-title"><i class="bx bx-list-plus"></i> Add Materials</div>';
+    h+='<div id="singleMatRows">';
+    h+=singleMatRow(0);
+    h+='</div>';
+    h+='<button class="btn btn-glass btn-sm" onclick="addSingleMatRow()" style="margin-top:8px"><i class="bx bx-plus"></i> Add Material</button>';
+    showModal('Upload Invoice — '+v.vehicleNo,h,'lg',
+        '<button class="btn btn-glass" onclick="closeModal()">Cancel</button>'+
+        '<button class="btn btn-glass" onclick="saveSingleInvoice(\''+vehId+'\')"><i class="bx bx-check"></i> Save Invoice</button>');
+}
+function singleMatRow(idx){
+    var mats=DB.get('material_master');
+    var opts='<option value="">Select Material</option>';
+    mats.forEach(function(m){opts+='<option value="'+esc(m.material)+'" data-ean="'+esc(m.ean||'')+'">'+esc(m.material)+' ('+esc(m.ean||'')+' )</option>';});
+    return '<div class="form-row" style="margin-bottom:8px" id="smr_'+idx+'"><div class="form-group" style="flex:2"><label>Material</label><select class="form-input smr-mat" onchange="smrChange(this,'+idx+')">'+opts+'</select></div><div class="form-group"><label>EAN</label><input type="text" class="form-input smr-ean" id="smrEan_'+idx+'" placeholder="Auto"></div><div class="form-group"><label>Qty</label><input type="number" class="form-input smr-qty" id="smrQty_'+idx+'" placeholder="0" min="1"></div><div class="form-group" style="display:flex;align-items:flex-end"><button class="btn btn-danger btn-sm" onclick="document.getElementById(\'smr_'+idx+'\').remove()"><i class="bx bx-trash"></i></button></div></div>';
+}
+var smrIdx=1;
+function addSingleMatRow(){
+    var c=document.getElementById('singleMatRows');
+    var div=document.createElement('div');div.innerHTML=singleMatRow(smrIdx++);
+    c.appendChild(div.firstElementChild);
+}
+function smrChange(sel,idx){
+    var opt=sel.options[sel.selectedIndex];
+    var eanField=document.getElementById('smrEan_'+idx);
+    if(eanField)eanField.value=opt.getAttribute('data-ean')||'';
+}
+function saveSingleInvoice(vehId){
+    var invNo=document.getElementById('singleInvNo').value.trim().toUpperCase();
+    if(!invNo){showToast('Invoice number required','error');return;}
+    var exists=DB.filter('invoices',function(i){return i.vehicleId===vehId&&i.invoiceNo===invNo;});
+    if(exists.length>0){showToast('Invoice number already exists for this vehicle','error');return;}
+    var cust=document.getElementById('singleInvCust').value.trim();
+    var inv=DB.add('invoices',{vehicleId:vehId,invoiceNo:invNo,customer:cust,status:'Pending'});
+    var matSels=document.querySelectorAll('.smr-mat');
+    var count=0;
+    matSels.forEach(function(sel){
+        var row=sel.closest('.form-row');
+        var ean=row.querySelector('.smr-ean').value.trim();
+        var qty=parseInt(row.querySelector('.smr-qty').value)||0;
+        if(sel.value&&qty>0){
+            DB.add('invoice_materials',{invoiceId:inv.id,material:sel.value,ean:ean,qty:qty,unloadedQty:0});
+            count++;
+        }
+    });
+    logAction('Inbound','INVOICE_UPLOAD','Invoice '+invNo+' uploaded for vehicle '+vehId+' with '+count+' materials');
+    showToast('Invoice '+invNo+' saved with '+count+' materials!','success');
+    closeModal();renderInbound('pending-vehicle');
 }
 
-function processBulkInvoiceUpload() {
-    var fileInput = document.getElementById('bulkInvFile');
-    if (!fileInput || !fileInput.files[0]) { showToast('Select a file first', 'error'); return; }
-    var reader = new FileReader();
-    reader.onload = function(e) {
-        try {
-            var wb = XLSX.read(e.target.result, { type: 'array' });
-            var ws = wb.Sheets[wb.SheetNames[0]];
-            var data = XLSX.utils.sheet_to_json(ws, { header: 1 });
-            if (data.length === 0) { showToast('Empty file', 'error'); return; }
-            var startRow = (String(data[0][1] || '').toLowerCase().indexOf('lr') > -1) ? 1 : 0;
-            var vehicleMap = {}, countInv = 0, countMat = 0;
-            for (var k = startRow; k < data.length; k++) {
-                var r = data[k];
-                if (!r || !r[1] || !r[2]) continue;
-                var vNo = String(r[0] || '').trim(), lr = String(r[1] || '').trim().toUpperCase();
-                var invNo = String(r[2] || '').trim(), customer = String(r[3] || '').trim();
-                var matCode = String(r[4] || '').trim(), matDesc = String(r[5] || '').trim(), invQty = parseInt(r[6]) || 0;
-                if (!vehicleMap[lr]) {
-                    var existingV = DB.filter('vehicles', function(v) { return v.lrNo && v.lrNo.toUpperCase() === lr; });
-                    if (existingV.length > 0) {
-                        vehicleMap[lr] = { vehicleId: existingV[0].id, invoices: {} };
-                        if (existingV[0].status === 'Reporting Completed' || existingV[0].status === 'Unload Pending') {
-                            DB.update('vehicles', existingV[0].id, { status: 'Unload Pending' });
-                        }
-                    } else {
-                        var v = DB.add('vehicles', { vehicleNo: vNo, lrNo: lr, driverName: '', driverMobile: '', transportName: '', vehicleType: 'Unloading', status: 'Unload Pending', reportedAt: new Date().toISOString() });
-                        vehicleMap[lr] = { vehicleId: v.id, invoices: {} };
-                    }
+// Bulk Upload (unchanged)
+function showBulkUpload(){
+    var h='<div class="form-group"><label>Upload Bulk Data (Excel) <span class="req">*</span></label>';
+    h+='<label class="btn btn-glass btn-sm" style="cursor:pointer"><i class="bx bx-upload"></i> Choose File<input type="file" id="bulkFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="document.getElementById(\'bulkFName\').innerText=this.files[0].name"></label>';
+    h+='<div id="bulkFName" style="font-size:11px;color:var(--text-muted);margin-top:4px">No file chosen</div></div>';
+    h+='<div style="background:var(--bg-secondary);padding:10px;border-radius:var(--radius-sm);font-size:11px;color:var(--text-muted);border:1px dashed var(--warning)"><strong style="color:var(--warning)">Excel Format:</strong><br>Vehicle No | LR No | Invoice No | Customer | Material | EAN | Qty</div>';
+    showModal('Bulk Upload Invoices',h,'md',
+        '<button class="btn btn-glass" onclick="closeModal()">Cancel</button>'+
+        '<button class="btn btn-glass" onclick="processBulkUpload()"><i class="bx bx-check-double"></i> Upload</button>');
+}
+function processBulkUpload(){
+    var fi=document.getElementById('bulkFile');if(!fi||!fi.files[0]){showToast('Select a file','error');return;}
+    var reader=new FileReader();
+    reader.onload=function(e){
+        try{
+            var wb=XLSX.read(e.target.result,{type:'array'});var ws=wb.Sheets[wb.SheetNames[0]];var data=XLSX.utils.sheet_to_json(ws,{header:1});
+            if(!data.length){showToast('Empty file','error');return;}
+            var startRow=(String(data[0][1]||'').toLowerCase().indexOf('lr')>-1)?1:0;
+            var vMap={},cInv=0,cMat=0;
+            for(var k=startRow;k<data.length;k++){
+                var r=data[k];if(!r||!r[1]||!r[2])continue;
+                var vNo=String(r[0]||'').trim(),lr=String(r[1]||'').trim().toUpperCase();
+                var invNo=String(r[2]||'').trim(),cust=String(r[3]||'').trim();
+                var mat=String(r[4]||'').trim(),ean=String(r[5]||'').trim(),qty=parseInt(r[6])||0;
+                if(!vMap[lr]){
+                    var exV=DB.filter('vehicles',function(v){return v.lrNo&&v.lrNo.toUpperCase()===lr;});
+                    if(exV.length>0)vMap[lr]={vid:exV[0].id,invs:{}};
+                    else{var nv=DB.add('vehicles',{vehicleNo:vNo,lrNo:lr,driverName:'',driverMobile:'',transportName:'',vehicleType:'Unloading',status:'Unload Pending',reportedAt:new Date().toISOString(),entryBy:'',entryByName:'Bulk Upload'});vMap[lr]={vid:nv.id,invs:{}};}
                 }
-                if (!vehicleMap[lr].invoices[invNo] && invNo) {
-                    DB.add('invoices', { vehicleId: vehicleMap[lr].vehicleId, invoiceNo: invNo, customer: customer, status: 'Pending' });
-                    vehicleMap[lr].invoices[invNo] = true;
-                    countInv++;
-                }
-                if (matCode && invQty > 0 && vehicleMap[lr].invoices[invNo]) {
-                    var invList = DB.get('invoices');
-                    var invObj = null;
-                    for (var ii = 0; ii < invList.length; ii++) {
-                        if (invList[ii].vehicleId === vehicleMap[lr].vehicleId && invList[ii].invoiceNo === invNo) { invObj = invList[ii]; break; }
-                    }
-                    if (invObj) {
-                        // Try to find EAN from material master
-                        var eanCode = '';
-                        var matMaster = DB.get('material_master');
-                        for (var mm = 0; mm < matMaster.length; mm++) {
-                            if (matMaster[mm].material === matCode) { eanCode = matMaster[mm].ean || ''; break; }
-                        }
-                        DB.add('invoice_materials', { invoiceId: invObj.id, material: matCode, ean: eanCode, description: matDesc, qty: invQty, unloadedQty: 0 });
-                        countMat++;
-                    }
+                if(!vMap[lr].invs[invNo]&&invNo){DB.add('invoices',{vehicleId:vMap[lr].vid,invoiceNo:invNo,customer:cust,status:'Pending'});vMap[lr].invs[invNo]=true;cInv++;}
+                if(mat&&qty>0&&vMap[lr].invs[invNo]){
+                    var invList=DB.get('invoices'),invObj=null;
+                    for(var ii=0;ii<invList.length;ii++){if(invList[ii].vehicleId===vMap[lr].vid&&invList[ii].invoiceNo===invNo){invObj=invList[ii];break;}}
+                    if(invObj){DB.add('invoice_materials',{invoiceId:invObj.id,material:mat,ean:ean,qty:qty,unloadedQty:0});cMat++;}
                 }
             }
-            logAction('Inbound', 'BULK_UPLOAD', 'Processed ' + Object.keys(vehicleMap).length + ' vehicles, ' + countInv + ' invoices, ' + countMat + ' materials.');
-            showToast('Success! ' + countInv + ' invoices, ' + countMat + ' materials uploaded.', 'success');
-            closeModal();
-            renderInbound('pending-vehicle');
-        } catch (err) { showToast('Error reading Excel file: ' + err.message, 'error'); }
+            logAction('Inbound','BULK_UPLOAD',Object.keys(vMap).length+' vehicles, '+cInv+' invoices, '+cMat+' materials');
+            showToast('Success! '+cInv+' invoices, '+cMat+' materials','success');
+            closeModal();renderInbound('pending-vehicle');
+        }catch(err){showToast('Excel error: '+err.message,'error');}
     };
-    reader.readAsArrayBuffer(fileInput.files[0]);
+    reader.readAsArrayBuffer(fi.files[0]);
 }
 
-// --- PENDING VEHICLES ---
-function renderPendingVehicles() {
-    var allVehicles = DB.get('vehicles');
-    var unassigned = [], assigned = [], pendingApproval = [];
-
-    for (var i = 0; i < allVehicles.length; i++) {
-        var v = allVehicles[i];
-        if (v.vehicleType !== 'Unloading') continue;
-        if (v.status === 'Posting Pending Approval') pendingApproval.push(v);
-        else if (v.assignedTo && v.status !== 'Posted' && v.status !== 'Unloaded' && v.status !== 'Rejected') assigned.push(v);
-        else if (v.status === 'Unload Pending' || v.status === 'Reporting Completed') unassigned.push(v);
-    }
-
-    var html = '<div class="section-header"><h2><i class="bx bx-time-five"></i> Inbound Control Tower</h2>';
-    if (checkActionPerm('canUploadInvoice')) html += '<button class="btn btn-warning" onclick="showBulkInvoiceUpload()"><i class="bx bx-upload"></i> Bulk Upload</button>';
-    html += '</div>';
-
-    // Unassigned Vehicles
-    html += '<div class="card"><div class="card-title">Unassigned Vehicles (' + unassigned.length + ')</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>Vehicle No</th><th>LR No</th><th>Transport</th><th>Invoices</th><th>Materials</th><th>Action</th></tr></thead><tbody>';
-    if (unassigned.length === 0) {
-        html += '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:20px">No unassigned vehicles</td></tr>';
-    } else {
-        for (var u = 0; u < unassigned.length; u++) {
-            var veh = unassigned[u];
-            var invCount = DB.filter('invoices', function(inv) { return inv.vehicleId === veh.id; }).length;
-            var matCount = 0;
-            var vehInvs = DB.filter('invoices', function(inv) { return inv.vehicleId === veh.id; });
-            for (var vi = 0; vi < vehInvs.length; vi++) {
-                matCount += DB.filter('invoice_materials', function(im) { return im.invoiceId === vehInvs[vi].id; }).length;
-            }
-            var hasData = invCount > 0;
-            html += '<tr><td><strong>' + escapeHtml(veh.vehicleNo) + '</strong></td><td style="font-family:var(--font-display);font-size:11px;color:var(--warning)">' + escapeHtml(veh.lrNo) + '</td><td>' + escapeHtml(veh.transportName || '-') + '</td>';
-            html += '<td><span class="badge ' + (hasData ? 'badge-success' : 'badge-warning') + '">' + invCount + '</span></td>';
-            html += '<td>' + matCount + '</td><td><div class="table-actions">';
-            if (hasData && checkActionPerm('canAssignVehicle')) {
-                html += '<button class="btn btn-primary btn-sm" onclick="assignVehicleModal(\'' + veh.id + '\')"><i class="bx bx-user-plus"></i> Assign</button>';
-            } else if (!hasData) {
-                html += '<button class="btn btn-sm" disabled style="opacity:0.5;cursor:not-allowed"><i class="bx bx-block"></i> No Data</button>';
-            }
-            if (checkActionPerm('canUploadInvoice')) {
-                html += '<button class="btn btn-secondary btn-sm" onclick="showVehicleInvoiceUpload(\'' + veh.id + '\')"><i class="bx bx-file"></i> Upload</button>';
-            }
-            html += '</div></td></tr>';
-        }
-    }
-    html += '</tbody></table></div></div>';
-
-    // Pending Approvals
-    if (pendingApproval.length > 0 && checkActionPerm('canApprove')) {
-        html += '<div class="card" style="margin-top:20px;border:2px solid var(--warning)"><div class="card-title" style="color:var(--warning)"><i class="bx bx-error-circle"></i> Pending Approvals (' + pendingApproval.length + ')</div>';
-        html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>Vehicle</th><th>LR No</th><th>Unloader</th><th>Report No</th><th>Action</th></tr></thead><tbody>';
-        for (var pa = 0; pa < pendingApproval.length; pa++) {
-            var pv = pendingApproval[pa];
-            html += '<tr><td><strong>' + escapeHtml(pv.vehicleNo) + '</strong></td><td>' + escapeHtml(pv.lrNo) + '</td><td>' + escapeHtml(pv.assignedToUsername || '-') + '</td>';
-            html += '<td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">' + escapeHtml(pv.shortReportNo || '-') + '</td>';
-            html += '<td><div class="table-actions">';
-            html += '<button class="btn btn-success btn-sm" onclick="approveVehicle(\'' + pv.id + '\')"><i class="bx bx-check"></i> Approve</button>';
-            html += '<button class="btn btn-danger btn-sm" onclick="rejectVehicle(\'' + pv.id + '\')"><i class="bx bx-x"></i> Reject</button>';
-            html += '<button class="btn btn-secondary btn-sm" onclick="viewShortReport(\'' + pv.id + '\')"><i class="bx bx-show"></i> View</button>';
-            html += '</div></td></tr>';
-        }
-        html += '</tbody></table></div></div>';
-    }
-
-    // Assigned Vehicles
-    html += '<div class="card" style="margin-top:20px"><div class="card-title">Active Assigned Vehicles (' + assigned.length + ')</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>Vehicle</th><th>LR No</th><th>Assigned To</th><th>Status</th></tr></thead><tbody>';
-    if (assigned.length === 0) {
-        html += '<tr><td colspan="4" style="text-align:center;color:var(--text-muted);padding:20px">No active vehicles</td></tr>';
-    } else {
-        for (var av = 0; av < assigned.length; av++) {
-            var avv = assigned[av];
-            html += '<tr><td><strong>' + escapeHtml(avv.vehicleNo) + '</strong></td><td>' + escapeHtml(avv.lrNo) + '</td><td>' + escapeHtml(avv.assignedToUsername) + '</td><td><span class="badge badge-warning">' + escapeHtml(avv.status) + '</span></td></tr>';
-        }
-    }
-    html += '</tbody></table></div></div>';
-    return html;
+// --- Assign Unloading (Manual Name + Suggestions) ---
+function showAssignUnloading(vehId){
+    var v=DB.find('vehicles',vehId);if(!v)return;
+    var invs=DB.filter('invoices',function(i){return i.vehicleId===vehId;});
+    if(!invs.length){showToast('Upload invoices first!','error');return;}
+    var h='<div class="form-group"><label>Vehicle: <strong style="color:var(--accent)">'+esc(v.vehicleNo)+'</strong></label></div>';
+    h+='<div class="form-group" style="position:relative"><label>Assign To — Type Name <span class="req">*</span></label>';
+    h+='<input type="text" id="assignUserInput" class="form-input" placeholder="Yahan name type karein..." autocomplete="off" oninput="suggestAssignUsers(this.value)" onkeydown="handleAssignKeydown(event)">';
+    h+='<input type="hidden" id="assignUserId" value="">';
+    h+='<div id="assignUserSuggestions"></div>';
+    h+='</div>';
+    h+='<div style="background:var(--accent-dim);padding:10px;border-radius:var(--radius-sm);font-size:12px;color:var(--accent)"><i class="bx bx-info-circle"></i> Name type karein — niche suggestions aayengi. Select karein ya jo type kiya wo hi save hoga.</div>';
+    showModal('Assign Unloading — '+v.vehicleNo,h,'sm',
+        '<button class="btn btn-glass" onclick="closeModal()">Cancel</button>'+
+        '<button class="btn btn-glass" onclick="doAssignUnloading(\''+vehId+'\')"><i class="bx bx-check"></i> Assign</button>');
+    setTimeout(function(){document.getElementById('assignUserInput').focus();},300);
 }
-
-function assignVehicleModal(vehicleId) {
-    var users = DB.get('users');
-    var options = '';
-    for (var i = 0; i < users.length; i++) {
-        if (users[i].permissions.actions && users[i].permissions.actions.canStartUnloading) {
-            options += '<option value="' + users[i].username + '">' + escapeHtml(users[i].name) + ' (' + users[i].username + ')</option>';
-        }
-    }
-    var html = '<div class="form-group"><label>Assign To <span class="req">*</span></label>' +
-        '<select id="assignUserName" class="form-input"><option value="">-- Select User --</option>' + options + '</select></div>';
-    showModal('Assign Vehicle', html, 'sm',
-        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-        '<button class="btn btn-primary" onclick="confirmAssignVehicle(\'' + vehicleId + '\')"><i class="bx bx-check"></i> Assign</button>');
-}
-
-function confirmAssignVehicle(vehicleId) {
-    var uname = document.getElementById('assignUserName').value;
-    if (!uname) { showToast('Select a user', 'error'); return; }
-    DB.update('vehicles', vehicleId, { assignedTo: uname, assignedToUsername: uname, status: 'Assigned' });
-    addNotification('Vehicle assigned to ' + uname, 'info');
-    logAction('Inbound', 'ASSIGN', 'Vehicle assigned to ' + uname);
-    showToast('Assigned successfully!', 'success');
-    closeModal();
-    renderInbound('pending-vehicle');
-}
-
-function showVehicleInvoiceUpload(vehicleId) {
-    var vehicle = DB.find('vehicles', vehicleId);
-    if (!vehicle) return;
-    var html = '<div style="background:var(--bg-secondary);padding:10px;border-radius:6px;margin-bottom:15px;border-left:4px solid var(--accent)">' +
-        '<strong>Uploading for:</strong> ' + escapeHtml(vehicle.vehicleNo) + ' (LR: ' + escapeHtml(vehicle.lrNo) + ')</div>' +
-        '<div class="form-group"><label>Upload Invoice Data <span class="req">*</span></label>' +
-        '<label class="btn btn-warning btn-sm" style="cursor:pointer"><i class="bx bx-upload"></i> Choose File' +
-        '<input type="file" id="vehInvFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="document.getElementById(\'vehInvName\').innerText=this.files[0].name"></label>' +
-        '<div id="vehInvName" style="font-size:12px;color:var(--text-muted);margin-top:5px">No file chosen</div></div>' +
-        '<div style="background:var(--bg-secondary);padding:12px;border-radius:6px;font-size:12px;color:var(--text-muted);border:1px dashed var(--warning)">' +
-        '<strong style="color:var(--warning)">Excel Format:</strong><br>Invoice No | Customer | Material Code | Description | Qty</div>';
-    showModal('Upload Invoices - ' + vehicle.vehicleNo, html, 'md',
-        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-        '<button class="btn btn-primary" onclick="processVehicleInvoiceUpload(\'' + vehicleId + '\')"><i class="bx bx-check-double"></i> Upload</button>');
-}
-
-function processVehicleInvoiceUpload(vehicleId) {
-    var fileInput = document.getElementById('vehInvFile');
-    if (!fileInput || !fileInput.files[0]) { showToast('Select a file first', 'error'); return; }
-    var reader = new FileReader();
-    reader.onload = function(e) {
-        try {
-            var wb = XLSX.read(e.target.result, { type: 'array' });
-            var ws = wb.Sheets[wb.SheetNames[0]];
-            var data = XLSX.utils.sheet_to_json(ws, { header: 1 });
-            if (data.length === 0) { showToast('Empty file', 'error'); return; }
-            var startRow = (String(data[0][0] || '').toLowerCase().indexOf('invoice') > -1) ? 1 : 0;
-            var countInv = 0, countMat = 0;
-            for (var k = startRow; k < data.length; k++) {
-                var r = data[k]; if (!r || !r[0]) continue;
-                var invNo = String(r[0] || '').trim(), customer = String(r[1] || '').trim();
-                var matCode = String(r[2] || '').trim(), matDesc = String(r[3] || '').trim(), invQty = parseInt(r[4]) || 0;
-                var invObj = null;
-                var allInvs = DB.get('invoices');
-                for (var ii = 0; ii < allInvs.length; ii++) {
-                    if (allInvs[ii].vehicleId === vehicleId && allInvs[ii].invoiceNo === invNo) { invObj = allInvs[ii]; break; }
-                }
-                if (!invObj && invNo) {
-                    invObj = DB.add('invoices', { vehicleId: vehicleId, invoiceNo: invNo, customer: customer, status: 'Pending' });
-                    countInv++;
-                }
-                if (matCode && invQty > 0 && invObj) {
-                    var eanCode = '';
-                    var matMaster = DB.get('material_master');
-                    for (var mm = 0; mm < matMaster.length; mm++) {
-                        if (matMaster[mm].material === matCode) { eanCode = matMaster[mm].ean || ''; break; }
-                    }
-                    DB.add('invoice_materials', { invoiceId: invObj.id, material: matCode, ean: eanCode, description: matDesc, qty: invQty, unloadedQty: 0 });
-                    countMat++;
-                }
-            }
-            DB.update('vehicles', vehicleId, { status: 'Unload Pending' });
-            logAction('Inbound', 'INV_UPLOAD', 'Uploaded ' + countInv + ' invoices, ' + countMat + ' materials for vehicle.');
-            showToast('Success! ' + countInv + ' invoices, ' + countMat + ' materials uploaded.', 'success');
-            closeModal();
-            renderInbound('pending-vehicle');
-        } catch (err) { showToast('Error reading file: ' + err.message, 'error'); }
-    };
-    reader.readAsArrayBuffer(fileInput.files[0]);
-}
-
-// --- UNLOADING SCREEN ---
-// Global state for current unloading session
-var currentUnloadSession = { vehicleId: null, scannedItems: [], startTime: null };
-
-function renderUnloadingScreen() {
-    if (!APP.currentUser) return '<div class="card"><div class="empty-state"><i class="bx bx-lock"></i><p>Not logged in</p></div></div>';
-
-    // Show only vehicles assigned to THIS user
-    var myVehicles = DB.filter('vehicles', function(v) {
-        return v.assignedTo === APP.currentUser.username && (v.status === 'Assigned' || v.status === 'Unloading In Progress');
-    });
-
-    var html = '<div class="section-header"><h2><i class="bx bx-download"></i> Unloading Screen</h2>' +
-        '<div style="color:var(--text-muted);font-size:13px">User: <strong style="color:var(--accent)">' + escapeHtml(APP.currentUser.name) + '</strong></div></div>';
-
-    if (myVehicles.length === 0) {
-        html += '<div class="card"><div class="empty-state"><i class="bx bx-inbox"></i><p>No vehicles assigned to you</p><small style="color:var(--text-muted)">Contact admin for vehicle assignment</small></div></div>';
-        return html;
-    }
-
-    // Vehicle list - simplified (only vehicle no, LR, driver)
-    html += '<div class="card"><div class="card-title">Your Assigned Vehicles</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>Vehicle No</th><th>LR No</th><th>Driver Mobile</th><th>Status</th><th>Action</th></tr></thead><tbody>';
-    for (var i = 0; i < myVehicles.length; i++) {
-        var v = myVehicles[i];
-        html += '<tr><td><strong>' + escapeHtml(v.vehicleNo) + '</strong></td><td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(v.lrNo) + '</td><td>' + escapeHtml(v.driverMobile || '-') + '</td>';
-        html += '<td><span class="badge badge-warning">' + escapeHtml(v.status) + '</span></td>';
-        html += '<td><button class="btn btn-primary btn-sm" onclick="startUnloading(\'' + v.id + '\')"><i class="bx bx-download"></i> Unload</button></td></tr>';
-    }
-    html += '</tbody></table></div></div>';
-
-    // Scanning area (hidden initially, shown after clicking Unload)
-    html += '<div id="unloadingScanArea" style="display:none"></div>';
-    return html;
-}
-
-function startUnloading(vehicleId) {
-    var vehicle = DB.find('vehicles', vehicleId);
-    if (!vehicle) return;
-    DB.update('vehicles', vehicleId, { status: 'Unloading In Progress' });
-    currentUnloadSession = { vehicleId: vehicleId, scannedItems: [], startTime: new Date().toISOString() };
-    logAction('Inbound', 'UNLOAD_START', 'Started unloading vehicle ' + vehicle.vehicleNo);
-
-    // Get all invoice materials for this vehicle for background comparison
-    var invoices = DB.filter('invoices', function(inv) { return inv.vehicleId === vehicleId; });
-    var invoiceMaterials = [];
-    for (var i = 0; i < invoices.length; i++) {
-        var mats = DB.filter('invoice_materials', function(im) { return im.invoiceId === invoices[i].id; });
-        for (var j = 0; j < mats.length; j++) {
-            invoiceMaterials.push({ material: mats[j].material, ean: mats[j].ean || '', invoiceQty: mats[j].qty, invoiceId: mats[j].invoiceId, invoiceNo: invoices[i].invoiceNo, unloadedQty: 0 });
-        }
-    }
-
-    var scanHtml = '<div class="card" style="border:2px solid var(--accent)"><div class="card-title" style="color:var(--accent)"><i class="bx bx-scan"></i> Scanning Sheet — ' + escapeHtml(vehicle.vehicleNo) + '</div>';
-    scanHtml += '<div class="form-row" style="margin-bottom:16px">';
-    scanHtml += '<div class="form-group"><label>EAN / Barcode <span class="req">*</span></label><div style="display:flex;gap:8px"><input type="text" id="scanEanInput" class="form-input" placeholder="Scan or type EAN..." style="flex:1" onkeydown="if(event.key===\'Enter\')addScanItem()"><button class="btn btn-primary btn-sm" onclick="addScanItem()"><i class="bx bx-plus"></i> Add</button><button class="btn btn-secondary btn-sm scan-btn" onclick="openScannerForUnloading()"><i class="bx bx-qr"></i> Scan</button></div></div>';
-    scanHtml += '<div class="form-group"><label>Material (Auto / Manual)</label><input type="text" id="scanMaterial" class="form-input" placeholder="Auto-filled from scan"></div>';
-    scanHtml += '<div class="form-group"><label>Description</label><input type="text" id="scanDesc" class="form-input" placeholder="Auto-filled"></div>';
-    scanHtml += '<div class="form-group"><label>Qty</label><input type="number" id="scanQty" class="form-input" value="1" min="1" style="max-width:100px"></div>';
-    scanHtml += '</div>';
-
-    // Scanned items table
-    scanHtml += '<div id="scannedItemsTable"></div>';
-    scanHtml += '<hr class="cyber-line">';
-    scanHtml += '<div class="form-actions">';
-    scanHtml += '<button class="btn btn-danger" onclick="cancelUnloading()"><i class="bx bx-x"></i> Cancel</button>';
-    scanHtml += '<button class="btn btn-primary" onclick="submitUnloading()"><i class="bx bx-check-double"></i> Submit Unloading</button>';
-    scanHtml += '</div></div>';
-
-    document.getElementById('unloadingScanArea').innerHTML = scanHtml;
-    document.getElementById('unloadingScanArea').style.display = 'block';
-    document.getElementById('scanEanInput').focus();
-    renderScannedItems(invoiceMaterials);
-}
-
-function openScannerForUnloading() {
-    openScannerModal(function(code) {
-        document.getElementById('scanEanInput').value = code;
-        addScanItem();
-    });
-}
-
-function addScanItem() {
-    var ean = document.getElementById('scanEanInput').value.trim();
-    if (!ean) { showToast('Scan or enter EAN first', 'error'); return; }
-
-    var material = document.getElementById('scanMaterial').value.trim();
-    var desc = document.getElementById('scanDesc').value.trim();
-    var qty = parseInt(document.getElementById('scanQty').value) || 1;
-
-    // Auto-fill from material master if material is empty
-    if (!material || !desc) {
-        var matMaster = DB.get('material_master');
-        for (var i = 0; i < matMaster.length; i++) {
-            if (matMaster[i].ean === ean) {
-                material = material || matMaster[i].material;
-                desc = desc || matMaster[i].description;
-                break;
-            }
-        }
-        // Also try matching by material name if EAN not found
-        if (!material) {
-            for (var j = 0; j < matMaster.length; j++) {
-                if (matMaster[j].material && matMaster[j].material.toUpperCase() === ean.toUpperCase()) {
-                    material = matMaster[j].material;
-                    desc = matMaster[j].description;
-                    ean = matMaster[j].ean || ean;
-                    break;
-                }
-            }
-        }
-    }
-
-    // Check if this material exists in vehicle's invoice
-    var invoices = DB.filter('invoices', function(inv) { return inv.vehicleId === currentUnloadSession.vehicleId; });
-    var foundInInvoice = false;
-    for (var ii = 0; ii < invoices.length; ii++) {
-        var mats = DB.filter('invoice_materials', function(im) { return im.invoiceId === invoices[ii].id; });
-        for (var jj = 0; jj < mats.length; jj++) {
-            if (mats[jj].ean === ean || mats[jj].material.toUpperCase() === (material || '').toUpperCase()) {
-                foundInInvoice = true;
-                break;
-            }
-        }
-        if (foundInInvoice) break;
-    }
-
-    currentUnloadSession.scannedItems.push({
-        id: DB.uid(), ean: ean, material: material || 'UNKNOWN', description: desc || '-',
-        qty: qty, inInvoice: foundInInvoice, scanTime: new Date().toISOString()
-    });
-
-    // Clear inputs
-    document.getElementById('scanEanInput').value = '';
-    document.getElementById('scanMaterial').value = '';
-    document.getElementById('scanDesc').value = '';
-    document.getElementById('scanQty').value = '1';
-    document.getElementById('scanEanInput').focus();
-
-    renderScannedItems();
-    if (!foundInInvoice) {
-        showToast('WARNING: This material is NOT in the invoice!', 'warning');
-    } else {
-        showToast('Scanned: ' + (material || ean), 'success');
-    }
-}
-
-function removeScanItem(itemId) {
-    currentUnloadSession.scannedItems = currentUnloadSession.scannedItems.filter(function(s) { return s.id !== itemId; });
-    renderScannedItems();
-}
-
-function renderScannedItems() {
-    var container = document.getElementById('scannedItemsTable');
-    if (!container) return;
-
-    // Get invoice materials for comparison
-    var invoices = DB.filter('invoices', function(inv) { return inv.vehicleId === currentUnloadSession.vehicleId; });
-    var invoiceMats = [];
-    for (var i = 0; i < invoices.length; i++) {
-        var mats = DB.filter('invoice_materials', function(im) { return im.invoiceId === invoices[i].id; });
-        for (var j = 0; j < mats.length; j++) {
-            invoiceMats.push(Object.assign({}, mats[j], { invoiceNo: invoices[i].invoiceNo }));
-        }
-    }
-
-    var html = '<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>EAN</th><th>Material</th><th>Description</th><th>Qty</th><th>Invoice Status</th><th>Action</th></tr></thead><tbody>';
-
-    if (currentUnloadSession.scannedItems.length === 0) {
-        html += '<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:20px">No items scanned yet</td></tr>';
-    } else {
-        for (var k = 0; k < currentUnloadSession.scannedItems.length; k++) {
-            var s = currentUnloadSession.scannedItems[k];
-            var rowStyle = s.inInvoice ? '' : 'style="background:var(--danger-dim)"';
-            var statusBadge = s.inInvoice ? '<span class="badge badge-success"><i class="bx bx-check"></i> In Invoice</span>' : '<span class="badge badge-danger"><i class="bx bx-x"></i> NOT in Invoice</span>';
-            html += '<tr ' + rowStyle + '><td>' + (k + 1) + '</td><td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(s.ean) + '</td>';
-            html += '<td>' + escapeHtml(s.material) + '</td><td>' + escapeHtml(s.description) + '</td>';
-            html += '<td><strong>' + s.qty + '</strong></td><td>' + statusBadge + '</td>';
-            html += '<td><button class="btn btn-danger btn-sm" onclick="removeScanItem(\'' + s.id + '\')"><i class="bx bx-trash"></i></button></td></tr>';
-        }
-    }
-    html += '</tbody></table></div>';
-
-    // Live comparison summary
-    if (currentUnloadSession.scannedItems.length > 0) {
-        html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px">';
-        html += '<div style="padding:10px;background:var(--success);background:rgba(16,185,129,.1);border-radius:8px;border:1px solid rgba(16,185,129,.3);text-align:center"><strong style="color:var(--success)">' + currentUnloadSession.scannedItems.filter(function(s) { return s.inInvoice; }).length + '</strong><br><small style="color:var(--text-muted)">Matched</small></div>';
-        html += '<div style="padding:10px;background:var(--danger-dim);border-radius:8px;border:1px solid rgba(239,68,68,.3);text-align:center"><strong style="color:var(--danger)">' + currentUnloadSession.scannedItems.filter(function(s) { return !s.inInvoice; }).length + '</strong><br><small style="color:var(--text-muted)">Not in Invoice</small></div>';
-        html += '</div>';
-    }
-
-    container.innerHTML = html;
-}
-
-function cancelUnloading() {
-    if (currentUnloadSession.scannedItems.length > 0) {
-        if (!confirm('Are you sure? All scanned data will be lost.')) return;
-    }
-    if (currentUnloadSession.vehicleId) {
-        DB.update('vehicles', currentUnloadSession.vehicleId, { status: 'Assigned' });
-    }
-    currentUnloadSession = { vehicleId: null, scannedItems: [], startTime: null };
-    document.getElementById('unloadingScanArea').style.display = 'none';
-    document.getElementById('unloadingScanArea').innerHTML = '';
-    renderInbound('unloading-screen');
-}
-
-function submitUnloading() {
-    if (currentUnloadSession.scannedItems.length === 0) { showToast('No items scanned!', 'error'); return; }
-
-    var vehicle = DB.find('vehicles', currentUnloadSession.vehicleId);
-    if (!vehicle) return;
-
-    // Update invoice_materials with scanned quantities
-    var invoices = DB.filter('invoices', function(inv) { return inv.vehicleId === currentUnloadSession.vehicleId; });
-    for (var i = 0; i < invoices.length; i++) {
-        var mats = DB.filter('invoice_materials', function(im) { return im.invoiceId === invoices[i].id; });
-        for (var j = 0; j < mats.length; j++) {
-            var scannedQty = 0;
-            for (var s = 0; s < currentUnloadSession.scannedItems.length; s++) {
-                var si = currentUnloadSession.scannedItems[s];
-                if (si.inInvoice && (si.ean === mats[j].ean || si.material.toUpperCase() === mats[j].material.toUpperCase())) {
-                    scannedQty += si.qty;
-                }
-            }
-            DB.update('invoice_materials', mats[j].id, { unloadedQty: scannedQty });
-        }
-    }
-
-    // Generate Short/Excess Report
-    var shortReportNo = DB.shortNo();
-    var reportLines = [];
-    var hasMismatch = false;
-
-    for (var ii = 0; ii < invoices.length; ii++) {
-        var invMats = DB.filter('invoice_materials', function(im) { return im.invoiceId === invoices[ii].id; });
-        for (var jj = 0; jj < invMats.length; jj++) {
-            var im = invMats[jj];
-            var diff = (im.unloadedQty || 0) - im.qty;
-            var status = diff === 0 ? 'Match' : (diff < 0 ? 'Short' : 'Excess');
-            if (diff !== 0) hasMismatch = true;
-            reportLines.push({
-                invoiceNo: invoices[ii].invoiceNo, material: im.material, ean: im.ean || '',
-                invoiceQty: im.qty, scannedQty: im.unloadedQty || 0, difference: diff, status: status
-            });
-        }
-    }
-
-    // Add non-invoice scanned items
-    for (var ni = 0; ni < currentUnloadSession.scannedItems.length; ni++) {
-        var ns = currentUnloadSession.scannedItems[ni];
-        if (!ns.inInvoice) {
-            reportLines.push({
-                invoiceNo: 'N/A', material: ns.material, ean: ns.ean,
-                invoiceQty: 0, scannedQty: ns.qty, difference: ns.qty, status: 'Extra'
-            });
-            hasMismatch = true;
-        }
-    }
-
-    // Save short report
-    DB.add('short_reports', {
-        reportNo: shortReportNo, vehicleId: currentUnloadSession.vehicleId,
-        vehicleNo: vehicle.vehicleNo, lrNo: vehicle.lrNo,
-        unloader: APP.currentUser.name, unloaderUser: APP.currentUser.username,
-        lines: reportLines, hasMismatch: hasMismatch,
-        dateTime: new Date().toISOString()
-    });
-
-    // Save receiving doc
-    var rcvNo = DB.rcvNo();
-    DB.add('receiving_docs', {
-        rcvNo: rcvNo, vehicleId: currentUnloadSession.vehicleId,
-        vehicleNo: vehicle.vehicleNo, lrNo: vehicle.lrNo,
-        scannedItems: currentUnloadSession.scannedItems,
-        shortReportNo: shortReportNo, unloader: APP.currentUser.name,
-        dateTime: new Date().toISOString()
-    });
-
-    // Update vehicle status
-    if (hasMismatch) {
-        DB.update('vehicles', currentUnloadSession.vehicleId, {
-            status: 'Posting Pending Approval',
-            shortReportNo: shortReportNo,
-            rcvNo: rcvNo,
-            unloadedAt: new Date().toISOString()
-        });
-        addNotification('Vehicle ' + vehicle.vehicleNo + ' — Posting Pending Approval. Short Report: ' + shortReportNo, 'warning');
-        // Notify manager
-        var managers = DB.filter('users', function(u) { return u.role === 'Manager' || u.role === 'Super Admin'; });
-        for (var mg = 0; mg < managers.length; mg++) {
-            addNotification('Approval needed for vehicle ' + vehicle.vehicleNo + '. Report: ' + shortReportNo, 'warning', managers[mg].username);
-        }
-    } else {
-        // Perfect match — auto post
-        postVehicle(currentUnloadSession.vehicleId, shortReportNo, rcvNo);
-    }
-
-    logAction('Inbound', 'UNLOAD_SUBMIT', 'Unloading submitted for ' + vehicle.vehicleNo + '. Report: ' + shortReportNo + (hasMismatch ? ' (MISMATCH - Pending Approval)' : ' (MATCH - Auto Posted)'));
-    showToast(hasMismatch ? 'Submitted! Pending approval due to mismatch.' : 'Submitted! Perfect match — auto posted.', hasMismatch ? 'warning' : 'success');
-
-    currentUnloadSession = { vehicleId: null, scannedItems: [], startTime: null };
-    renderInbound('unloading-screen');
-}
-
-// --- POSTING / APPROVAL ---
-function approveVehicle(vehicleId) {
-    var vehicle = DB.find('vehicles', vehicleId);
-    if (!vehicle) return;
-    postVehicle(vehicleId, vehicle.shortReportNo, vehicle.rcvNo);
-    logAction('Inbound', 'APPROVED', 'Vehicle ' + vehicle.vehicleNo + ' approved and posted by ' + APP.currentUser.name);
-    addNotification('Vehicle ' + vehicle.vehicleNo + ' approved and posted!', 'success');
-    showToast('Vehicle approved and posted!', 'success');
-    renderInbound('pending-vehicle');
-}
-
-function rejectVehicle(vehicleId) {
-    var vehicle = DB.find('vehicles', vehicleId);
-    if (!vehicle) return;
-    DB.update('vehicles', vehicleId, { status: 'Rejected' });
-    logAction('Inbound', 'REJECTED', 'Vehicle ' + vehicle.vehicleNo + ' rejected by ' + APP.currentUser.name);
-    addNotification('Vehicle ' + vehicle.vehicleNo + ' rejected!', 'error');
-    showToast('Vehicle rejected!', 'error');
-    renderInbound('pending-vehicle');
-}
-
-function postVehicle(vehicleId, shortReportNo, rcvNo) {
-    var vehicle = DB.find('vehicles', vehicleId);
-    if (!vehicle) return;
-
-    // Create GRN for each invoice
-    var invoices = DB.filter('invoices', function(inv) { return inv.vehicleId === vehicleId; });
-    var grnNumbers = [];
-    for (var i = 0; i < invoices.length; i++) {
-        var grnNo = DB.grnNo(invoices[i].invoiceNo);
-        DB.add('grn_records', {
-            grnNo: grnNo, vehicleId: vehicleId, vehicleNo: vehicle.vehicleNo, lrNo: vehicle.lrNo,
-            invoiceId: invoices[i].id, invoiceNo: invoices[i].invoiceNo,
-            shortReportNo: shortReportNo, rcvNo: rcvNo,
-            postedBy: APP.currentUser ? APP.currentUser.name : 'System',
-            postedAt: new Date().toISOString()
-        });
-        grnNumbers.push(grnNo);
-        DB.update('invoices', invoices[i].id, { status: 'Posted', grnNo: grnNo });
-    }
-
-    DB.update('vehicles', vehicleId, {
-        status: 'Posted', grnNumbers: grnNumbers,
-        shortReportNo: shortReportNo, rcvNo: rcvNo,
-        postedAt: new Date().toISOString()
-    });
-}
-
-function viewShortReport(vehicleId) {
-    var vehicle = DB.find('vehicles', vehicleId);
-    if (!vehicle) return;
-    var report = DB.filter('short_reports', function(r) { return r.vehicleId === vehicleId; })[0];
-    if (!report) { showToast('No report found', 'error'); return; }
-
-    var html = '<div style="background:var(--accent-dim);padding:12px;border-radius:8px;margin-bottom:16px;border-left:4px solid var(--accent)">';
-    html += '<strong>Report No:</strong> <span style="font-family:var(--font-display);color:var(--accent)">' + escapeHtml(report.reportNo) + '</span><br>';
-    html += '<strong>Vehicle:</strong> ' + escapeHtml(vehicle.vehicleNo) + ' | <strong>LR:</strong> ' + escapeHtml(vehicle.lrNo) + '<br>';
-    html += '<strong>Unloader:</strong> ' + escapeHtml(report.unloader) + ' | <strong>Date:</strong> ' + formatDateTime(report.dateTime);
-    html += '</div>';
-
-    html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>Invoice</th><th>Material</th><th>EAN</th><th>Invoice Qty</th><th>Scanned Qty</th><th>Diff</th><th>Status</th></tr></thead><tbody>';
-    for (var i = 0; i < report.lines.length; i++) {
-        var l = report.lines[i];
-        var statusClass = l.status === 'Match' ? 'badge-success' : (l.status === 'Short' ? 'badge-danger' : 'badge-warning');
-        html += '<tr><td>' + escapeHtml(l.invoiceNo) + '</td><td>' + escapeHtml(l.material) + '</td>';
-        html += '<td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(l.ean) + '</td>';
-        html += '<td>' + l.invoiceQty + '</td><td>' + l.scannedQty + '</td>';
-        html += '<td class="' + (l.difference !== 0 ? 'qty-mismatch' : 'qty-match') + '">' + (l.difference > 0 ? '+' : '') + l.difference + '</td>';
-        html += '<td><span class="badge ' + statusClass + '">' + l.status + '</span></td></tr>';
-    }
-    html += '</tbody></table></div>';
-
-    showModal('Short/Excess Report', html, 'lg',
-        '<button class="btn btn-secondary" onclick="closeModal()">Close</button>' +
-        '<button class="btn btn-primary" onclick="exportShortReport(\'' + vehicleId + '\')"><i class="bx bx-download"></i> Export PDF</button>');
-}
-
-function exportShortReport(vehicleId) {
-    var vehicle = DB.find('vehicles', vehicleId);
-    var report = DB.filter('short_reports', function(r) { return r.vehicleId === vehicleId; })[0];
-    if (!report || !vehicle) return;
-    try {
-        var doc = new jspdf.jsPDF();
-        doc.setFontSize(16);
-        doc.text('VIP INDUSTRIES LIMITED (MD20)', 14, 20);
-        doc.setFontSize(12);
-        doc.text('Short/Excess Report', 14, 30);
-        doc.setFontSize(10);
-        doc.text('Report No: ' + report.reportNo, 14, 40);
-        doc.text('Vehicle: ' + vehicle.vehicleNo + '  |  LR: ' + vehicle.lrNo, 14, 47);
-        doc.text('Unloader: ' + report.unloader + '  |  Date: ' + formatDateTime(report.dateTime), 14, 54);
-
-        var tableData = [];
-        for (var i = 0; i < report.lines.length; i++) {
-            var l = report.lines[i];
-            tableData.push([l.invoiceNo, l.material, l.ean, l.invoiceQty, l.scannedQty, (l.difference > 0 ? '+' : '') + l.difference, l.status]);
-        }
-        doc.autoTable({
-            head: [['Invoice', 'Material', 'EAN', 'Inv Qty', 'Scan Qty', 'Diff', 'Status']],
-            body: tableData,
-            startY: 62,
-            styles: { fontSize: 8 },
-            headStyles: { fillColor: [0, 229, 160] }
-        });
-        doc.save('ShortReport_' + report.reportNo + '.pdf');
-        showToast('PDF exported!', 'success');
-    } catch(e) { showToast('PDF export failed: ' + e.message, 'error'); }
-}
-
-// --- POSTING PENDING TAB ---
-function renderPostingPending() {
-    var pendingVehicles = DB.filter('vehicles', function(v) { return v.status === 'Posting Pending Approval'; });
-    var postedVehicles = DB.filter('vehicles', function(v) { return v.status === 'Posted'; });
-
-    var html = '<div class="section-header"><h2><i class="bx bx-clock"></i> Posting Status</h2></div>';
-
-    // Pending
-    html += '<div class="card"><div class="card-title" style="color:var(--warning)">Pending Approval (' + pendingVehicles.length + ')</div>';
-    html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>Vehicle</th><th>LR</th><th>Unloader</th><th>Report No</th><th>RCV No</th><th>Action</th></tr></thead><tbody>';
-    if (pendingVehicles.length === 0) {
-        html += '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:20px">No pending approvals</td></tr>';
-    } else {
-        for (var i = 0; i < pendingVehicles.length; i++) {
-            var v = pendingVehicles[i];
-            html += '<tr><td><strong>' + escapeHtml(v.vehicleNo) + '</strong></td><td>' + escapeHtml(v.lrNo) + '</td>';
-            html += '<td>' + escapeHtml(v.assignedToUsername || '-') + '</td>';
-            html += '<td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">' + escapeHtml(v.shortReportNo || '-') + '</td>';
-            html += '<td style="font-family:var(--font-display);font-size:11px;color:var(--info)">' + escapeHtml(v.rcvNo || '-') + '</td>';
-            html += '<td><div class="table-actions">';
-            html += '<button class="btn btn-secondary btn-sm" onclick="viewShortReport(\'' + v.id + '\')"><i class="bx bx-show"></i> View</button>';
-            if (checkActionPerm('canApprove')) {
-                html += '<button class="btn btn-success btn-sm" onclick="approveVehicle(\'' + v.id + '\')"><i class="bx bx-check"></i> Approve</button>';
-                html += '<button class="btn btn-danger btn-sm" onclick="rejectVehicle(\'' + v.id + '\')"><i class="bx bx-x"></i> Reject</button>';
-            }
-            html += '</div></td></tr>';
-        }
-    }
-    html += '</tbody></table></div></div>';
-
-    // Posted
-    html += '<div class="card" style="margin-top:20px"><div class="card-title" style="color:var(--success)">Posted GRN (' + postedVehicles.length + ')</div>';
-    html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>Vehicle</th><th>LR</th><th>GRN Numbers</th><th>Report No</th><th>Posted At</th></tr></thead><tbody>';
-    if (postedVehicles.length === 0) {
-        html += '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:20px">No posted vehicles</td></tr>';
-    } else {
-        for (var j = 0; j < postedVehicles.length; j++) {
-            var pv = postedVehicles[j];
-            var grnStr = '';
-            if (pv.grnNumbers && pv.grnNumbers.length > 0) {
-                grnStr = pv.grnNumbers.map(function(g) { return '<span style="font-family:var(--font-display);font-size:11px;color:var(--accent)">' + escapeHtml(g) + '</span>'; }).join(', ');
-            }
-            html += '<tr><td><strong>' + escapeHtml(pv.vehicleNo) + '</strong></td><td>' + escapeHtml(pv.lrNo) + '</td>';
-            html += '<td>' + grnStr + '</td><td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(pv.shortReportNo || '-') + '</td>';
-            html += '<td style="font-size:12px;color:var(--text-muted)">' + formatDateTime(pv.postedAt) + '</td></tr>';
-        }
-    }
-    html += '</tbody></table></div></div>';
-    return html;
-}
-
-// --- INBOUND RECORD (Search by Invoice No / GRN No / Report No) ---
-function renderInboundRecord() {
-    return '<div class="section-header"><h2><i class="bx bx-search-alt-2"></i> Inbound Record Search</h2></div>' +
-        '<div class="card" style="margin-bottom:20px"><div class="form-row">' +
-        '<div class="form-group"><label>Search by Invoice No / GRN No / Report No / RCV No <span class="req">*</span></label>' +
-        '<div style="display:flex;gap:8px"><input type="text" id="searchInvNo" class="form-input" placeholder="e.g. INV-2025-101 or GRN-INV-2025-101 or SRT-2025-0001">' +
-        '<button class="btn btn-primary" onclick="loadInboundRecord()"><i class="bx bx-search"></i> Find</button></div></div></div></div>' +
-        '<div id="inboundRecordData"></div>';
-}
-
-function loadInboundRecord() {
-    var search = document.getElementById('searchInvNo').value.trim().toUpperCase();
-    if (!search) { showToast('Enter invoice number, GRN no, or report no', 'error'); return; }
-    var container = document.getElementById('inboundRecordData');
-
-    // Try to find by invoice no
-    var invoice = null;
-    var allInvs = DB.get('invoices');
-    for (var i = 0; i < allInvs.length; i++) {
-        if (allInvs[i].invoiceNo.toUpperCase() === search) { invoice = allInvs[i]; break; }
-    }
-
-    // Try GRN
-    var grn = null;
-    if (!invoice) {
-        var allGrns = DB.get('grn_records');
-        for (var g = 0; g < allGrns.length; g++) {
-            if (allGrns[g].grnNo.toUpperCase() === search) {
-                grn = allGrns[g];
-                // Get the invoice
-                for (var gi = 0; gi < allInvs.length; gi++) {
-                    if (allInvs[gi].id === grn.invoiceId) { invoice = allInvs[gi]; break; }
-                }
-                break;
-            }
-        }
-    }
-
-    // Try Short Report No
-    var shortReport = null;
-    if (!invoice) {
-        var allReports = DB.get('short_reports');
-        for (var sr = 0; sr < allReports.length; sr++) {
-            if (allReports[sr].reportNo.toUpperCase() === search) {
-                shortReport = allReports[sr];
-                break;
-            }
-        }
-        // Try RCV No
-        if (!shortReport) {
-            var allRcvs = DB.get('receiving_docs');
-            for (var rc = 0; rc < allRcvs.length; rc++) {
-                if (allRcvs[rc].rcvNo.toUpperCase() === search) {
-                    shortReport = DB.filter('short_reports', function(r) { return r.rcvNo === allRcvs[rc].rcvNo; })[0] || null;
-                    break;
-                }
-            }
-        }
-    }
-
-    if (!invoice && !shortReport) {
-        container.innerHTML = '<div class="card"><div class="empty-state"><i class="bx bx-error-circle"></i><p>No record found for "' + escapeHtml(search) + '"</p></div></div>';
+function suggestAssignUsers(query){
+    var container=document.getElementById('assignUserSuggestions');
+    var hiddenId=document.getElementById('assignUserId');
+    if(!query.trim()){container.innerHTML='';hiddenId.value='';return;}
+    var users=DB.get('users').filter(function(u){return u.role!=='Super Admin';});
+    var q=query.toLowerCase();
+    var filtered=users.filter(function(u){return u.name.toLowerCase().indexOf(q)>-1||(u.role||'').toLowerCase().indexOf(q)>-1;});
+    if(!filtered.length){
+        container.innerHTML='<div style="padding:8px 12px;color:var(--text-muted);font-size:12px;border:1px solid var(--border);border-radius:var(--radius-sm);margin-top:4px"><i class="bx bx-info-circle"></i> Koi match nahi — jo name type kiya wo save hoga</div>';
+        hiddenId.value='';
         return;
     }
-
-    var html = '';
-    if (invoice) {
-        var vehicle = DB.find('vehicles', invoice.vehicleId);
-        var materials = DB.filter('invoice_materials', function(m) { return m.invoiceId === invoice.id; });
-        var grnRecord = DB.filter('grn_records', function(g) { return g.invoiceId === invoice.id; })[0];
-        var sReport = DB.filter('short_reports', function(r) { return r.vehicleId === invoice.vehicleId; })[0];
-        var rcvDoc = DB.filter('receiving_docs', function(r) { return r.vehicleId === invoice.vehicleId; })[0];
-
-        html += '<div class="card" style="border-left:4px solid var(--accent)">';
-        html += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:20px">';
-        html += '<div><small style="color:var(--text-muted)">Invoice No</small><div style="font-family:var(--font-display);font-size:14px;color:var(--accent)">' + escapeHtml(invoice.invoiceNo) + '</div></div>';
-        html += '<div><small style="color:var(--text-muted)">Vehicle No</small><div><strong>' + escapeHtml(vehicle ? vehicle.vehicleNo : '-') + '</strong></div></div>';
-        html += '<div><small style="color:var(--text-muted)">LR No</small><div><strong>' + escapeHtml(vehicle ? vehicle.lrNo : '-') + '</strong></div></div>';
-        html += '<div><small style="color:var(--text-muted)">GRN No</small><div style="font-family:var(--font-display);color:var(--success)">' + escapeHtml(grnRecord ? grnRecord.grnNo : 'Not Posted') + '</div></div>';
-        html += '<div><small style="color:var(--text-muted)">Short Report No</small><div style="font-family:var(--font-display);color:var(--warning)">' + escapeHtml(sReport ? sReport.reportNo : '-') + '</div></div>';
-        html += '<div><small style="color:var(--text-muted)">RCV No</small><div style="font-family:var(--font-display);color:var(--info)">' + escapeHtml(rcvDoc ? rcvDoc.rcvNo : '-') + '</div></div>';
-        html += '<div><small style="color:var(--text-muted)">Assigned To (Unload)</small><div>' + escapeHtml(vehicle ? (vehicle.assignedToUsername || '-') : '-') + '</div></div>';
-        html += '<div><small style="color:var(--text-muted)">Unloaded By</small><div>' + escapeHtml(sReport ? sReport.unloader : '-') + '</div></div>';
-        html += '<div><small style="color:var(--text-muted)">Posted By</small><div>' + escapeHtml(grnRecord ? grnRecord.postedBy : '-') + '</div></div>';
-        html += '<div><small style="color:var(--text-muted)">Vehicle Status</small><div><span class="badge badge-' + (vehicle && vehicle.status === 'Posted' ? 'success' : 'warning') + '">' + escapeHtml(vehicle ? vehicle.status : '-') + '</span></div></div>';
-        html += '<div><small style="color:var(--text-muted)">Invoice Status</small><div><span class="badge badge-' + (invoice.status === 'Posted' ? 'success' : 'warning') + '">' + escapeHtml(invoice.status) + '</span></div></div>';
-        html += '<div><small style="color:var(--text-muted)">Posted At</small><div>' + formatDateTime(grnRecord ? grnRecord.postedAt : null) + '</div></div>';
-        html += '</div>';
-
-        // Materials table
-        html += '<div class="card-title">Materials</div>';
-        html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>Material</th><th>EAN</th><th>Invoice Qty</th><th>Unloaded Qty</th><th>Diff</th><th>Status</th></tr></thead><tbody>';
-        for (var m = 0; m < materials.length; m++) {
-            var mat = materials[m];
-            var diff = (mat.unloadedQty || 0) - mat.qty;
-            var mStatus = diff === 0 ? 'Match' : (diff < 0 ? 'Short' : 'Excess');
-            html += '<tr><td>' + (m + 1) + '</td><td>' + escapeHtml(mat.material) + '</td>';
-            html += '<td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(mat.ean || '-') + '</td>';
-            html += '<td>' + mat.qty + '</td><td>' + (mat.unloadedQty || 0) + '</td>';
-            html += '<td class="' + (diff !== 0 ? 'qty-mismatch' : 'qty-match') + '">' + (diff > 0 ? '+' : '') + diff + '</td>';
-            html += '<td><span class="badge badge-' + (diff === 0 ? 'success' : 'danger') + '">' + mStatus + '</span></td></tr>';
+    var h='<div style="position:absolute;top:52px;left:0;right:0;background:var(--bg-primary);border:1px solid var(--accent);border-radius:var(--radius-sm);max-height:180px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,0.5);z-index:999">';
+    filtered.forEach(function(u){
+        var safeName=esc(u.name).replace(/'/g,"\\'");
+        h+='<div style="padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;transition:background 0.15s" onmousedown="selectAssignUser(\''+u.id+'\',\''+safeName+'\')" onmouseover="this.style.background=\'var(--bg-secondary)\'" onmouseout="this.style.background=\'transparent\'">';
+        h+='<span><i class="bx bx-user" style="color:var(--accent);margin-right:8px"></i><strong>'+esc(u.name)+'</strong></span>';
+        h+='<span class="badge badge-info" style="font-size:10px">'+esc(u.role)+'</span>';
+        h+='</div>';
+    });
+    h+='</div>';
+    container.innerHTML=h;
+}
+function selectAssignUser(id,name){
+    document.getElementById('assignUserInput').value=name;
+    document.getElementById('assignUserId').value=id;
+    document.getElementById('assignUserSuggestions').innerHTML='';
+}
+function handleAssignKeydown(e){
+    if(e.key==='Tab'){
+        var firstSug=document.querySelector('#assignUserSuggestions div > div');
+        if(firstSug&&document.getElementById('assignUserSuggestions').innerHTML.indexOf('Koi match')===-1){
+            e.preventDefault();firstSug.onmousedown();
         }
-        html += '</tbody></table></div>';
-        html += '</div>';
+    }
+}
+function doAssignUnloading(vehId){
+    var nameInput=document.getElementById('assignUserInput').value.trim();
+    var userIdInput=document.getElementById('assignUserId').value;
+    if(!nameInput){showToast('Name type karein ya select karein','error');return;}
+    DB.update('vehicles',vehId,{assignedTo:userIdInput||'manual-'+Date.now(),assignedToName:nameInput,status:'Assigned'});
+    addNotif('Vehicle assigned to '+nameInput+' for unloading','info');
+    logAction('Inbound','ASSIGN','Vehicle '+vehId+' assigned to '+nameInput);
+    showToast('Vehicle assigned to '+nameInput,'success');
+    closeModal();renderInbound('pending-vehicle');
+}
+function unassignVehicle(vehId){
+    if(!confirm('Unassign this vehicle?'))return;
+    DB.update('vehicles',vehId,{assignedTo:null,assignedToName:null,status:'Unload Pending'});
+    logAction('Inbound','UNASSIGN','Vehicle '+vehId+' unassigned');
+    showToast('Vehicle unassigned','success');renderInbound('pending-vehicle');
+}
 
-        // Short Report detail if exists
-        if (sReport) {
-            html += '<div class="card" style="margin-top:20px;border-left:4px solid var(--warning)"><div class="card-title" style="color:var(--warning)">Short/Excess Report Detail</div>';
-            html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>Invoice</th><th>Material</th><th>Inv Qty</th><th>Scan Qty</th><th>Diff</th><th>Status</th></tr></thead><tbody>';
-            for (var rl = 0; rl < sReport.lines.length; rl++) {
-                var line = sReport.lines[rl];
-                html += '<tr><td>' + escapeHtml(line.invoiceNo) + '</td><td>' + escapeHtml(line.material) + '</td>';
-                html += '<td>' + line.invoiceQty + '</td><td>' + line.scannedQty + '</td>';
-                html += '<td class="' + (line.difference !== 0 ? 'qty-mismatch' : 'qty-match') + '">' + (line.difference > 0 ? '+' : '') + line.difference + '</td>';
-                html += '<td><span class="badge badge-' + (line.status === 'Match' ? 'success' : (line.status === 'Short' ? 'danger' : 'warning')) + '">' + line.status + '</span></td></tr>';
+// --- Unloading Screen (Clean — No Invoice/Material Badges) ---
+function renderUnloadingScreen(){
+    if(!APP.currentUser)return;
+    var myVehs=DB.filter('vehicles',function(v){
+        return v.assignedTo===APP.currentUser.id&&(v.status==='Assigned'||v.status==='Unload Pending');
+    });
+    var h='<div class="section-header"><h2><i class="bx bx-package"></i> My Unloading</h2></div>';
+    if(!myVehs.length){h+='<div class="card"><div class="empty-state"><i class="bx bx-inbox"></i><p>No vehicles assigned to you</p></div></div>';setHtml(h);return;}
+    myVehs.forEach(function(v){
+        h+='<div class="card" style="margin-bottom:14px"><div class="card-title"><i class="bx bxs-truck"></i> '+esc(v.vehicleNo)+' — '+esc(v.lrNo||'')+'</div>';
+        // Sirf vehicle info — koi invoice ya material badge nahi
+        if(chkAct('canStartUnloading'))h+='<button class="btn btn-glass" onclick="startUnload(\''+v.id+'\')"><i class="bx bx-scan"></i> Start Unload</button>';
+        h+='</div>';
+    });
+    setHtml(h);
+}
+
+// --- Start Unload (Blank Scan Page — Auto Match Check) ---
+function startUnload(vehId){
+    var v=DB.find('vehicles',vehId);if(!v)return;
+    var invs=DB.filter('invoices',function(i){return i.vehicleId===vehId;});
+
+    // EAN lookup map banao — saare invoices ke materials se
+    var lookupMap={};
+    invs.forEach(function(inv){
+        var mats=DB.filter('invoice_materials',function(m){return m.invoiceId===inv.id;});
+        mats.forEach(function(m){
+            var ean=(m.ean||'').toUpperCase();
+            var matName=(m.material||'').toUpperCase();
+            // EAN se map
+            if(ean){
+                if(!lookupMap[ean])lookupMap[ean]={material:m.material,ean:ean,totalExpected:0,invoices:[]};
+                lookupMap[ean].totalExpected+=m.qty;
+                lookupMap[ean].invoices.push({invoiceNo:inv.invoiceNo,invoiceId:inv.id,qty:m.qty});
             }
-            html += '</tbody></table></div></div>';
-        }
-    }
-
-    if (shortReport && !invoice) {
-        html += '<div class="card" style="border-left:4px solid var(--warning)">';
-        html += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:20px">';
-        html += '<div><small style="color:var(--text-muted)">Report No</small><div style="font-family:var(--font-display);color:var(--accent)">' + escapeHtml(shortReport.reportNo) + '</div></div>';
-        html += '<div><small style="color:var(--text-muted)">Vehicle</small><div><strong>' + escapeHtml(shortReport.vehicleNo) + '</strong></div></div>';
-        html += '<div><small style="color:var(--text-muted)">LR No</small><div>' + escapeHtml(shortReport.lrNo) + '</div></div>';
-        html += '<div><small style="color:var(--text-muted)">Unloader</small><div>' + escapeHtml(shortReport.unloader) + '</div></div>';
-        html += '<div><small style="color:var(--text-muted)">Date</small><div>' + formatDateTime(shortReport.dateTime) + '</div></div>';
-        html += '<div><small style="color:var(--text-muted)">Status</small><div><span class="badge ' + (shortReport.hasMismatch ? 'badge-danger' : 'badge-success') + '">' + (shortReport.hasMismatch ? 'Has Mismatch' : 'Perfect Match') + '</span></div></div>';
-        html += '</div>';
-        html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>Invoice</th><th>Material</th><th>Inv Qty</th><th>Scan Qty</th><th>Diff</th><th>Status</th></tr></thead><tbody>';
-        for (var sl = 0; sl < shortReport.lines.length; sl++) {
-            var sLine = shortReport.lines[sl];
-            html += '<tr><td>' + escapeHtml(sLine.invoiceNo) + '</td><td>' + escapeHtml(sLine.material) + '</td>';
-            html += '<td>' + sLine.invoiceQty + '</td><td>' + sLine.scannedQty + '</td>';
-            html += '<td class="' + (sLine.difference !== 0 ? 'qty-mismatch' : 'qty-match') + '">' + (sLine.difference > 0 ? '+' : '') + sLine.difference + '</td>';
-            html += '<td><span class="badge badge-' + (sLine.status === 'Match' ? 'success' : 'danger') + '">' + sLine.status + '</span></td></tr>';
-        }
-        html += '</tbody></table></div></div>';
-    }
-
-    container.innerHTML = html;
-}
-
-// --- INBOUND ROUTER ---
-function renderInbound(sub) {
-    if (!sub) {
-        var allSubs = ['security-gate', 'pending-vehicle', 'unloading-screen', 'posting-pending', 'inbound-record'];
-        for (var i = 0; i < allSubs.length; i++) {
-            if (checkPermission(allSubs[i])) { sub = allSubs[i]; break; }
-        }
-        if (!sub) sub = 'security-gate';
-    }
-    var container = document.getElementById('section-inbound');
-    var allowedSubs = [
-        { id: 'security-gate', label: 'Security Gate' },
-        { id: 'pending-vehicle', label: 'Pending Vehicle' },
-        { id: 'unloading-screen', label: 'Unloading Screen' },
-        { id: 'posting-pending', label: 'Posting Pending' },
-        { id: 'inbound-record', label: 'Inbound Record' }
-    ].filter(function(s) { return checkPermission(s.id); });
-
-    var tabBtns = '';
-    if (allowedSubs.length > 1) {
-        tabBtns = '<div class="tab-bar">';
-        for (var t = 0; t < allowedSubs.length; t++) {
-            tabBtns += '<button class="tab-btn ' + (sub === allowedSubs[t].id ? 'active' : '') + '" onclick="navigateTo(\'inbound\',\'' + allowedSubs[t].id + '\')">' + allowedSubs[t].label + '</button>';
-        }
-        tabBtns += '</div>';
-    }
-
-    var content = '';
-    if (sub === 'security-gate') content = renderSecurityGate();
-    else if (sub === 'pending-vehicle') content = renderPendingVehicles();
-    else if (sub === 'unloading-screen') content = renderUnloadingScreen();
-    else if (sub === 'posting-pending') content = renderPostingPending();
-    else if (sub === 'inbound-record') content = renderInboundRecord();
-    else content = '<div class="card"><div class="empty-state"><i class="bx bx-error-circle"></i><p>Access Denied</p></div></div>';
-
-    container.innerHTML = tabBtns + content;
-}
-
-// ==================== SCANNER ====================
-var scannerInstance = null;
-var scannerCallback = null;
-
-function openScannerModal(callback) {
-    scannerCallback = callback;
-    document.getElementById('scannerModal').style.display = 'flex';
-}
-
-function closeScannerModal() {
-    document.getElementById('scannerModal').style.display = 'none';
-    if (scannerInstance) {
-        try { scannerInstance.stop(); } catch(e) {}
-        scannerInstance = null;
-    }
-    document.getElementById('qr-reader').innerHTML = '';
-}
-
-function startCameraScan() {
-    document.getElementById('qr-reader').innerHTML = '';
-    try {
-        scannerInstance = new Html5Qrcode('qr-reader');
-        scannerInstance.start(
-            { facingMode: 'environment' },
-            { fps: 10, qrbox: { width: 250, height: 150 } },
-            function(decodedText) {
-                closeScannerModal();
-                if (scannerCallback) scannerCallback(decodedText);
-            },
-            function() {}
-        ).catch(function(err) {
-            showToast('Camera error: ' + err, 'error');
+            // Material name se bhi map (EAN nahi ho to)
+            if(matName&&!lookupMap[matName]){
+                lookupMap[matName]={material:m.material,ean:ean,totalExpected:m.qty,invoices:[{invoiceNo:inv.invoiceNo,invoiceId:inv.id,qty:m.qty}]};
+            }
         });
-    } catch(e) {
-        showToast('Scanner init failed', 'error');
+    });
+
+    window._unloadData={vehId:vehId,vehicleNo:v.vehicleNo,lrNo:v.lrNo,lookupMap:lookupMap,scanResults:{},scanOrder:[]};
+
+    var expectedCount=Object.keys(lookupMap).length;
+    var h='<div style="margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><div><strong style="color:var(--accent);font-size:16px">'+esc(v.vehicleNo)+'</strong> <span style="color:var(--text-muted)">—</span> '+esc(v.lrNo||'')+'</div><div style="font-size:11px;color:var(--text-muted)">Expected Items: <strong style="color:var(--accent)">'+expectedCount+'</strong></div></div>';
+
+    // Scan input — blank page
+    h+='<div class="search-box" style="max-width:100%;margin-bottom:8px"><i class="bx bx-barcode"></i><input type="text" id="scanUnloadInput" placeholder="Scan ya type karein — EAN / Material..." onkeydown="if(event.key===\'Enter\'){event.preventDefault();addScanUnloadItem();}" style="font-family:var(--font-display);font-size:14px;letter-spacing:1px"></div>';
+    h+='<div style="display:flex;gap:6px;margin-bottom:8px;align-items:center;flex-wrap:wrap">';
+    h+='<button class="btn btn-glass btn-sm" onclick="openScannerForUnload()"><i class="bx bx-qr"></i> Scanner</button>';
+    h+='<button class="btn btn-glass btn-sm" onclick="addScanUnloadItem()"><i class="bx bx-plus"></i> Add</button>';
+    h+='<div style="margin-left:auto;display:flex;align-items:center;gap:6px"><label style="font-size:11px;color:var(--text-muted)">Qty/Scan:</label><input type="number" id="scanQtyPerScan" class="form-input" value="1" min="1" style="width:60px;text-align:center;font-size:12px;padding:4px 8px"></div>';
+    h+='</div>';
+
+    // Manual entry toggle
+    h+='<div style="margin-bottom:12px"><button class="btn btn-glass btn-sm" onclick="toggleManualEntry()" id="manualEntryToggle"><i class="bx bx-edit"></i> Manual Entry</button>';
+    h+='<div id="manualEntryForm" style="display:none;margin-top:8px;padding:12px;border:1px dashed var(--border);border-radius:var(--radius-sm);background:var(--bg-secondary)">';
+    h+='<div class="form-row">';
+    h+='<div class="form-group" style="flex:1"><label>EAN</label><input type="text" id="manualEan" class="form-input" placeholder="EAN Number" style="font-family:var(--font-display)"></div>';
+    h+='<div class="form-group" style="flex:2"><label>Material</label><input type="text" id="manualMat" class="form-input" placeholder="Material name"></div>';
+    h+='<div class="form-group"><label>Qty</label><input type="number" id="manualQty" class="form-input" value="1" min="1"></div>';
+    h+='<div class="form-group" style="display:flex;align-items:flex-end"><button class="btn btn-glass btn-sm" onclick="addManualEntry()"><i class="bx bx-plus"></i> Add</button></div>';
+    h+='</div></div></div>';
+
+    // Results table
+    h+='<div class="table-wrapper" style="max-height:300px;overflow-y:auto"><table class="data-table"><thead><tr><th>#</th><th>EAN</th><th>Material</th><th>Invoice</th><th>Expected</th><th>Scanned</th><th>Status</th><th></th></tr></thead><tbody id="scanUnloadBody"></tbody></table></div>';
+
+    // Summary
+    h+='<div id="scanSummary" style="margin-top:10px;padding:10px;background:var(--bg-secondary);border-radius:var(--radius-sm);font-size:12px;display:none"></div>';
+
+    h+='<div class="form-actions" style="margin-top:14px"><button class="btn btn-glass" onclick="submitUnloading()"><i class="bx bx-check-double"></i> Submit Unloading</button></div>';
+
+    showModal('Unloading — '+v.vehicleNo,h,'xl','<button class="btn btn-glass" onclick="closeModal()">Cancel</button>');
+    renderScanUnloadTable();
+    document.getElementById('scanUnloadInput').focus();
+}
+function toggleManualEntry(){
+    var f=document.getElementById('manualEntryForm');
+    f.style.display=f.style.display==='none'?'':'none';
+}
+function openScannerForUnload(){
+    APP.scanCallback=function(code){document.getElementById('scanUnloadInput').value=code;addScanUnloadItem();};
+    document.getElementById('scannerModal').style.display='flex';focusForBluetoothScanner();
+}
+function addScanUnloadItem(){
+    var input=document.getElementById('scanUnloadInput');if(!input)return;
+    var val=input.value.trim().toUpperCase();input.value='';
+    if(!val)return;
+    var qtyPerScan=parseInt(document.getElementById('scanQtyPerScan').value)||1;
+    processUnloadScan(val,qtyPerScan);
+    document.getElementById('scanUnloadInput').focus();
+}
+function addManualEntry(){
+    var ean=document.getElementById('manualEan').value.trim().toUpperCase();
+    var mat=document.getElementById('manualMat').value.trim().toUpperCase();
+    var qty=parseInt(document.getElementById('manualQty').value)||1;
+    if(!ean&&!mat){showToast('EAN ya Material dalein','error');return;}
+    processUnloadScan(ean||mat,qty);
+    document.getElementById('manualEan').value='';document.getElementById('manualMat').value='';document.getElementById('manualQty').value='1';
+}
+function processUnloadScan(val,qty){
+    var ud=window._unloadData;if(!ud)return;
+    var found=ud.lookupMap[val];
+    if(found){
+        if(!ud.scanResults[val]){
+            ud.scanResults[val]={material:found.material,ean:found.ean,expectedQty:found.totalExpected,scannedQty:0,match:true,invoiceNo:found.invoices.map(function(i){return i.invoiceNo;}).join(', ')};
+            ud.scanOrder.push(val);
+        }
+        ud.scanResults[val].scannedQty+=qty;
+    } else {
+        if(!ud.scanResults[val]){
+            ud.scanResults[val]={material:'UNKNOWN',ean:val,expectedQty:0,scannedQty:0,match:false,invoiceNo:'-'};
+            ud.scanOrder.push(val);
+        }
+        ud.scanResults[val].scannedQty+=qty;
     }
+    renderScanUnloadTable();
+}
+function renderScanUnloadTable(){
+    var ud=window._unloadData;if(!ud)return;
+    var body=document.getElementById('scanUnloadBody');if(!body)return;
+    var summaryDiv=document.getElementById('scanSummary');
+    var h='',matchC=0,shortC=0,excessC=0,wrongC=0;
+    ud.scanOrder.forEach(function(key,idx){
+        var r=ud.scanResults[key];
+        var stText,stCls,rowCls;
+        if(!r.match){stText='Wrong';stCls='badge-danger';rowCls='scan-row-red';wrongC++;}
+        else if(r.scannedQty===r.expectedQty){stText='Match';stCls='badge-success';rowCls='scan-row-green';matchC++;}
+        else if(r.scannedQty<r.expectedQty){stText='Short';stCls='badge-warning';rowCls='';shortC++;}
+        else{stText='Excess';stCls='badge-danger';rowCls='scan-row-red';excessC++;}
+        var safeKey=esc(key).replace(/'/g,"\\'");
+        h+='<tr class="'+rowCls+'"><td>'+(idx+1)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(r.ean)+'</td><td>'+esc(r.material)+'</td><td style="font-size:10px">'+esc(r.invoiceNo)+'</td><td>'+r.expectedQty+'</td><td><strong>'+(r.scannedQty||0)+'</strong></td><td><span class="badge '+stCls+'">'+stText+'</span></td><td><button class="btn btn-danger btn-sm" onclick="removeScanResult(\''+safeKey+'\')"><i class="bx bx-minus"></i></button></td></tr>';
+    });
+    if(!ud.scanOrder.length){
+        h='<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:24px"><i class="bx bx-barcode" style="font-size:24px;display:block;margin-bottom:8px"></i>Scan ya type karein — result yahan dikhega</td></tr>';
+    }
+    body.innerHTML=h;
+    if(ud.scanOrder.length>0){
+        summaryDiv.style.display='';
+        summaryDiv.innerHTML='<div style="display:flex;gap:16px;flex-wrap:wrap"><span><i class="bx bx-check-circle" style="color:var(--success)"></i> Match: <strong>'+matchC+'</strong></span><span><i class="bx bx-error-circle" style="color:var(--warning)"></i> Short: <strong>'+shortC+'</strong></span><span><i class="bx bx-plus-circle" style="color:var(--danger)"></i> Excess: <strong>'+excessC+'</strong></span><span><i class="bx bx-x-circle" style="color:var(--danger)"></i> Wrong: <strong>'+wrongC+'</strong></span><span style="margin-left:auto">Scanned: <strong style="color:var(--accent)">'+ud.scanOrder.length+'</strong></span></div>';
+    } else {summaryDiv.style.display='none';}
+}
+function removeScanResult(key){
+    var ud=window._unloadData;if(!ud||!ud.scanResults[key])return;
+    ud.scanResults[key].scannedQty--;
+    if(ud.scanResults[key].scannedQty<=0){delete ud.scanResults[key];ud.scanOrder=ud.scanOrder.filter(function(k){return k!==key;});}
+    renderScanUnloadTable();
 }
 
-function focusForBluetoothScanner() {
-    closeScannerModal();
-    // Create a hidden input for Bluetooth/USB scanner
-    var existing = document.getElementById('btScannerHidden');
-    if (existing) existing.remove();
+// --- Submit Unloading (with Short/Excess Report) ---
+function submitUnloading(){
+    var ud=window._unloadData;if(!ud)return;
+    if(!ud.scanOrder.length){showToast('Kam se kam ek item scan karein','error');return;}
+    var unloadNo=DB.unloadNo();
+    var materials=[],shortItems=[],excessItems=[],wrongItems=[];
 
-    var input = document.createElement('input');
-    input.id = 'btScannerHidden';
-    input.style.cssText = 'position:fixed;top:-100px;left:-100px;opacity:0;width:1px;height:1px';
-    input.placeholder = 'Waiting for scanner...';
-    document.body.appendChild(input);
-    input.focus();
+    // Scanned items add karo
+    ud.scanOrder.forEach(function(key){
+        var r=ud.scanResults[key];
+        materials.push({invoiceNo:r.invoiceNo,material:r.material,ean:r.ean,expectedQty:r.expectedQty,scannedQty:r.scannedQty,diff:r.expectedQty-r.scannedQty,match:r.match});
+        if(!r.match)wrongItems.push({ean:r.ean,material:r.material,scannedQty:r.scannedQty});
+        else if(r.scannedQty<r.expectedQty)shortItems.push({invoiceNo:r.invoiceNo,material:r.material,ean:r.ean,expected:r.expectedQty,scanned:r.scannedQty,short:r.expectedQty-r.scannedQty});
+        else if(r.scannedQty>r.expectedQty)excessItems.push({invoiceNo:r.invoiceNo,material:r.material,ean:r.ean,expected:r.expectedQty,scanned:r.scannedQty,excess:r.scannedQty-r.expectedQty});
+    });
 
-    input.addEventListener('keydown', function(e) {
-        if (e.key === 'Enter') {
-            var val = input.value.trim();
-            if (val && scannerCallback) {
-                scannerCallback(val);
-            }
-            input.value = '';
-            input.remove();
+    // Jo expected the but scan hi nahi hue — complete short
+    Object.keys(ud.lookupMap).forEach(function(key){
+        if(!ud.scanResults[key]){
+            var lm=ud.lookupMap[key];
+            materials.push({invoiceNo:lm.invoices.map(function(i){return i.invoiceNo;}).join(', '),material:lm.material,ean:lm.ean,expectedQty:lm.totalExpected,scannedQty:0,diff:lm.totalExpected,match:true});
+            shortItems.push({invoiceNo:lm.invoices.map(function(i){return i.invoiceNo;}).join(', '),material:lm.material,ean:lm.ean,expected:lm.totalExpected,scanned:0,short:lm.totalExpected});
         }
     });
 
-    showToast('Bluetooth/USB scanner ready! Scan now...', 'info');
-    setTimeout(function() { if (document.getElementById('btScannerHidden')) { document.getElementById('btScannerHidden').focus(); } }, 100);
-}
+    DB.add('unloading_records',{unloadNo:unloadNo,vehicleId:ud.vehId,vehicleNo:ud.vehicleNo,lrNo:ud.lrNo,unloadedBy:APP.currentUser.id,unloadedByName:APP.currentUser.name,unloadedAt:new Date().toISOString(),materials:materials,status:'Posting Pending Approval'});
+    DB.update('vehicles',ud.vehId,{status:'Posting Pending Approval',unloadNo:unloadNo,unloadedBy:APP.currentUser.id,unloadedByName:APP.currentUser.name,unloadedAt:new Date().toISOString()});
 
-// ==================== PLACEHOLDER FUNCTIONS (Parts 2-4 will replace these) ====================
-function renderPutaway() {
-    document.getElementById('section-putaway').innerHTML = '<div class="card"><div class="empty-state"><i class="bx bx-package"></i><p>Putaway Module — Loading in Part 2...</p><small style="color:var(--text-muted)">Say "continue" for Part 2</small></div></div>';
-}
-function renderPIV() {
-    document.getElementById('section-piv').innerHTML = '<div class="card"><div class="empty-state"><i class="bx bx-clipboard"></i><p>PIV Module — Loading in Part 2...</p></div></div>';
-}
-function renderLocationMaster() {
-    document.getElementById('section-location').innerHTML = '<div class="card"><div class="empty-state"><i class="bx bx-map-pin"></i><p>Location Master — Loading in Part 2...</p></div></div>';
-}
-function renderRackMaster() {
-    document.getElementById('section-rack').innerHTML = '<div class="card"><div class="empty-state"><i class="bx bx-grid-alt"></i><p>Rack Master — Loading in Part 2...</p></div></div>';
-}
-function renderMaterialMaster() {
-    document.getElementById('section-material').innerHTML = '<div class="card"><div class="empty-state"><i class="bx bx-label"></i><p>Material Master — Loading in Part 2...</p></div></div>';
-}
-function renderPicking(sub) {
-    var sec = document.getElementById('section-picking');
-    if (!sec) return;
-    sec.innerHTML = '<div class="card"><div class="empty-state"><i class="bx bx-box"></i><p>Picking Module — Loading in Part 3...</p></div></div>';
-}
-function renderLoading(sub) {
-    var sec = document.getElementById('section-loading');
-    if (!sec) return;
-    sec.innerHTML = '<div class="card"><div class="empty-state"><i class="bx bxs-truck"></i><p>Loading Module — Loading in Part 3...</p></div></div>';
-}
-function renderUserWorkingTime() {
-    var sec = document.getElementById('section-user-time');
-    if (!sec) return;
-    sec.innerHTML = '<div class="card"><div class="empty-state"><i class="bx bx-time-five"></i><p>User Working Time — Loading in Part 4...</p></div></div>';
-}
-function renderAdmin() {
-    document.getElementById('section-admin').innerHTML = '<div class="card"><div class="empty-state"><i class="bx bx-user-detail"></i><p>Admin Module — Loading in Part 4...</p><small style="color:var(--text-muted)">User management, permissions, role setup</small></div></div>';
-}
+    // Update invoice materials
+    ud.scanOrder.forEach(function(key){
+        var r=ud.scanResults[key];
+        if(r.match&&r.ean){
+            var invs=DB.filter('invoices',function(i){return i.vehicleId===ud.vehId;});
+            var invIds=invs.map(function(i){return i.id;});
+            var ims=DB.filter('invoice_materials',function(m){return m.ean&&m.ean.toUpperCase()===r.ean&&invIds.indexOf(m.invoiceId)>-1;});
+            ims.forEach(function(im){DB.update('invoice_materials',im.id,{unloadedQty:(im.unloadedQty||0)+r.scannedQty});});
+        }
+    });
 
-function renderSettings() {
-    var html = '<div class="section-header"><h2><i class="bx bxs-cog"></i> Settings</h2></div>';
-    html += '<div class="grid-2">';
-
-    // Theme
-    html += '<div class="card"><div class="card-title">Theme</div>';
-    html += '<div style="display:flex;gap:12px;margin-top:10px">';
-    html += '<button class="btn ' + (APP.theme === 'dark' ? 'btn-primary' : 'btn-secondary') + '" onclick="setTheme(\'dark\')"><i class="bx bx-moon"></i> Dark</button>';
-    html += '<button class="btn ' + (APP.theme === 'light' ? 'btn-primary' : 'btn-secondary') + '" onclick="setTheme(\'light\')"><i class="bx bx-sun"></i> Light</button>';
-    html += '</div></div>';
-
-    // Session Info
-    html += '<div class="card"><div class="card-title">Session Info</div>';
-    if (APP.currentUser) {
-        var elapsed = Date.now() - APP.sessionStart;
-        var mins = Math.floor(elapsed / 60000);
-        html += '<div style="margin-top:10px"><small style="color:var(--text-muted)">User:</small> <strong>' + escapeHtml(APP.currentUser.name) + '</strong><br>';
-        html += '<small style="color:var(--text-muted)">Role:</small> <span class="badge badge-accent">' + escapeHtml(APP.currentUser.role) + '</span><br>';
-        html += '<small style="color:var(--text-muted)">Session Duration:</small> <strong>' + mins + ' minutes</strong><br>';
-        html += '<small style="color:var(--text-muted)">Login Time:</small> ' + formatDateTime(new Date(APP.sessionStart)) + '</div>';
+    // Short/Excess Report banao agar discrepancy hai
+    var hasDiscrepancy=shortItems.length>0||excessItems.length>0||wrongItems.length>0;
+    var reportId=null;
+    if(hasDiscrepancy){
+        var reportNo=generateSERNo();
+        var totalExp=0,totalScn=0;
+        materials.forEach(function(m){totalExp+=m.expectedQty;totalScn+=m.scannedQty;});
+        reportId=DB.add('short_excess_reports',{reportNo:reportNo,vehicleNo:ud.vehicleNo,lrNo:ud.lrNo,unloadNo:unloadNo,shortItems:shortItems,excessItems:excessItems,wrongItems:wrongItems,totalExpected:totalExp,totalScanned:totalScn,createdBy:APP.currentUser.name,createdAt:new Date().toISOString()}).id;
     }
-    html += '</div>';
 
-    // Data Management
-    html += '</div><div class="card" style="margin-top:20px"><div class="card-title">Data Management</div>';
-    html += '<div class="form-actions" style="margin-top:10px">';
-    html += '<button class="btn btn-warning" onclick="exportAllData()"><i class="bx bx-download"></i> Export All Data (JSON)</button>';
-    html += '<label class="btn btn-secondary" style="cursor:pointer"><i class="bx bx-upload"></i> Import Data (JSON)<input type="file" accept=".json" style="display:none" onchange="importAllData(this)"></label>';
-    html += '<button class="btn btn-danger" onclick="clearAllData()"><i class="bx bx-trash"></i> Clear All Data</button>';
-    html += '</div></div>';
+    addNotif('Unloading '+unloadNo+' submitted for '+ud.vehicleNo,'warning');
+    logAction('Unloading','SUBMIT',unloadNo+' for '+ud.vehicleNo);
+    showToast('Unloading submitted!','success');
+    closeModal();
 
-    document.getElementById('section-settings').innerHTML = html;
+    if(reportId){setTimeout(function(){showSEReport(reportId);},400);}
+    else{renderUnloadingScreen();}
 }
 
-function setTheme(theme) {
-    APP.theme = theme;
-    document.documentElement.setAttribute('data-theme', theme);
-    localStorage.setItem('wms_theme', theme);
-    var icon = document.querySelector('#themeToggle i');
-    if (icon) icon.className = theme === 'dark' ? 'bx bx-moon' : 'bx bx-sun';
-    renderSettings();
+function generateSERNo(){
+    var existing=DB.get('short_excess_reports');
+    return 'SER-'+new Date().getFullYear()+'-'+String(existing.length+1).padStart(4,'0');
 }
 
-function exportAllData() {
-    var allKeys = ['users','location_master','material_master','rack_master','vehicles','invoices','invoice_materials','picking_reports','audit_log','notifications','difference_reports','obd_data','picking_assignments','loading_assignments','loading_data','user_sessions','grn_records','short_reports','receiving_docs','loaded_vehicles','picking_done','loading_users'];
-    var exportData = {};
-    for (var i = 0; i < allKeys.length; i++) {
-        var k = allKeys[i];
-        var data = DB.get(k);
-        if (data.length > 0) exportData[k] = data;
+// --- Short/Excess Report View + PDF Download ---
+function showSEReport(reportId){
+    var report=DB.find('short_excess_reports',reportId);if(!report)return;
+    var h='<div style="text-align:center;margin-bottom:16px"><div style="font-size:20px;font-weight:800;color:var(--accent);font-family:var(--font-display);letter-spacing:2px">'+esc(report.reportNo)+'</div><div style="font-size:12px;color:var(--text-muted)">Short / Excess / Wrong Report</div></div>';
+    h+='<div style="display:flex;gap:16px;margin-bottom:12px;font-size:12px;flex-wrap:wrap"><span><strong>Vehicle:</strong> '+esc(report.vehicleNo)+'</span><span><strong>LR:</strong> '+esc(report.lrNo||'-')+'</span><span><strong>Unload:</strong> '+esc(report.unloadNo)+'</span><span><strong>Date:</strong> '+fmtDT(report.createdAt)+'</span><span><strong>By:</strong> '+esc(report.createdBy)+'</span></div>';
+    h+='<div style="display:flex;gap:12px;margin-bottom:12px">';
+    h+='<div style="flex:1;padding:10px;background:var(--accent-dim);border-radius:var(--radius-sm);text-align:center"><div style="font-size:20px;font-weight:700;color:var(--accent)">'+report.totalExpected+'</div><div style="font-size:10px;color:var(--text-muted)">Expected</div></div>';
+    h+='<div style="flex:1;padding:10px;background:rgba(0,255,136,0.08);border-radius:var(--radius-sm);text-align:center"><div style="font-size:20px;font-weight:700;color:var(--success)">'+report.totalScanned+'</div><div style="font-size:10px;color:var(--text-muted)">Scanned</div></div>';
+    h+='<div style="flex:1;padding:10px;background:rgba(255,107,107,0.08);border-radius:var(--radius-sm);text-align:center"><div style="font-size:20px;font-weight:700;color:var(--danger)">'+(report.totalExpected-report.totalScanned)+'</div><div style="font-size:10px;color:var(--text-muted)">Difference</div></div>';
+    h+='</div>';
+
+    if(report.shortItems&&report.shortItems.length){
+        h+='<div class="card-title" style="color:var(--warning)"><i class="bx bx-minus-circle"></i> Short Items ('+report.shortItems.length+')</div>';
+        h+='<div class="table-wrapper" style="max-height:150px;overflow-y:auto"><table class="data-table"><thead><tr><th>Material</th><th>EAN</th><th>Invoice</th><th>Expected</th><th>Scanned</th><th>Short</th></tr></thead><tbody>';
+        report.shortItems.forEach(function(s){h+='<tr class="scan-row-red"><td>'+esc(s.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(s.ean)+'</td><td style="font-size:10px">'+esc(s.invoiceNo)+'</td><td>'+s.expected+'</td><td>'+s.scanned+'</td><td><strong style="color:var(--danger)">-'+s.short+'</strong></td></tr>';});
+        h+='</tbody></table></div>';
     }
-    var blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
-    var url = URL.createObjectURL(blob);
-    var a = document.createElement('a');
-    a.href = url;
-    a.download = 'WMS_Backup_' + today() + '.json';
-    a.click();
-    URL.revokeObjectURL(url);
-    showToast('Data exported!', 'success');
-    logAction('Settings', 'EXPORT', 'Full data backup exported');
+    if(report.excessItems&&report.excessItems.length){
+        h+='<div class="card-title" style="color:var(--danger);margin-top:10px"><i class="bx bx-plus-circle"></i> Excess Items ('+report.excessItems.length+')</div>';
+        h+='<div class="table-wrapper" style="max-height:150px;overflow-y:auto"><table class="data-table"><thead><tr><th>Material</th><th>EAN</th><th>Invoice</th><th>Expected</th><th>Scanned</th><th>Excess</th></tr></thead><tbody>';
+        report.excessItems.forEach(function(s){h+='<tr><td>'+esc(s.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(s.ean)+'</td><td style="font-size:10px">'+esc(s.invoiceNo)+'</td><td>'+s.expected+'</td><td>'+s.scanned+'</td><td><strong style="color:var(--danger)">+'+s.excess+'</strong></td></tr>';});
+        h+='</tbody></table></div>';
+    }
+    if(report.wrongItems&&report.wrongItems.length){
+        h+='<div class="card-title" style="color:var(--danger);margin-top:10px"><i class="bx bx-x-circle"></i> Wrong Items ('+report.wrongItems.length+')</div>';
+        h+='<div class="table-wrapper" style="max-height:150px;overflow-y:auto"><table class="data-table"><thead><tr><th>EAN</th><th>Material</th><thMaterial</th><th>Qty</th></tr></thead><tbody>';
+        report.wrongItems.forEach(function(s){h+='<tr class="scan-row-red"><td style="font-family:var(--font-display);font-size:10px">'+esc(s.ean)+'</td><td>'+esc(s.material)+'</td><td><strong style="color:var(--danger)">'+s.scannedQty+'</strong></td></tr>';});
+        h+='</tbody></table></div>';
+    }
+
+    h+='<div class="form-actions" style="margin-top:16px"><button class="btn btn-glass" onclick="downloadSERPDF(\''+reportId+'\')"><i class="bx bx-download"></i> Download PDF</button><button class="btn btn-glass" onclick="closeModal();renderUnloadingScreen();">Close</button></div>';
+    showModal('Short / Excess Report',h,'xl','');
 }
 
-function importAllData(input) {
-    if (!input.files[0]) return;
-    if (!confirm('This will OVERWRITE all existing data. Continue?')) { input.value = ''; return; }
-    var reader = new FileReader();
-    reader.onload = function(e) {
-        try {
-            var data = JSON.parse(e.target.result);
-            var count = 0;
-            for (var key in data) {
-                if (data.hasOwnProperty(key)) {
-                    DB.set(key, data[key]);
-                    count += data[key].length;
-                }
+// --- PDF Download for SER Report ---
+function downloadSERPDF(reportId){
+    var report=DB.find('short_excess_reports',reportId);if(!report){showToast('Report not found','error');return;}
+    var jsPDF=window.jspdf.jsPDF;
+    var doc=new jsPDF({unit:'mm',format:'a4'});
+    var y=15;
+
+    // Header
+    doc.setFillColor(15,23,42);doc.rect(0,0,210,40,'F');
+    doc.setTextColor(0,255,136);doc.setFontSize(18);doc.setFont('helvetica','bold');
+    doc.text('SHORT / EXCESS REPORT',105,y+8,{align:'center'});
+    doc.setTextColor(200,200,200);doc.setFontSize(10);doc.setFont('helvetica','normal');
+    doc.text(report.reportNo,105,y+18,{align:'center'});
+    doc.setTextColor(150,150,150);doc.setFontSize(8);
+    doc.text('Generated: '+fmtDT(new Date()),105,y+26,{align:'center'});
+    y=48;
+
+    // Info box
+    doc.setDrawColor(0,255,136);doc.setLineWidth(0.5);doc.rect(10,y,190,22);
+    doc.setTextColor(30,30,30);doc.setFontSize(9);doc.setFont('helvetica','bold');
+    doc.text('Vehicle: '+report.vehicleNo,15,y+7);
+    doc.text('LR: '+(report.lrNo||'-'),80,y+7);
+    doc.text('Unload: '+report.unloadNo,140,y+7);
+    doc.text('By: '+report.createdBy,15,y+16);
+    doc.text('Date: '+fmtDT(report.createdAt),80,y+16);
+    y=78;
+
+    // Summary boxes
+    doc.setFillColor(240,240,240);doc.roundedRect(10,y,58,18,3,3,'F');
+    doc.roundedRect(76,y,58,18,3,3,'F');
+    doc.roundedRect(142,y,58,18,3,3,'F');
+    doc.setFontSize(14);doc.setFont('helvetica','bold');doc.setTextColor(0,100,200);
+    doc.text(String(report.totalExpected),39,y+12,{align:'center'});
+    doc.setTextColor(0,180,80);
+    doc.text(String(report.totalScanned),105,y+12,{align:'center'});
+    doc.setTextColor(220,50,50);
+    doc.text(String(report.totalExpected-report.totalScanned),171,y+12,{align:'center'});
+    doc.setFontSize(7);doc.setTextColor(100,100,100);doc.setFont('helvetica','normal');
+    doc.text('EXPECTED',39,y+17,{align:'center'});
+    doc.text('SCANNED',105,y+17,{align:'center'});
+    doc.text('DIFFERENCE',171,y+17,{align:'center'});
+    y=104;
+
+    // Table helper
+    function addTableHeader(cols,colors){
+        doc.setFillColor(30,40,60);doc.rect(10,y,190,8,'F');
+        doc.setTextColor(255,255,255);doc.setFontSize(7);doc.setFont('helvetica','bold');
+        var x=12;
+        cols.forEach(function(c,i){doc.text(c,x,y+5.5);x+=colors[i];});
+        y+=10;
+    }
+    function addTableRow(cells,widths,isAlt){
+        if(isAlt){doc.setFillColor(245,245,245);doc.rect(10,y-3,190,7,'F');}
+        doc.setTextColor(30,30,30);doc.setFontSize(7);doc.setFont('helvetica','normal');
+        var x=12;
+        cells.forEach(function(c,i){doc.text(String(c),x,y+1);x+=widths[i];});
+        y+=6;
+    }
+    function checkPage(needed){
+        if(y+needed>280){doc.addPage();y=15;return true;}return false;
+    }
+
+    // Short Items
+    if(report.shortItems&&report.shortItems.length){
+        checkPage(30);
+        doc.setTextColor(200,120,0);doc.setFontSize(10);doc.setFont('helvetica','bold');
+        doc.text('SHORT ITEMS ('+report.shortItems.length+')',10,y);y+=6;
+        addTableHeader(['Material','EAN','Invoice','Expected','Scanned','Short'],[55,40,35,20,20,20]);
+        report.shortItems.forEach(function(s,i){
+            checkPage(8);
+            addTableRow([s.material||'-',s.ean||'-',s.invoiceNo||'-',String(s.expected),String(s.scanned),'-'+s.short],[55,40,35,20,20,20],i%2===1);
+        });
+        y+=4;
+    }
+
+    // Excess Items
+    if(report.excessItems&&report.excessItems.length){
+        checkPage(30);
+        doc.setTextColor(220,50,50);doc.setFontSize(10);doc.setFont('helvetica','bold');
+        doc.text('EXCESS ITEMS ('+report.excessItems.length+')',10,y);y+=6;
+        addTableHeader(['Material','EAN','Invoice','Expected','Scanned','Excess'],[55,40,35,20,20,20]);
+        report.excessItems.forEach(function(s,i){
+            checkPage(8);
+            addTableRow([s.material||'-',s.ean||'-',s.invoiceNo||'-',String(s.expected),String(s.scanned),'+'+s.excess],[55,40,35,20,20,20],i%2===1);
+        });
+        y+=4;
+    }
+
+    // Wrong Items
+    if(report.wrongItems&&report.wrongItems.length){
+        checkPage(30);
+        doc.setTextColor(220,50,50);doc.setFontSize(10);doc.setFont('helvetica','bold');
+        doc.text('WRONG ITEMS ('+report.wrongItems.length+')',10,y);y+=6;
+        addTableHeader(['EAN','Material','Qty Scanned'],[60,80,50]);
+        report.wrongItems.forEach(function(s,i){
+            checkPage(8);
+            addTableRow([s.ean||'-',s.material||'-',String(s.scannedQty)],[60,80,50],i%2===1);
+        });
+    }
+
+    // Footer
+    y=272;
+    doc.setDrawColor(150,150,150);doc.line(10,y,200,y);
+    doc.setTextColor(130,130,130);doc.setFontSize(7);
+    doc.text('This is system generated report — '+report.reportNo+' — '+APP.currentUser.name,105,y+5,{align:'center'});
+
+    doc.save(report.reportNo+'.pdf');
+    showToast('PDF downloaded!','success');
+    logAction('Report','PDF_DOWNLOAD','SER PDF '+report.reportNo);
+}
+
+// --- Posting Pending (unchanged) ---
+function renderPostingPending(){
+    var pending=DB.filter('vehicles',function(v){return v.status==='Posting Pending Approval';});
+    var h='<div class="section-header"><h2><i class="bx bx-error-circle"></i> Posting Pending Approval ('+pending.length+')</h2></div>';
+    if(!pending.length){h+='<div class="card"><div class="empty-state"><i class="bx bx-check-circle"></i><p>All clear! No pending approvals.</p></div></div>';setHtml(h);return;}
+    pending.forEach(function(v){
+        var rec=DB.filter('unloading_records',function(r){return r.vehicleId===v.id&&r.status==='Posting Pending Approval';})[0];
+        h+='<div class="card" style="margin-bottom:12px"><div class="card-title"><i class="bx bxs-truck"></i> '+esc(v.vehicleNo)+' — '+esc(v.lrNo||'')+'</div>';
+        h+='<div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Unload No: <strong style="color:var(--accent);font-family:var(--font-display)">'+esc(v.unloadNo||'-')+'</strong> | By: '+esc(v.unloadedByName||'-')+' | Time: '+fmtDT(v.unloadedAt)+'</div>';
+        if(rec&&rec.materials){
+            h+='<div class="table-wrapper" style="max-height:200px;overflow-y:auto"><table class="data-table"><thead><tr><th>Invoice</th><th>Material</th><th>EAN</th><th>Expected</th><th>Scanned</th><th>Diff</th></tr></thead><tbody>';
+            rec.materials.forEach(function(m){
+                var cls=m.diff===0?'qty-match':(m.diff>0?'qty-mismatch':'qty-mismatch');
+                h+='<tr><td style="font-size:11px">'+esc(m.invoiceNo)+'</td><td>'+esc(m.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(m.ean)+'</td><td>'+m.expectedQty+'</td><td>'+m.scannedQty+'</td><td class="'+cls+'">'+(m.diff>0?'-'+m.diff:(m.diff<0?'+'+Math.abs(m.diff):'0'))+'</td></tr>';
+            });
+            h+='</tbody></table></div>';
+        }
+        h+='<div class="form-actions">';
+        if(chkAct('canPostVehicle'))h+='<button class="btn btn-glass" onclick="postVehicle(\''+v.id+'\')"><i class="bx bx-check-double"></i> Post Vehicle</button>';
+        h+='<button class="btn btn-glass" onclick="viewUnloadingDetail(\''+v.id+'\')"><i class="bx bx-eye"></i> Full Detail</button>';
+        h+='</div></div>';
+    });
+    setHtml(h);
+}
+
+// --- Post Vehicle (GRN = GRN-InvoiceNo format) ---
+function postVehicle(vehId){
+    var v=DB.find('vehicles',vehId);if(!v)return;
+    var invs=DB.filter('invoices',function(i){return i.vehicleId===vehId;});
+    var grnList=[];
+    invs.forEach(function(inv){
+        // GRN-InvoiceNo format, koi random sequence nahi
+        var grnNo='GRN-'+inv.invoiceNo;
+        grnList.push({invoiceId:inv.id,invoiceNo:inv.invoiceNo,grnNo:grnNo});
+        DB.add('grn_records',{grnNo:grnNo,vehicleId:vehId,vehicleNo:v.vehicleNo,lrNo:v.lrNo,invoiceId:inv.id,invoiceNo:inv.invoiceNo,postedBy:APP.currentUser.id,postedByName:APP.currentUser.name,postedAt:new Date().toISOString()});
+        DB.update('invoices',inv.id,{status:'Posted',grnNo:grnNo});
+    });
+    var recs=DB.filter('unloading_records',function(r){return r.vehicleId===vehId&&r.status==='Posting Pending Approval';});
+    recs.forEach(function(r){DB.update('unloading_records',r.id,{status:'Posted'});});
+    DB.update('vehicles',vehId,{status:'Posted'});
+    addNotif('Vehicle '+v.vehicleNo+' posted. GRNs: '+grnList.map(function(g){return g.grnNo;}).join(', '),'success');
+    logAction('Inbound','POST','Vehicle '+v.vehicleNo+' posted. GRNs: '+grnList.length);
+    showToast('Vehicle posted! '+grnList.length+' GRN(s) created.','success');
+    if(APP.currentSub==='posting-pending')renderPostingPending();
+    else if(APP.currentSub==='pending-vehicle')renderPendingVehicle();
+    else renderInbound(APP.currentSub);
+}
+
+function viewUnloadingDetail(vehId){
+    var v=DB.find('vehicles',vehId);if(!v)return;
+    var recs=DB.filter('unloading_records',function(r){return r.vehicleId===vehId;});
+    var rec=recs[recs.length-1];if(!rec){showToast('No unloading record','error');return;}
+    var h='<div style="margin-bottom:12px"><strong>Vehicle:</strong> '+esc(v.vehicleNo)+' | <strong>LR:</strong> '+esc(v.lrNo||'-')+' | <strong>Unload No:</strong> <span style="color:var(--accent);font-family:var(--font-display)">'+esc(rec.unloadNo)+'</span></div>';
+    h+='<div style="margin-bottom:8px"><strong>By:</strong> '+esc(rec.unloadedByName||'-')+' | <strong>Time:</strong> '+fmtDT(rec.unloadedAt)+'</div>';
+    h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Invoice</th><th>Material</th><th>EAN</th><th>Expected</th><th>Scanned</th><th>Diff</th></tr></thead><tbody>';
+    rec.materials.forEach(function(m){
+        var cls=m.diff===0?'qty-match':'qty-mismatch';
+        h+='<tr class="'+(m.diff===0?'':'scan-row-red')+'"><td>'+esc(m.invoiceNo)+'</td><td>'+esc(m.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(m.ean)+'</td><td>'+m.expectedQty+'</td><td>'+m.scannedQty+'</td><td class="'+cls+'">'+(m.diff>0?'Short: -'+m.diff:(m.diff<0?'Extra: +'+Math.abs(m.diff):'0'))+'</td></tr>';
+    });
+    h+='</tbody></table></div>';
+    // SER Report link agar hai
+    var serReports=DB.filter('short_excess_reports',function(s){return s.vehicleNo===v.vehicleNo;});
+    if(serReports.length){
+        h+='<div style="margin-top:12px"><strong style="color:var(--warning)">Discrepancy Reports:</strong></div>';
+        serReports.forEach(function(s){
+            var itemCount=(s.shortItems||[]).length+(s.excessItems||[]).length+(s.wrongItems||[]).length;
+            h+='<div class="inv-list-item" onclick="showSEReport(\''+s.id+'\')"><div class="ili-left"><span class="ili-invno">'+esc(s.reportNo)+'</span><span class="ili-info">'+itemCount+' items | Expected: '+s.totalExpected+' | Scanned: '+s.totalScanned+'</span></div><span class="badge badge-danger">View / PDF</span></div>';
+        });
+    }
+    // GRN info
+    var grns=DB.filter('grn_records',function(g){return g.vehicleId===vehId;});
+    if(grns.length){
+        h+='<div style="margin-top:12px"><strong style="color:var(--accent)">GRN Numbers:</strong></div>';
+        grns.forEach(function(g){h+='<div class="inv-list-item"><div class="ili-left"><span class="ili-invno">'+esc(g.grnNo)+'</span><span class="ili-info">'+esc(g.invoiceNo)+'</span></div></div>';});
+    }
+    showModal('Unloading Detail — '+v.vehicleNo,h,'lg','<button class="btn btn-glass" onclick="closeModal()">Close</button>');
+}
+
+// --- Inbound Record (GRN = GRN-InvoiceNo, GRN Search shows inbound material) ---
+function renderInboundRecord(){
+    var vehs=DB.get('vehicles').filter(function(v){return v.vehicleType==='Unloading';}).reverse();
+    var h='<div class="section-header"><h2><i class="bx bx-list-ul"></i> Inbound Record ('+vehs.length+')</h2>';
+    h+='<button class="btn btn-glass" onclick="exportInboundExcel()"><i class="bx bx-download"></i> Excel</button>';
+    h+='</div>';
+    // GRN Search Box
+    h+='<div class="card" style="margin-bottom:12px"><div class="card-title"><i class="bx bx-search"></i> Search GRN No — Inbound Material Dekhen</div>';
+    h+='<div class="search-box" style="max-width:500px"><i class="bx bx-barcode"></i><input type="text" id="grnSearchInput" placeholder="GRN-INV001 type karein..." oninput="searchGRNForMaterial()" style="font-family:var(--font-display);letter-spacing:1px"></div>';
+    h+='<div id="grnSearchResult"></div></div>';
+    // Vehicle table
+    h+='<div class="search-box"><i class="bx bx-search"></i><input type="text" id="inboundRecSearch" placeholder="Search vehicle, LR..." oninput="filterInboundRec()"></div>';
+    h+='<div id="inboundRecTable">';
+    h+=buildInboundRecTable(vehs);
+    h+='</div>';
+    setHtml(h);
+}
+function searchGRNForMaterial(){
+    var q=document.getElementById('grnSearchInput').value.trim().toUpperCase();
+    var container=document.getElementById('grnSearchResult');
+    if(!q){container.innerHTML='';return;}
+    var grns=DB.filter('grn_records',function(g){return (g.grnNo||'').toUpperCase().indexOf(q)>-1;});
+    if(!grns.length){container.innerHTML='<div style="color:var(--text-muted);padding:12px;font-size:12px">GRN nahi mila</div>';return;}
+    var h='';
+    grns.forEach(function(g){
+        var mats=DB.filter('invoice_materials',function(m){return m.invoiceId===g.invoiceId;});
+        h+='<div style="margin-top:10px;padding:12px;border:1px solid var(--accent);border-radius:var(--radius-sm);background:var(--accent-dim)">';
+        h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><span style="font-family:var(--font-display);font-size:13px;font-weight:700;color:var(--accent)">'+esc(g.grnNo)+'</span><span style="font-size:11px;color:var(--text-muted)">'+fmtDT(g.postedAt)+'</span></div>';
+        h+='<div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">Invoice: <strong>'+esc(g.invoiceNo)+'</strong> | Vehicle: <strong>'+esc(g.vehicleNo)+'</strong> | LR: <strong>'+esc(g.lrNo||'-')+'</strong> | Posted By: <strong>'+esc(g.postedByName||'-')+'</strong></div>';
+        h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>EAN</th><th>Invoice Qty</th><th>Unloaded Qty</th><th>Status</th></tr></thead><tbody>';
+        var totalInv=0,totalUnl=0;
+        mats.forEach(function(m){
+            totalInv+=m.qty;totalUnl+=(m.unloadedQty||0);
+            var diff=m.qty-(m.unloadedQty||0);
+            var stCls=diff===0?'badge-success':(diff>0?'badge-warning':'badge-danger');
+            var stTxt=diff===0?'Full':'Short: '+diff;
+            h+='<tr><td>'+esc(m.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(m.ean)+'</td><td>'+m.qty+'</td><td>'+(m.unloadedQty||0)+'</td><td><span class="badge '+stCls+'">'+stTxt+'</span></td></tr>';
+        });
+        h+='<tr style="background:var(--bg-secondary);font-weight:700"><td colspan="2">TOTAL</td><td style="color:var(--accent)">'+totalInv+'</td><td style="color:var(--success)">'+totalUnl+'</td><td>'+(totalInv===totalUnl?'<span class="badge badge-success">Complete</span>':'<span class="badge badge-warning">Pending: '+(totalInv-totalUnl)+'</span>')+'</td></tr>';
+        h+='</tbody></table></div></div>';
+    });
+    container.innerHTML=h;
+}
+function buildInboundRecTable(vehs){
+    var h='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Vehicle No</th><th>LR No</th><th>Transport</th><th>Invoices</th><th>Status</th><th>Entry By</th><th>GRN</th><th>Actions</th></tr></thead><tbody>';
+    if(!vehs.length)h+='<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:24px">No records</td></tr>';
+    else vehs.forEach(function(v){
+        var invs=DB.filter('invoices',function(i){return i.vehicleId===v.id;});
+        var grns=DB.filter('grn_records',function(g){return g.vehicleId===v.id;});
+        var grnStr=grns.map(function(g){return g.grnNo;}).join(', ')||'-';
+        var statusCls=v.status==='Posted'?'badge-success':(v.status==='Posting Pending Approval'?'badge-warning':(v.status==='Assigned'?'badge-info':'badge-warning'));
+        h+='<tr><td><strong>'+esc(v.vehicleNo)+'</strong></td><td>'+esc(v.lrNo||'-')+'</td><td>'+esc(v.transportName||'-')+'</td><td><span class="badge badge-info">'+invs.length+'</span></td><td><span class="badge '+statusCls+'">'+esc(v.status)+'</span></td><td style="font-size:11px;color:var(--text-secondary)">'+esc(v.entryByName||'-')+'</td><td style="font-size:10px;font-family:var(--font-display);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(grnStr)+'</td><td><div class="table-actions">';
+        h+='<button class="btn btn-glass btn-sm" onclick="viewUnloadingDetail(\''+v.id+'\')"><i class="bx bx-eye"></i></button>';
+        h+='</div></td></tr>';
+    });
+    h+='</tbody></table></div>';
+    return h;
+}
+function filterInboundRec(){
+    var q=document.getElementById('inboundRecSearch').value.trim().toLowerCase();
+    var vehs=DB.get('vehicles').filter(function(v){return v.vehicleType==='Unloading';}).reverse();
+    if(q){
+        vehs=vehs.filter(function(v){
+            return (v.vehicleNo||'').toLowerCase().indexOf(q)>-1||(v.lrNo||'').toLowerCase().indexOf(q)>-1||(v.transportName||'').toLowerCase().indexOf(q)>-1||(v.entryByName||'').toLowerCase().indexOf(q)>-1;
+        });
+    }
+    document.getElementById('inboundRecTable').innerHTML=buildInboundRecTable(vehs);
+}
+function exportInboundExcel(){
+    var vehs=DB.get('vehicles').filter(function(v){return v.vehicleType==='Unloading';});
+    var rows=[['Vehicle No','LR No','Transport','Driver','Status','Entry By','Reported At']];
+    vehs.forEach(function(v){rows.push([v.vehicleNo,v.lrNo||'',v.transportName||'',v.driverName||'',v.status,v.entryByName||'',fmtDT(v.reportedAt)]);});
+    var ws=XLSX.utils.aoa_to_sheet(rows);var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Inbound');XLSX.writeFile(wb,'Inbound_Record_'+today()+'.xlsx');
+    showToast('Excel downloaded!','success');
+}
+
+// --- Unloading Stock (unchanged) ---
+function renderUnloadingStock(){
+    var grns=DB.get('grn_records').reverse();
+    var h='<div class="section-header"><h2><i class="bx bx-box"></i> Unloading Stock</h2></div>';
+    h+='<div class="search-box"><i class="bx bx-search"></i><input type="text" id="stockSearch" placeholder="Search GRN No or Invoice No..." oninput="filterStock()"></div>';
+    h+='<div id="stockList">';
+    h+=buildStockList(grns);
+    h+='</div>';
+    setHtml(h);
+}
+function buildStockList(grns){
+    var h='';
+    if(!grns.length){h+='<div class="card"><div class="empty-state"><i class="bx bx-inbox"></i><p>No unloading stock</p></div></div>';return h;}
+    grns.forEach(function(g){
+        var mats=DB.filter('invoice_materials',function(m){return m.invoiceId===g.invoiceId;});
+        h+='<div class="inv-list-item" onclick="showStockDetail(\''+g.id+'\')">';
+        h+='<div class="ili-left"><span class="ili-invno">'+esc(g.grnNo)+'</span><span class="ili-info">'+esc(g.invoiceNo)+' | '+esc(g.vehicleNo)+' | '+mats.length+' materials</span></div>';
+        h+='<span class="badge badge-accent">'+fmtDate(g.postedAt)+'</span>';
+        h+='</div>';
+    });
+    return h;
+}
+function filterStock(){
+    var q=document.getElementById('stockSearch').value.trim().toLowerCase();
+    var grns=DB.get('grn_records').reverse();
+    if(q){grns=grns.filter(function(g){return (g.grnNo||'').toLowerCase().indexOf(q)>-1||(g.invoiceNo||'').toLowerCase().indexOf(q)>-1;});}
+    document.getElementById('stockList').innerHTML=buildStockList(grns);
+}
+function showStockDetail(grnId){
+    var g=DB.find('grn_records',grnId);if(!g)return;
+    var mats=DB.filter('invoice_materials',function(m){return m.invoiceId===g.invoiceId;});
+    var h='<div style="margin-bottom:12px"><strong>GRN:</strong> <span style="color:var(--accent);font-family:var(--font-display)">'+esc(g.grnNo)+'</span> | <strong>Invoice:</strong> '+esc(g.invoiceNo)+' | <strong>Vehicle:</strong> '+esc(g.vehicleNo)+'</div>';
+    h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>EAN</th><th>Invoice Qty</th><th>Unloaded Qty</th><th>Remaining</th></tr></thead><tbody>';
+    mats.forEach(function(m){
+        var remaining=m.qty-(m.unloadedQty||0);
+        h+='<tr><td>'+esc(m.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(m.ean)+'</td><td>'+m.qty+'</td><td>'+(m.unloadedQty||0)+'</td><td class="'+(remaining>0?'qty-match':'')+'">'+remaining+'</td></tr>';
+    });
+    h+='</tbody></table></div>';
+    h+='<div class="form-actions"><button class="btn btn-glass" onclick="startPutawayFromStock(\''+g.id+'\')"><i class="bx bx-package"></i> Start Putaway</button></div>';
+    showModal('Stock Detail — '+g.grnNo,h,'lg','<button class="btn btn-glass" onclick="closeModal()">Close</button>');
+}
+function startPutawayFromStock(grnId){
+    closeModal();
+    var g=DB.find('grn_records',grnId);if(!g)return;
+    navTo('putaway');
+    setTimeout(function(){
+        var invNoInput=document.getElementById('putawayInvNo');
+        if(invNoInput){invNoInput.value=g.invoiceNo;filterPutawayInv();}
+    },200);
+}
+
+// ==================== PUTAWAY ====================
+function renderPutaway(){
+    window._putawayItems = window._putawayItems || [];
+    var h='<div class="section-header"><h2><i class="bx bx-package"></i> Putaway</h2></div>';
+
+    // === Pending Putaway Card ===
+    var pendingMats=getPendingPutawayMaterials();
+    h+='<div class="card"><div class="card-title"><i class="bx bx-time" style="color:var(--warning)"></i> Pending Putaway ('+pendingMats.length+')</div>';
+    if(!pendingMats.length){
+        h+='<div style="text-align:center;color:var(--text-muted);padding:16px;font-size:12px"><i class="bx bx-check-circle" style="font-size:20px;display:block;margin-bottom:6px;color:var(--success)"></i>Sab putaway complete! Koi pending nahi.</div>';
+    } else {
+        h+='<div class="table-wrapper" style="max-height:300px;overflow-y:auto"><table class="data-table"><thead><tr><th>GRN</th><th>Invoice</th><th>Material</th><th>EAN</th><th>Total</th><th>Done</th><th>Pending</th><th>Action</th></tr></thead><tbody>';
+        pendingMats.forEach(function(p){
+            var rem=p.totalQty-p.doneQty;
+            var pct=Math.round((p.doneQty/p.totalQty)*100);
+            h+='<tr><td style="font-family:var(--font-display);font-size:10px">'+esc(p.grnNo)+'</td><td>'+esc(p.invoiceNo)+'</td><td>'+esc(p.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(p.ean)+'</td><td>'+p.totalQty+'</td><td style="color:var(--success)">'+p.doneQty+'</td><td><strong style="color:var(--warning)">'+rem+'</strong><div style="background:var(--border);height:4px;border-radius:2px;margin-top:3px;width:80px"><div style="background:var(--accent);height:100%;border-radius:2px;width:'+pct+'%"></div></div></td><td><button class="btn btn-glass btn-sm" onclick="doPutaway(\''+p.grnId+'\')"><i class="bx bx-package"></i> Putaway</button></td></tr>';
+        });
+        h+='</tbody></table></div>';
+    }
+    h+='</div>';
+
+    // === EAN Scan Putaway Card ===
+    h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-scan"></i> EAN Scan Putaway</div>';
+    h+='<div class="form-group"><label>EAN Number <span class="req">*</span></label>';
+    h+='<div style="display:flex;gap:6px"><div class="search-box" style="flex:1;max-width:100%"><i class="bx bx-barcode"></i><input type="text" id="putawayEanScan" placeholder="Scan or type EAN..." onkeydown="if(event.key===\'Enter\'){event.preventDefault();lookupPutawayEan();}" style="font-family:var(--font-display);font-size:13px;letter-spacing:1px"></div>';
+    h+='<button class="btn btn-glass btn-sm" onclick="openScannerForPutawayEan()"><i class="bx bx-qr"></i></button>';
+    h+='<button class="btn btn-glass btn-sm" onclick="lookupPutawayEan()"><i class="bx bx-search"></i></button></div></div>';
+    h+='<div id="putawayMatInfo" style="display:none"><div id="paLookupMsg"></div>';
+    h+='<div class="form-row" style="margin-top:8px">';
+    h+='<div class="form-group" style="flex:2"><label>Material <span class="req">*</span></label><input type="text" id="paMaterial" class="form-input" placeholder="Auto ya manual"></div>';
+    h+='<div class="form-group" style="flex:2"><label>Description</label><input type="text" id="paDescription" class="form-input" placeholder="Auto ya manual"></div>';
+    h+='<div class="form-group"><label>EAN</label><input type="text" id="paEan" class="form-input" readonly style="background:var(--bg-secondary);font-family:var(--font-display);font-size:11px"></div>';
+    h+='</div>';
+    h+='<div class="form-row" style="margin-top:10px">';
+    h+='<div class="form-group" style="flex:1"><label>Rack <span class="req">*</span></label>';
+    h+='<div style="display:flex;gap:4px"><input type="text" id="paRackScan" class="form-input" placeholder="Scan ya type rack..." style="text-transform:uppercase" onkeydown="if(event.key===\'Enter\'){event.preventDefault();document.getElementById(\'paQty\').focus();}">';
+    h+='<button class="btn btn-glass btn-sm" onclick="openScannerForPutawayRack()"><i class="bx bx-qr"></i></button></div>';
+    h+='<select class="form-input" id="paRackSelect" onchange="if(this.value)document.getElementById(\'paRackScan\').value=this.value;" style="margin-top:4px;font-size:12px"><option value="">-- Select --</option>';
+    var racks=DB.get('rack_master');
+    racks.forEach(function(r){h+='<option value="'+esc(r.rack)+'">'+esc(r.rack)+'</option>';});
+    h+='</select></div>';
+    h+='<div class="form-group"><label>Qty <span class="req">*</span></label><input type="number" id="paQty" class="form-input" value="1" min="1"></div>';
+    h+='<div class="form-group"><label>Packing</label><input type="text" id="paPacking" class="form-input" placeholder="Bag/Box"></div>';
+    h+='<div class="form-group"><label>Box No</label><input type="text" id="paBoxNo" class="form-input" placeholder="B001" style="text-transform:uppercase" onkeydown="if(event.key===\'Enter\'){event.preventDefault();addToPutawayList();}"></div>';
+    h+='</div>';
+    h+='<div class="form-actions" style="margin-top:12px"><button class="btn btn-glass" onclick="addToPutawayList()"><i class="bx bx-plus-circle"></i> Add</button><button class="btn btn-glass btn-sm" onclick="resetPutawayScan()"><i class="bx bx-refresh"></i> Reset</button></div>';
+    h+='</div>';
+    h+='<div id="putawayScanList" style="margin-top:16px"></div>';
+    h+='</div>';
+
+    // === Invoice/GRN Search Card ===
+    h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-file-find"></i> Invoice / GRN se Putaway</div>';
+    h+='<div class="search-box" style="max-width:400px"><i class="bx bx-search"></i><input type="text" id="putawayInvNo" placeholder="Type Invoice No..." oninput="filterPutawayInv()"></div>';
+    h+='<div id="putawayInvList"></div></div>';
+
+    setHtml(h);
+    renderPutawayList();
+}
+
+// --- Pending Putaway Materials Calculator ---
+function getPendingPutawayMaterials(){
+    var grns=DB.get('grn_records');
+    var pending=[];
+    grns.forEach(function(g){
+        var mats=DB.filter('invoice_materials',function(m){return m.invoiceId===g.invoiceId;});
+        mats.forEach(function(m){
+            var doneQty=m.putawayedQty||0;
+            if(doneQty<m.qty){
+                pending.push({grnId:g.id,grnNo:g.grnNo,invoiceId:g.invoiceId,invoiceNo:g.invoiceNo,vehicleNo:g.vehicleNo,material:m.material,ean:m.ean,totalQty:m.qty,doneQty:doneQty});
             }
-            showToast('Imported ' + count + ' records!', 'success');
-            logAction('Settings', 'IMPORT', 'Data imported: ' + count + ' records');
-            renderSection(APP.currentSection, APP.currentSub);
-        } catch(err) {
-            showToast('Invalid JSON file!', 'error');
-        }
+        });
+    });
+    return pending;
+}
+
+// --- From Unloading Stock: Direct Modal Open ---
+function startPutawayFromStock(grnId){
+    closeModal();
+    doPutaway(grnId);
+}
+
+// --- Putaway Modal (Rack Scan + Manual Qty + Partial Support) ---
+function doPutaway(grnId){
+    var g=DB.find('grn_records',grnId);if(!g)return;
+    var mats=DB.filter('invoice_materials',function(m){return m.invoiceId===g.invoiceId;});
+
+    // Sirf wahi materials dikhao jinka putaway baaki hai
+    var pendingMats=mats.filter(function(m){return (m.putawayedQty||0)<m.qty;});
+    if(!pendingMats.length){showToast('Sab materials ka putaway ho chuka hai!','success');return;}
+
+    var rackList=DB.get('rack_master');
+    var rOpts='<option value="">-- Scan ya Select --</option>';
+    rackList.forEach(function(r){rOpts+='<option value="'+esc(r.rack)+'">'+esc(r.rack)+'</option>';});
+
+    var totalRemaining=0;
+    pendingMats.forEach(function(m){totalRemaining+=m.qty-(m.putawayedQty||0);});
+
+    var h='<div style="margin-bottom:10px"><strong>GRN:</strong> <span style="color:var(--accent);font-family:var(--font-display)">'+esc(g.grnNo)+'</span> | <strong>Invoice:</strong> '+esc(g.invoiceNo)+' | <strong>Vehicle:</strong> '+esc(g.vehicleNo)+'</div>';
+    h+='<div style="background:var(--accent-dim);padding:10px;border-radius:var(--radius-sm);margin-bottom:14px;font-size:12px;color:var(--accent);display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px"><span><i class="bx bx-info-circle"></i> Pending: <strong>'+totalRemaining+'</strong> qty in <strong>'+pendingMats.length+'</strong> materials</span><span style="font-size:11px;color:var(--text-muted)">Partial putaway allowed — remaining next time dikhega</span></div>';
+
+    h+='<div id="putawayGRNMatList">';
+    pendingMats.forEach(function(m,idx){
+        var remaining=m.qty-(m.putawayedQty||0);
+        var matMaster=DB.filter('material_master',function(mm){return mm.ean&&mm.ean===m.ean;});
+        var desc=matMaster.length>0?(matMaster[0].description||matMaster[0].material):m.material;
+        var pct=Math.round(((m.putawayedQty||0)/m.qty)*100);
+
+        h+='<div id="paGRow_'+idx+'" style="margin-bottom:14px;padding:14px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-secondary)">';
+
+        // Material Info Header
+        h+='<div style="display:flex;gap:14px;margin-bottom:10px;flex-wrap:wrap;align-items:center">';
+        h+='<div style="flex:2;min-width:140px"><div style="font-size:9px;color:var(--text-muted);letter-spacing:1px">MATERIAL</div><div style="font-weight:700;font-size:13px">'+esc(m.material)+'</div><div style="font-size:11px;color:var(--text-secondary)">'+esc(desc)+'</div></div>';
+        h+='<div style="min-width:100px"><div style="font-size:9px;color:var(--text-muted);letter-spacing:1px">EAN</div><div style="font-family:var(--font-display);font-size:10px">'+esc(m.ean)+'</div></div>';
+        h+='<div style="text-align:center;min-width:50px"><div style="font-size:9px;color:var(--text-muted)">TOTAL</div><div style="font-weight:700;font-size:15px">'+m.qty+'</div></div>';
+        h+='<div style="text-align:center;min-width:50px"><div style="font-size:9px;color:var(--text-muted)">DONE</div><div style="color:var(--success);font-weight:600;font-size:15px">'+(m.putawayedQty||0)+'</div></div>';
+        h+='<div style="text-align:center;min-width:60px"><div style="font-size:9px;color:var(--text-muted)">REMAINING</div><div style="color:var(--warning);font-weight:800;font-size:18px">'+remaining+'</div></div>';
+        h+='</div>';
+
+        // Progress bar
+        h+='<div style="background:var(--border);height:5px;border-radius:3px;margin-bottom:12px;overflow:hidden"><div style="background:linear-gradient(90deg,var(--accent),var(--success));height:100%;border-radius:3px;width:'+pct+'%;transition:width 0.3s"></div></div>';
+
+        // Rack + Qty Row
+        h+='<div class="form-row" style="align-items:end">';
+        // Rack Scan
+        h+='<div class="form-group" style="flex:1.2"><label>Rack <span class="req">*</span></label>';
+        h+='<div style="display:flex;gap:4px"><input type="text" class="form-input" id="paGRackScan_'+idx+'" placeholder="Scan rack..." style="text-transform:uppercase" onkeydown="if(event.key===\'Enter\'){event.preventDefault();document.getElementById(\'paGQty_'+idx+'\').focus();}">';
+        h+='<button class="btn btn-glass btn-sm" onclick="openScannerForPutawayRackModal('+idx+')" title="Scan Rack"><i class="bx bx-qr"></i></button></div>';
+        h+='<select class="form-input" id="paGRackSel_'+idx+'" onchange="if(this.value){document.getElementById(\'paGRackScan_'+idx+'\').value=this.value;document.getElementById(\'paGQty_'+idx+'\').focus();}" style="margin-top:4px;font-size:11px">'+rOpts+'</select></div>';
+        // Qty
+        h+='<div class="form-group"><label>Qty <span class="req">*</span></label><input type="number" class="form-input" id="paGQty_'+idx+'" min="1" max="'+remaining+'" value="'+remaining+'" placeholder="Max: '+remaining+'" onkeydown="if(event.key===\'Enter\'){event.preventDefault();document.getElementById(\'paGPack_'+idx+'\').focus();}"></div>';
+        // Packing
+        h+='<div class="form-group"><label>Packing</label><input type="text" class="form-input" id="paGPack_'+idx+'" placeholder="Bag/Box" onkeydown="if(event.key===\'Enter\'){event.preventDefault();document.getElementById(\'paGBox_'+idx+'\').focus();}"></div>';
+        // Box No
+        h+='<div class="form-group"><label>Box No</label><input type="text" class="form-input" id="paGBox_'+idx+'" placeholder="B001" style="text-transform:uppercase"></div>';
+        h+='</div>';
+        h+='</div>';
+    });
+    h+='</div>';
+
+    h+='<div class="form-actions" style="margin-top:14px"><button class="btn btn-glass" onclick="savePutawayFromGRN(\''+grnId+'\')"><i class="bx bx-check-double"></i> Save Putaway</button></div>';
+
+    showModal('Putaway — '+g.grnNo,h,'xl','<button class="btn btn-glass" onclick="closeModal()">Cancel</button>');
+
+    // Pehle rack field pe focus
+    setTimeout(function(){var f=document.getElementById('paGRackScan_0');if(f)f.focus();},300);
+}
+
+// --- Scanner for Rack inside Modal ---
+function openScannerForPutawayRackModal(idx){
+    APP.scanCallback=function(code){
+        var field=document.getElementById('paGRackScan_'+idx);
+        if(field)field.value=code.toUpperCase();
+        var sel=document.getElementById('paGRackSel_'+idx);
+        if(sel){for(var i=0;i<sel.options.length;i++){if(sel.options[i].value.toUpperCase()===code.toUpperCase()){sel.selectedIndex=i;break;}}}
+        var qtyField=document.getElementById('paGQty_'+idx);
+        if(qtyField)qtyField.focus();
     };
-    reader.readAsText(input.files[0]);
-    input.value = '';
+    document.getElementById('scannerModal').style.display='flex';
+    focusForBluetoothScanner();
 }
 
-function clearAllData() {
-    if (!confirm('WARNING: This will DELETE ALL DATA permanently. Are you sure?')) return;
-    if (!confirm('LAST CHANCE: Type OK to confirm?')) return;
-    var allKeys = ['users','location_master','material_master','rack_master','vehicles','invoices','invoice_materials','picking_reports','audit_log','notifications','difference_reports','obd_data','picking_assignments','loading_assignments','loading_data','user_sessions','grn_records','short_reports','receiving_docs','loaded_vehicles','picking_done','loading_users'];
-    for (var i = 0; i < allKeys.length; i++) {
-        localStorage.removeItem('wms_' + allKeys[i]);
+// --- Save Putaway from GRN (Partial Allowed) ---
+function savePutawayFromGRN(grnId){
+    var g=DB.find('grn_records',grnId);if(!g)return;
+    var mats=DB.filter('invoice_materials',function(m){return m.invoiceId===g.invoiceId;});
+    var pendingMats=mats.filter(function(m){return (m.putawayedQty||0)<m.qty;});
+    var count=0, totalSaved=0;
+
+    pendingMats.forEach(function(m,idx){
+        var rackField=document.getElementById('paGRackScan_'+idx);
+        var qtyField=document.getElementById('paGQty_'+idx);
+        var packField=document.getElementById('paGPack_'+idx);
+        var boxField=document.getElementById('paGBox_'+idx);
+
+        if(!rackField||!qtyField)return;
+        var rack=rackField.value.trim().toUpperCase();
+        var qty=parseInt(qtyField.value)||0;
+        var packing=packField?packField.value.trim():'';
+        var box=boxField?boxField.value.trim().toUpperCase():'';
+        var remaining=m.qty-(m.putawayedQty||0);
+
+        if(!rack||qty<=0)return;
+
+        // Qty validate — remaining se zyada nahi ho sakta
+        if(qty>remaining){
+            showToast(m.material+': Max '+remaining+' qty allowed','error');
+            return;
+        }
+
+        // Description from material master
+        var matMaster=DB.filter('material_master',function(mm){return mm.ean&&mm.ean===m.ean;});
+        var desc=matMaster.length>0?(matMaster[0].description||matMaster[0].material):m.material;
+
+        // Location master mein save
+        DB.add('location_master',{date:today(),rack:rack,ean:m.ean,material:m.material,description:desc,quantity:qty,packing:packing,box:box,action:'PUTAWAY',user:APP.currentUser.name,dateTime:new Date().toISOString(),grnNo:g.grnNo,invoiceNo:g.invoiceNo,invoiceId:g.invoiceId});
+
+        // Invoice materials mein putawayedQty update
+        var newPutawayed=(m.putawayedQty||0)+qty;
+        DB.update('invoice_materials',m.id,{putawayedQty:newPutawayed});
+
+        count++;
+        totalSaved+=qty;
+
+        // Agar pura ho gaya to row hide karo visual feedback
+        var row=document.getElementById('paGRow_'+idx);
+        if(row&&newPutawayed>=m.qty){
+            row.style.opacity='0.4';
+            row.style.borderColor='var(--success)';
+            rackField.disabled=true;qtyField.disabled=true;
+            if(packField)packField.disabled=true;
+            if(boxField)boxField.disabled=true;
+        }
+    });
+
+    if(!count){showToast('Kam se kam ek material ka rack aur qty dalein','error');return;}
+
+    // Check kya sab ho gaya
+    var stillPending=getPendingPutawayMaterials().filter(function(p){return p.grnId===grnId;});
+
+    if(stillPending.length>0){
+        var remTotal=0;stillPending.forEach(function(p){remTotal+=p.totalQty-p.doneQty;});
+        showToast(count+' items saved! '+remTotal+' qty pending — baad mein kar sakte ho','warning');
+    } else {
+        showToast(count+' items putaway complete! Sab ho gaya','success');
     }
-    showToast('All data cleared! Refreshing...', 'warning');
-    setTimeout(function() { location.reload(); }, 1500);
+
+    logAction('Putaway','GRN_SAVE',count+' items ('+totalSaved+' qty) putaway for '+g.grnNo);
+    addNotif(count+' items putaway for '+g.grnNo+' ('+totalSaved+' qty) by '+APP.currentUser.name,'success');
+
+    // Agar sab ho gaya to modal band karo
+    if(stillPending.length===0){
+        setTimeout(function(){closeModal();renderPutaway();},800);
+    }
 }
 
-// ==================== REPORTS (Basic — Enhanced in Part 4) ====================
-function renderReports() {
-    var html = '<div class="section-header"><h2><i class="bx bxs-bar-chart-alt-2"></i> Reports</h2></div>';
-    html += '<div class="kpi-grid">';
-
-    var vehicles = DB.get('vehicles');
-    var grns = DB.get('grn_records');
-    var shorts = DB.get('short_reports');
-    var locs = DB.get('location_master');
-    var picks = DB.get('picking_done');
-    var loaded = DB.get('loaded_vehicles');
-
-    html += kpiCard('bxs-truck', vehicles.length, 'Total Vehicles');
-    html += kpiCard('bx-check-circle', grns.length, 'Total GRN');
-    html += kpiCard('bx-error-circle', shorts.filter(function(s) { return s.hasMismatch; }).length, 'Short/Excess Reports');
-    html += kpiCard('bxs-package', locs.filter(function(l) { return l.action === 'PUTAWAY'; }).length, 'Total Putaway');
-    html += kpiCard('bxs-clipboard', locs.filter(function(l) { return l.action === 'PIV'; }).length, 'Total PIV');
-    html += kpiCard('bxs-box', picks.length, 'Picking Done');
-    html += kpiCard('bxs-truck', loaded.length, 'Vehicles Loaded');
-    html += kpiCard('bxs-receipt', DB.get('audit_log').length, 'Audit Entries');
-    html += '</div>';
-
-    // Quick search by any number
-    html += '<div class="card" style="margin-top:20px"><div class="card-title">Quick Search by Number</div>';
-    html += '<div class="form-row"><div class="form-group"><label>Enter any Report No / GRN No / Invoice No / OBD No</label>';
-    html += '<div style="display:flex;gap:8px"><input type="text" id="reportQuickSearch" class="form-input" placeholder="e.g. GRN-INV-2025-101 or SRT-2025-0001 or OBD-001">';
-    html += '<button class="btn btn-primary" onclick="quickSearchReport()"><i class="bx bx-search"></i> Search</button></div></div></div>';
-    html += '<div id="reportSearchResult"></div></div>';
-
-    document.getElementById('section-reports').innerHTML = html;
+// --- EAN Scan Putaway Functions ---
+function openScannerForPutawayEan(){
+    APP.scanCallback=function(code){document.getElementById('putawayEanScan').value=code;lookupPutawayEan();};
+    document.getElementById('scannerModal').style.display='flex';focusForBluetoothScanner();
+}
+function openScannerForPutawayRack(){
+    APP.scanCallback=function(code){
+        document.getElementById('paRackScan').value=code.toUpperCase();
+        var sel=document.getElementById('paRackSelect');
+        if(sel){for(var i=0;i<sel.options.length;i++){if(sel.options[i].value.toUpperCase()===code.toUpperCase()){sel.selectedIndex=i;break;}}}
+        document.getElementById('paQty').focus();
+    };
+    document.getElementById('scannerModal').style.display='flex';focusForBluetoothScanner();
+}
+function lookupPutawayEan(){
+    var input=document.getElementById('putawayEanScan');
+    var val=input.value.trim().toUpperCase();
+    if(!val){showToast('EAN scan ya type karein','error');return;}
+    var mats=DB.get('material_master');
+    var found=null;
+    mats.forEach(function(m){if(!found&&m.ean&&m.ean.toUpperCase()===val)found=m;});
+    var infoDiv=document.getElementById('putawayMatInfo');
+    var msgDiv=document.getElementById('paLookupMsg');
+    infoDiv.style.display='';
+    if(found){
+        document.getElementById('paMaterial').value=found.material||'';
+        document.getElementById('paDescription').value=found.description||found.material||'';
+        document.getElementById('paEan').value=found.ean||val;
+        msgDiv.innerHTML='<div style="background:var(--accent-dim);padding:10px;border-radius:var(--radius-sm);margin-bottom:8px;font-size:12px;display:flex;align-items:center;gap:8px"><i class="bx bx-check-circle" style="color:var(--accent);font-size:18px"></i><span style="color:var(--accent)">Material Master se mil gaya — <strong>'+esc(found.material)+'</strong></span></div>';
+        document.getElementById('paRackScan').focus();
+    } else {
+        document.getElementById('paMaterial').value='';
+        document.getElementById('paDescription').value='';
+        document.getElementById('paEan').value=val;
+        msgDiv.innerHTML='<div style="background:rgba(255,107,107,0.1);padding:10px;border-radius:var(--radius-sm);margin-bottom:8px;font-size:12px;display:flex;align-items:center;gap:8px;border:1px solid rgba(255,107,107,0.3)"><i class="bx bx-error-circle" style="color:var(--danger);font-size:18px"></i><span style="color:var(--danger)">EAN <strong>'+esc(val)+'</strong> Material Master mein nahi mila. Manual enter karein.</span></div>';
+        document.getElementById('paMaterial').focus();
+    }
+}
+function resetPutawayScan(){
+    document.getElementById('putawayEanScan').value='';
+    document.getElementById('paMaterial').value='';
+    document.getElementById('paDescription').value='';
+    document.getElementById('paEan').value='';
+    document.getElementById('paRackScan').value='';
+    document.getElementById('paRackSelect').selectedIndex=0;
+    document.getElementById('paQty').value='1';
+    document.getElementById('paPacking').value='';
+    document.getElementById('paBoxNo').value='';
+    document.getElementById('putawayMatInfo').style.display='none';
+    document.getElementById('putawayEanScan').focus();
+}
+function addToPutawayList(){
+    var material=document.getElementById('paMaterial').value.trim();
+    var description=document.getElementById('paDescription').value.trim();
+    var ean=document.getElementById('paEan').value.trim();
+    var rack=document.getElementById('paRackScan').value.trim().toUpperCase();
+    var qty=parseInt(document.getElementById('paQty').value)||0;
+    var packing=document.getElementById('paPacking').value.trim();
+    var boxNo=document.getElementById('paBoxNo').value.trim().toUpperCase();
+    if(!material){showToast('Material name zaruri hai','error');document.getElementById('paMaterial').focus();return;}
+    if(!ean){showToast('EAN zaruri hai','error');return;}
+    if(!rack){showToast('Rack scan ya select karein','error');document.getElementById('paRackScan').focus();return;}
+    if(qty<=0){showToast('Quantity 1 se zyada honi chahiye','error');document.getElementById('paQty').focus();return;}
+    window._putawayItems.push({material:material,description:description,ean:ean,rack:rack,qty:qty,packing:packing,boxNo:boxNo,time:new Date().toISOString()});
+    renderPutawayList();
+    showToast('List mein add ho gaya!','success');
+    document.getElementById('putawayEanScan').value='';document.getElementById('paMaterial').value='';document.getElementById('paDescription').value='';document.getElementById('paEan').value='';document.getElementById('paRackScan').value='';document.getElementById('paRackSelect').selectedIndex=0;document.getElementById('paQty').value='1';document.getElementById('paPacking').value='';document.getElementById('paBoxNo').value='';document.getElementById('putawayMatInfo').style.display='none';document.getElementById('putawayEanScan').focus();
+}
+function renderPutawayList(){
+    var items=window._putawayItems||[];
+    var container=document.getElementById('putawayScanList');if(!container)return;
+    if(!items.length){container.innerHTML='';return;}
+    var h='<div class="card-title" style="margin-top:8px"><i class="bx bx-list-check" style="color:var(--accent)"></i> EAN Scan List (<span style="color:var(--accent)">'+items.length+'</span>)</div>';
+    h+='<div class="table-wrapper" style="max-height:250px;overflow-y:auto"><table class="data-table"><thead><tr><th>#</th><th>Material</th><th>EAN</th><th>Rack</th><th>Qty</th><th>Packing</th><th>Box</th><th></th></tr></thead><tbody>';
+    items.forEach(function(item,idx){
+        h+='<tr><td>'+(idx+1)+'</td><td><strong>'+esc(item.material)+'</strong></td><td style="font-family:var(--font-display);font-size:10px">'+esc(item.ean)+'</td><td><span class="badge badge-accent">'+esc(item.rack)+'</span></td><td><strong style="color:var(--accent)">'+item.qty+'</strong></td><td>'+esc(item.packing||'-')+'</td><td>'+esc(item.boxNo||'-')+'</td><td><button class="btn btn-danger btn-sm" onclick="removePutawayItem('+idx+')"><i class="bx bx-trash"></i></button></td></tr>';
+    });
+    h+='</tbody></table></div>';
+    h+='<div class="form-actions" style="margin-top:12px"><button class="btn btn-glass" onclick="savePutawayScanList()"><i class="bx bx-check-double"></i> Save All ('+items.length+')</button><button class="btn btn-danger btn-sm" onclick="clearPutawayList()" style="margin-left:8px"><i class="bx bx-trash"></i> Clear</button></div>';
+    container.innerHTML=h;
+}
+function removePutawayItem(idx){var r=window._putawayItems.splice(idx,1);renderPutawayList();showToast('Removed','warning');}
+function clearPutawayList(){if(!confirm('Sab items delete karein?'))return;window._putawayItems=[];renderPutawayList();showToast('List clear','warning');}
+function savePutawayScanList(){
+    var items=window._putawayItems||[];
+    if(!items.length){showToast('List mein koi item nahi','error');return;}
+    var count=0;
+    items.forEach(function(item){
+        DB.add('location_master',{date:today(),rack:item.rack,ean:item.ean,material:item.material,description:item.description||item.material,quantity:item.qty,packing:item.packing,box:item.boxNo,action:'PUTAWAY',user:APP.currentUser.name,dateTime:new Date().toISOString(),grnNo:'EAN-SCAN',invoiceNo:'EAN-SCAN',invoiceId:''});
+        count++;
+    });
+    addNotif(count+' items putaway via EAN scan by '+APP.currentUser.name,'success');
+    logAction('Putaway','EAN_SCAN_SAVE',count+' items');
+    showToast(count+' items saved!','success');
+    window._putawayItems=[];renderPutaway();
 }
 
-function quickSearchReport() {
-    var search = document.getElementById('reportQuickSearch').value.trim().toUpperCase();
-    if (!search) { showToast('Enter a number to search', 'error'); return; }
-    var container = document.getElementById('reportSearchResult');
-    var html = '';
+// --- Invoice/GRN Search ---
+function filterPutawayInv(){
+    var q=document.getElementById('putawayInvNo').value.trim().toUpperCase();
+    var grns=DB.get('grn_records');
+    if(q)grns=grns.filter(function(g){return (g.invoiceNo||'').toUpperCase().indexOf(q)>-1||(g.grnNo||'').toUpperCase().indexOf(q)>-1;});
+    var h='';
+    grns.slice(0,20).forEach(function(g){
+        var mats=DB.filter('invoice_materials',function(m){return m.invoiceId===g.invoiceId;});
+        var totalQty=0,doneQty=0;mats.forEach(function(m){totalQty+=m.qty;doneQty+=(m.putawayedQty||0);});
+        var pendingQty=totalQty-doneQty;
+        var statusBadge=pendingQty>0?'<span class="badge badge-warning">'+pendingQty+' pending</span>':'<span class="badge badge-success">Done</span>';
+        h+='<div class="inv-list-item" onclick="doPutaway(\''+g.id+'\')"><div class="ili-left"><span class="ili-invno">'+esc(g.grnNo)+'</span><span class="ili-info">'+esc(g.invoiceNo)+' | '+esc(g.vehicleNo)+' | Total: '+totalQty+' | Done: '+doneQty+'</span></div>'+statusBadge+'</div>';
+    });
+    if(!h)h='<div style="color:var(--text-muted);padding:20px;text-align:center">No results</div>';
+    document.getElementById('putawayInvList').innerHTML=h;
+}
 
-    // Search GRN
-    var grnMatch = DB.filter('grn_records', function(g) { return g.grnNo.toUpperCase().indexOf(search) > -1; });
-    if (grnMatch.length > 0) {
-        html += '<div class="card" style="margin-top:16px;border-left:4px solid var(--success)"><div class="card-title" style="color:var(--success)">GRN Records Found (' + grnMatch.length + ')</div>';
-        html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>GRN No</th><th>Vehicle</th><th>Invoice</th><th>Posted By</th><th>Date</th></tr></thead><tbody>';
-        for (var i = 0; i < grnMatch.length; i++) {
-            var g = grnMatch[i];
-            html += '<tr><td style="font-family:var(--font-display);color:var(--accent)">' + escapeHtml(g.grnNo) + '</td><td>' + escapeHtml(g.vehicleNo) + '</td><td>' + escapeHtml(g.invoiceNo) + '</td><td>' + escapeHtml(g.postedBy) + '</td><td style="font-size:12px">' + formatDateTime(g.postedAt) + '</td></tr>';
+// ==================== PIV ====================
+function renderPIV(){
+    var locs=DB.get('location_master').filter(function(l){return l.action==='PIV';}).reverse();
+    var h='<div class="section-header"><h2><i class="bx bx-clipboard"></i> PIV (Physical Inventory Verification)</h2>';
+    h+='<button class="btn btn-glass" onclick="showAddPIV()"><i class="bx bx-plus"></i> Add PIV</button></div>';
+
+    // Quick stats
+    var todayPIV=locs.filter(function(l){return l.date===today();});
+    var todayQty=0;todayPIV.forEach(function(l){todayQty+=l.quantity;});
+    h+='<div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap">';
+    h+='<div style="flex:1;min-width:140px;padding:14px;background:var(--accent-dim);border:1px solid var(--accent);border-radius:var(--radius-sm);text-align:center"><div style="font-size:24px;font-weight:800;color:var(--accent)">'+todayPIV.length+'</div><div style="font-size:10px;color:var(--text-muted);letter-spacing:1px">TODAY ENTRIES</div></div>';
+    h+='<div style="flex:1;min-width:140px;padding:14px;background:rgba(0,255,136,0.06);border:1px solid var(--success);border-radius:var(--radius-sm);text-align:center"><div style="font-size:24px;font-weight:800;color:var(--success)">'+todayQty+'</div><div style="font-size:10px;color:var(--text-muted);letter-spacing:1px">TODAY QTY</div></div>';
+    h+='<div style="flex:1;min-width:140px;padding:14px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);text-align:center"><div style="font-size:24px;font-weight:800;color:var(--text-primary)">'+locs.length+'</div><div style="font-size:10px;color:var(--text-muted);letter-spacing:1px">TOTAL ENTRIES</div></div>';
+    h+='</div>';
+
+    // Search
+    h+='<div class="search-box" style="margin-bottom:12px"><i class="bx bx-search"></i><input type="text" id="pivSearchInput" placeholder="Search rack, material, EAN..." oninput="filterPIVTable()"></div>';
+    h+='<div id="pivTableWrap">';
+    h+=buildPIVTable(locs);
+    h+='</div>';
+    setHtml(h);
+}
+
+function buildPIVTable(locs){
+    var h='<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>Date</th><th>Time</th><th>Rack</th><th>Material</th><th>Description</th><th>EAN</th><th>Qty</th><th>Packing</th><th>Box</th><th>Done By</th></tr></thead><tbody>';
+    if(!locs.length)h+='<tr><td colspan="11" style="text-align:center;color:var(--text-muted);padding:24px"><i class="bx bx-inbox" style="font-size:20px;display:block;margin-bottom:6px"></i>No PIV records</td></tr>';
+    else locs.forEach(function(l,i){
+        var timeStr=l.dateTime?new Date(l.dateTime).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}):'-';
+        h+='<tr><td>'+(i+1)+'</td><td style="font-size:11px">'+esc(l.date)+'</td><td style="font-size:11px;color:var(--text-muted)">'+timeStr+'</td><td><span class="badge badge-accent">'+esc(l.rack)+'</span></td><td><strong>'+esc(l.material)+'</strong></td><td style="font-size:11px;color:var(--text-secondary);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(l.description||'-')+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(l.ean||'-')+'</td><td><strong style="color:var(--accent)">'+l.quantity+'</strong></td><td>'+esc(l.packing||'-')+'</td><td>'+esc(l.box||'-')+'</td><td style="font-size:11px;color:var(--text-secondary)">'+esc(l.user||'-')+'</td></tr>';
+    });
+    h+='</tbody></table></div>';
+    return h;
+}
+
+function filterPIVTable(){
+    var q=document.getElementById('pivSearchInput').value.trim().toLowerCase();
+    var locs=DB.get('location_master').filter(function(l){return l.action==='PIV';}).reverse();
+    if(q){
+        locs=locs.filter(function(l){
+            return (l.rack||'').toLowerCase().indexOf(q)>-1||(l.material||'').toLowerCase().indexOf(q)>-1||(l.ean||'').toLowerCase().indexOf(q)>-1||(l.description||'').toLowerCase().indexOf(q)>-1||(l.user||'').toLowerCase().indexOf(q)>-1;
+        });
+    }
+    document.getElementById('pivTableWrap').innerHTML=buildPIVTable(locs);
+}
+
+// --- Add PIV Modal ---
+function showAddPIV(){
+    var racks=DB.get('rack_master');
+    var rOpts='<option value="">-- Scan ya Select --</option>';
+    racks.forEach(function(r){rOpts+='<option value="'+esc(r.rack)+'">'+esc(r.rack)+'</option>';});
+
+    var h='';
+
+    // EAN Scan
+    h+='<div class="form-group"><label>EAN Number <span class="req">*</span></label>';
+    h+='<div style="display:flex;gap:6px"><div class="search-box" style="flex:1;max-width:100%"><i class="bx bx-barcode"></i><input type="text" id="pivEanScan" placeholder="Scan ya type EAN Number..." onkeydown="if(event.key===\'Enter\'){event.preventDefault();lookupPIVEan();}" style="font-family:var(--font-display);font-size:14px;letter-spacing:1px"></div>';
+    h+='<button class="btn btn-glass btn-sm" onclick="openScannerForPIVEan()" title="Camera Scan"><i class="bx bx-qr"></i></button>';
+    h+='<button class="btn btn-glass btn-sm" onclick="lookupPIVEan()" title="Search"><i class="bx bx-search"></i></button></div></div>';
+
+    // Auto-fill info (hidden initially)
+    h+='<div id="pivMatInfo" style="display:none">';
+    h+='<div id="pivLookupMsg"></div>';
+    h+='<div class="form-row" style="margin-top:8px">';
+    h+='<div class="form-group" style="flex:2"><label>Material <span class="req">*</span></label><input type="text" id="pivMaterial" class="form-input" placeholder="Auto-fill ya manual type karein"></div>';
+    h+='<div class="form-group" style="flex:2"><label>Material Description</label><input type="text" id="pivDescription" class="form-input" placeholder="Auto-fill ya manual type karein"></div>';
+    h+='</div>';
+    h+='<div class="form-row"><div class="form-group"><label>EAN (Saved)</label><input type="text" id="pivEanSaved" class="form-input" readonly style="background:var(--bg-secondary);font-family:var(--font-display);font-size:11px;color:var(--text-muted)"></div></div>';
+    h+='</div>';
+
+    // Rack Scan
+    h+='<div style="margin-top:14px" id="pivRackSection" '+(document.getElementById('pivEanScan')&&document.getElementById('pivEanScan').value?'':'')+'><div class="form-group"><label>Rack <span class="req">*</span></label>';
+    h+='<div style="display:flex;gap:6px"><div class="search-box" style="flex:1;max-width:100%"><i class="bx bx-diamond"></i><input type="text" id="pivRackScan" placeholder="Scan ya type Rack..." style="text-transform:uppercase" onkeydown="if(event.key===\'Enter\'){event.preventDefault();document.getElementById(\'pivQty\').focus();}"></div>';
+    h+='<button class="btn btn-glass btn-sm" onclick="openScannerForPIVRack()" title="Scan Rack"><i class="bx bx-qr"></i></button></div>';
+    h+='<select class="form-input" id="pivRackSelect" onchange="if(this.value){document.getElementById(\'pivRackScan\').value=this.value;document.getElementById(\'pivQty\').focus();}" style="margin-top:6px;font-size:12px">'+rOpts+'</select></div></div>';
+
+    // Qty + Packing + Box
+    h+='<div class="form-row" style="margin-top:12px">';
+    h+='<div class="form-group"><label>Quantity <span class="req">*</span></label><input type="number" id="pivQty" class="form-input" placeholder="0" min="1" value="1" onkeydown="if(event.key===\'Enter\'){event.preventDefault();document.getElementById(\'pivPack\').focus();}"></div>';
+    h+='<div class="form-group"><label>Packing</label><input type="text" id="pivPack" class="form-input" placeholder="Bag/Box/Pallet" onkeydown="if(event.key===\'Enter\'){event.preventDefault();document.getElementById(\'pivBox\').focus();}"></div>';
+    h+='<div class="form-group"><label>Box No</label><input type="text" id="pivBox" class="form-input" placeholder="B001" style="text-transform:uppercase" onkeydown="if(event.key===\'Enter\'){event.preventDefault();savePIV();}"></div>';
+    h+='</div>';
+
+    // Done By + Time (auto, read-only)
+    h+='<div class="form-row" style="margin-top:10px">';
+    h+='<div class="form-group"><label>Done By</label><div class="form-input" style="background:var(--bg-secondary);color:var(--accent2);font-weight:600"><i class="bx bx-user-check"></i> '+(APP.currentUser?esc(APP.currentUser.name):'Unknown')+'</div></div>';
+    h+='<div class="form-group"><label>Date & Time</label><div class="form-input" style="background:var(--bg-secondary);color:var(--accent);font-weight:600;font-size:12px"><i class="bx bx-time-five"></i> '+fmtDT(new Date())+' <small>(Auto)</small></div></div>';
+    h+='</div>';
+
+    showModal('Add PIV Entry',h,'lg',
+        '<button class="btn btn-glass" onclick="closeModal()">Cancel</button>'+
+        '<button class="btn btn-glass" onclick="savePIV()"><i class="bx bx-check"></i> Save PIV</button>');
+
+    // Focus on EAN
+    setTimeout(function(){document.getElementById('pivEanScan').focus();},300);
+}
+
+// --- Scanner Callbacks ---
+function openScannerForPIVEan(){
+    APP.scanCallback=function(code){
+        document.getElementById('pivEanScan').value=code;
+        lookupPIVEan();
+    };
+    document.getElementById('scannerModal').style.display='flex';
+    focusForBluetoothScanner();
+}
+function openScannerForPIVRack(){
+    APP.scanCallback=function(code){
+        document.getElementById('pivRackScan').value=code.toUpperCase();
+        // Sync dropdown
+        var sel=document.getElementById('pivRackSelect');
+        if(sel){for(var i=0;i<sel.options.length;i++){if(sel.options[i].value.toUpperCase()===code.toUpperCase()){sel.selectedIndex=i;break;}}}
+        document.getElementById('pivQty').focus();
+    };
+    document.getElementById('scannerModal').style.display='flex';
+    focusForBluetoothScanner();
+}
+
+// --- EAN Lookup from Material Master ---
+function lookupPIVEan(){
+    var val=document.getElementById('pivEanScan').value.trim().toUpperCase();
+    if(!val){showToast('EAN scan ya type karein','error');return;}
+
+    var mats=DB.get('material_master');
+    var found=null;
+    mats.forEach(function(m){
+        if(!found&&m.ean&&m.ean.toUpperCase()===val)found=m;
+    });
+
+    var infoDiv=document.getElementById('pivMatInfo');
+    var msgDiv=document.getElementById('pivLookupMsg');
+    infoDiv.style.display='';
+
+    if(found){
+        document.getElementById('pivMaterial').value=found.material||'';
+        document.getElementById('pivDescription').value=found.description||found.material||'';
+        document.getElementById('pivEanSaved').value=found.ean||val;
+        msgDiv.innerHTML='<div style="background:var(--accent-dim);padding:10px;border-radius:var(--radius-sm);margin-bottom:8px;font-size:12px;display:flex;align-items:center;gap:8px"><i class="bx bx-check-circle" style="color:var(--accent);font-size:18px"></i><span style="color:var(--accent)">Material Master se mil gaya — <strong>'+esc(found.material)+'</strong>. Edit kar sakte ho.</span></div>';
+        document.getElementById('pivRackScan').focus();
+    } else {
+        document.getElementById('pivMaterial').value='';
+        document.getElementById('pivDescription').value='';
+        document.getElementById('pivEanSaved').value=val;
+        msgDiv.innerHTML='<div style="background:rgba(255,107,107,0.1);padding:10px;border-radius:var(--radius-sm);margin-bottom:8px;font-size:12px;display:flex;align-items:center;gap:8px;border:1px solid rgba(255,107,107,0.3)"><i class="bx bx-error-circle" style="color:var(--danger);font-size:18px"></i><span style="color:var(--danger)">EAN <strong>'+esc(val)+'</strong> Material Master mein nahi mila. Manual enter karein.</span></div>';
+        document.getElementById('pivMaterial').focus();
+    }
+}
+
+// --- Save PIV ---
+function savePIV(){
+    var ean=document.getElementById('pivEanSaved')?document.getElementById('pivEanSaved').value.trim():document.getElementById('pivEanScan').value.trim().toUpperCase();
+    var material=document.getElementById('pivMaterial').value.trim();
+    var description=document.getElementById('pivDescription').value.trim();
+    var rack=document.getElementById('pivRackScan').value.trim().toUpperCase();
+    var qty=parseInt(document.getElementById('pivQty').value)||0;
+    var packing=document.getElementById('pivPack').value.trim();
+    var box=document.getElementById('pivBox').value.trim().toUpperCase();
+
+    if(!ean){showToast('EAN scan ya type karein','error');document.getElementById('pivEanScan').focus();return;}
+    if(!material){showToast('Material name zaruri hai','error');document.getElementById('pivMaterial').focus();return;}
+    if(!rack){showToast('Rack scan ya select karein','error');document.getElementById('pivRackScan').focus();return;}
+    if(qty<=0){showToast('Quantity 1 se zyada honi chahiye','error');document.getElementById('pivQty').focus();return;}
+
+    DB.add('location_master',{
+        date:today(),
+        rack:rack,
+        ean:ean,
+        material:material,
+        description:description||material,
+        quantity:qty,
+        packing:packing,
+        box:box,
+        action:'PIV',
+        user:APP.currentUser?APP.currentUser.name:'Unknown',
+        userId:APP.currentUser?APP.currentUser.id:'',
+        dateTime:new Date().toISOString()
+    });
+
+    logAction('PIV','ADD',material+' qty:'+qty+' at '+rack+' EAN:'+ean);
+    showToast('PIV entry saved!','success');
+    closeModal();
+    renderPIV();
+}
+
+// ==================== LOCATION MASTER ====================
+function renderLocationMaster(){
+    var locs=DB.get('location_master').reverse();
+    var pg=paginate(locs,APP.locPage,APP.locPerPage||50);
+    var h='<div class="section-header"><h2><i class="bx bx-map-pin"></i> Location Master ('+locs.length+')</h2>';
+    h+='<div style="display:flex;gap:6px;flex-wrap:wrap">';
+    h+='<button class="btn btn-glass" onclick="showLocBulkUpload()"><i class="bx bx-upload"></i> Bulk Upload</button>';
+    h+='<button class="btn btn-glass" onclick="downloadLocTemplate()"><i class="bx bx-file"></i> Template</button>';
+    h+='<button class="btn btn-glass" onclick="exportTableExcel(\'location_master\',\'Location_Master\')"><i class="bx bx-download"></i> Excel</button>';
+    h+='<button class="btn btn-glass" onclick="showLocReport()"><i class="bx bx-bar-chart"></i> Report</button>';
+    h+='</div></div>';
+
+    // Quick Stats
+    var putawayC=0,pivC=0,eanscanC=0,otherC=0,totalQty=0;
+    locs.forEach(function(l){totalQty+=l.quantity;if(l.action==='PUTAWAY')putawayC++;else if(l.action==='PIV')pivC++;else if(l.action==='EAN-SCAN')eanscanC++;else otherC++;});
+    h+='<div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap">';
+    h+='<div style="flex:1;min-width:100px;padding:10px;background:var(--accent-dim);border:1px solid var(--accent);border-radius:var(--radius-sm);text-align:center"><div style="font-size:18px;font-weight:800;color:var(--accent)">'+locs.length+'</div><div style="font-size:9px;color:var(--text-muted);letter-spacing:1px">TOTAL ROWS</div></div>';
+    h+='<div style="flex:1;min-width:100px;padding:10px;background:rgba(0,255,136,0.06);border:1px solid var(--success);border-radius:var(--radius-sm);text-align:center"><div style="font-size:18px;font-weight:800;color:var(--success)">'+totalQty+'</div><div style="font-size:9px;color:var(--text-muted);letter-spacing:1px">TOTAL QTY</div></div>';
+    h+='<div style="flex:1;min-width:80px;padding:10px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);text-align:center"><div style="font-size:16px;font-weight:700;color:var(--accent)">'+putawayC+'</div><div style="font-size:9px;color:var(--text-muted)">PUTAWAY</div></div>';
+    h+='<div style="flex:1;min-width:80px;padding:10px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);text-align:center"><div style="font-size:16px;font-weight:700;color:var(--info)">'+pivC+'</div><div style="font-size:9px;color:var(--text-muted)">PIV</div></div>';
+    h+='<div style="flex:1;min-width:80px;padding:10px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);text-align:center"><div style="font-size:16px;font-weight:700;color:var(--accent2)">'+eanscanC+'</div><div style="font-size:9px;color:var(--text-muted)">EAN SCAN</div></div>';
+    h+='</div>';
+
+    // Search + Filter
+    h+='<div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">';
+    h+='<div class="search-box" style="flex:1;min-width:200px"><i class="bx bx-search"></i><input type="text" id="locSearch" placeholder="Search rack, material, EAN, user..." oninput="searchLoc()"></div>';
+    h+='<select class="form-input" id="locActionFilter" onchange="searchLoc()" style="width:auto;min-width:130px;font-size:12px"><option value="">All Actions</option><option value="PUTAWAY">PUTAWAY</option><option value="PIV">PIV</option><option value="EAN-SCAN">EAN-SCAN</option></select>';
+    h+='<select class="form-input" id="locPerPageSel" onchange="APP.locPerPage=parseInt(this.value)||50;APP.locPage=1;renderLocationMaster();" style="width:auto;min-width:100px;font-size:12px"><option value="50">50/Page</option><option value="100">100/Page</option><option value="200">200/Page</option><option value="500">500/Page</option></select>';
+    h+='</div>';
+
+    h+='<div id="locTable">'+buildLocTable(pg.items)+'</div>';
+    h+=renderPag(APP.locPage,pg.pages,'goLocPage');
+    setHtml(h);
+}
+
+function buildLocTable(locs){
+    var h='<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>Date</th><th>Rack</th><th>Material</th><th>Description</th><th>EAN</th><th>Qty</th><th>Action</th><th>Packing</th><th>Box</th><th>User</th><th></th></tr></thead><tbody>';
+    if(!locs.length)h+='<tr><td colspan="12" style="text-align:center;color:var(--text-muted);padding:20px"><i class="bx bx-inbox" style="font-size:20px;display:block;margin-bottom:6px"></i>No data</td></tr>';
+    else {
+        var startIdx=(APP.locPage-1)*(APP.locPerPage||50);
+        locs.forEach(function(l,i){
+            var actCls=l.action==='PUTAWAY'?'badge-accent':(l.action==='PIV'?'badge-info':(l.action==='EAN-SCAN'?'badge-success':'badge-warning'));
+            h+='<tr><td>'+(startIdx+i+1)+'</td><td style="font-size:11px">'+esc(l.date)+'</td><td><span class="badge badge-accent">'+esc(l.rack)+'</span></td><td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><strong>'+esc(l.material)+'</strong></td><td style="font-size:10px;color:var(--text-secondary);max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(l.description||'-')+'</td><td style="font-family:var(--font-display);font-size:9px">'+esc(l.ean||'-')+'</td><td><strong style="color:var(--accent)">'+l.quantity+'</strong></td><td><span class="badge '+actCls+'">'+esc(l.action)+'</span></td><td>'+esc(l.packing||'-')+'</td><td>'+esc(l.box||'-')+'</td><td style="font-size:10px;color:var(--text-secondary)">'+esc(l.user||'-')+'</td><td><button class="btn btn-danger btn-sm" onclick="deleteLocRow(\''+l.id+'\')" title="Delete"><i class="bx bx-trash"></i></button></td></tr>';
+        });
+    }
+    h+='</tbody></table></div>';return h;
+}
+
+function goLocPage(p){APP.locPage=p;renderLocationMaster();}
+function searchLoc(){
+    var q=document.getElementById('locSearch').value.trim().toLowerCase();
+    var actF=document.getElementById('locActionFilter').value;
+    var locs=DB.get('location_master').reverse();
+    if(q)locs=locs.filter(function(l){return(l.rack||'').toLowerCase().indexOf(q)>-1||(l.material||'').toLowerCase().indexOf(q)>-1||(l.ean||'').toLowerCase().indexOf(q)>-1||(l.description||'').toLowerCase().indexOf(q)>-1||(l.user||'').toLowerCase().indexOf(q)>-1;});
+    if(actF)locs=locs.filter(function(l){return l.action===actF;});
+    document.getElementById('locTable').innerHTML=buildLocTable(locs);
+}
+
+// --- Delete Single Row ---
+function deleteLocRow(id){
+    if(!confirm('Yeh row delete karein?'))return;
+    DB.delete('location_master',id);
+    showToast('Row deleted','warning');
+    renderLocationMaster();
+}
+
+// --- Download Template ---
+function downloadLocTemplate(){
+    var rows=[
+        ['Date','Rack','Material','EAN','Qty','Action','Packing','Box'],
+        ['2025-01-15','RACK-A01','Sample Material 1','8901234567890','10','PUTAWAY','Bag','B001'],
+        ['2025-01-15','RACK-B02','Sample Material 2','8901234567891','25','PIV','Box','B002'],
+        ['2025-01-15','RACK-C03','Sample Material 3','8901234567892','50','EAN-SCAN','Pallet','P001']
+    ];
+    var ws=XLSX.utils.aoa_to_sheet(rows);
+    // Column widths
+    ws['!cols']=[{wch:12},{wch:14},{wch:30},{wch:18},{wch:8},{wch:12},{wch:10},{wch:10}];
+    var wb=XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb,ws,'Template');
+    XLSX.writeFile(wb,'Location_Master_Template.xlsx');
+    showToast('Template downloaded! Is format mein data bharein','success');
+}
+
+// --- Bulk Upload ---
+function showLocBulkUpload(){
+    var h='<div style="background:var(--accent-dim);padding:12px;border-radius:var(--radius-sm);margin-bottom:14px;font-size:12px;color:var(--accent);border:1px solid var(--accent)"><i class="bx bx-info-circle" style="font-size:16px"></i> <strong>25000+ rows</strong> support hai. Upload mein thoda time lagega — please wait.</div>';
+    h+='<div class="form-group"><label>Upload Excel File <span class="req">*</span></label>';
+    h+='<label class="btn btn-glass btn-sm" style="cursor:pointer;display:inline-flex;align-items:center;gap:6px"><i class="bx bx-upload"></i> Choose File (.xlsx / .xls / .csv)<input type="file" id="locBulkFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="document.getElementById(\'locBulkFName\').innerText=this.files[0].name+\' (\'+(this.files[0].size/1024).toFixed(1)+\' KB)\'"></label>';
+    h+='<div id="locBulkFName" style="font-size:11px;color:var(--text-muted);margin-top:6px">No file chosen</div></div>';
+    h+='<div style="background:var(--bg-secondary);padding:12px;border-radius:var(--radius-sm);font-size:11px;color:var(--text-muted);border:1px dashed var(--border)">';
+    h+='<div style="font-weight:700;color:var(--warning);margin-bottom:6px"><i class="bx bx-table"></i> Required Column Format (Row 1 = Header):</div>';
+    h+='<div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px">';
+    var cols=['Date','Rack','Material','EAN','Qty','Action','Packing','Box'];
+    cols.forEach(function(c){h+='<span style="background:var(--accent-dim);color:var(--accent);padding:3px 8px;border-radius:4px;font-size:10px;font-weight:600;border:1px solid var(--accent)">'+c+'</span>';});
+    h+='</div>';
+    h+='<div><strong>Action values:</strong> PUTAWAY, PIV, EAN-SCAN (ya jo bhi custom ho)</div>';
+    h+='<div><strong>Date format:</strong> YYYY-MM-DD ya DD/MM/YYYY</div>';
+    h+='</div>';
+    h+='<div id="locBulkProgress" style="display:none;margin-top:12px"></div>';
+    showModal('Bulk Upload — Location Master',h,'lg',
+        '<button class="btn btn-glass" onclick="closeModal()">Cancel</button>'+
+        '<button class="btn btn-glass" onclick="processLocBulkUpload()"><i class="bx bx-check-double"></i> Upload</button>');
+}
+
+function processLocBulkUpload(){
+    var fi=document.getElementById('locBulkFile');
+    if(!fi||!fi.files[0]){showToast('File select karein','error');return;}
+
+    var progDiv=document.getElementById('locBulkProgress');
+    progDiv.style.display='';
+    progDiv.innerHTML='<div style="background:var(--bg-secondary);padding:10px;border-radius:var(--radius-sm);text-align:center;color:var(--accent)"><i class="bx bx-loader-circle bx-spin" style="font-size:20px;display:block;margin-bottom:6px"></i>Processing... please wait</div>';
+
+    // Use setTimeout to allow UI to update
+    setTimeout(function(){
+        try{
+            var reader=new FileReader();
+            reader.onload=function(e){
+                try{
+                    var t0=performance.now();
+                    var wb=XLSX.read(e.target.result,{type:'array'});
+                    var ws=wb.Sheets[wb.SheetNames[0]];
+                    var data=XLSX.utils.sheet_to_json(ws,{header:1,raw:false});
+
+                    if(!data||data.length<2){showToast('File mein data nahi hai (kam se kam header + 1 row)','error');progDiv.innerHTML='';return;}
+
+                    // Detect header row
+                    var headerRow=data[0].map(function(h){return String(h||'').trim().toLowerCase();});
+                    var colMap={date:-1,rack:-1,material:-1,ean:-1,qty:-1,action:-1,packing:-1,box:-1};
+                    var keys=['date','rack','material','ean','qty','action','packing','box'];
+                    var aliases={date:['date','dt'],rack:['rack','location','rack_no'],material:['material','material_name','item'],ean:['ean','ean_no','barcode','upc'],qty:['qty','quantity','quant'],action:['action','type','activity'],packing:['packing','pack','pack_type'],box:['box','box_no','boxno']};
+                    keys.forEach(function(k){
+                        aliases[k].forEach(function(a){
+                            for(var ci=0;ci<headerRow.length;ci++){
+                                if(headerRow[ci]===a&&colMap[k]===-1){colMap[k]=ci;break;}
+                            }
+                        });
+                    });
+
+                    // Validate required columns
+                    var missing=[];
+                    if(colMap.rack===-1)missing.push('Rack');
+                    if(colMap.material===-1)missing.push('Material');
+                    if(colMap.qty===-1)missing.push('Qty');
+                    if(missing.length){showToast('Missing columns: '+missing.join(', '),'error');progDiv.innerHTML='';return;}
+
+                    // Parse date helper
+                    function parseDate(val){
+                        if(!val)return today();
+                        var s=String(val).trim();
+                        // YYYY-MM-DD
+                        if(/^\d{4}-\d{2}-\d{2}$/.test(s))return s;
+                        // DD/MM/YYYY
+                        var parts=s.split(/[\/\-\.]/);
+                        if(parts.length===3){
+                            if(parts[0].length===4)return parts[0]+'-'+parts[1].padStart(2,'0')+'-'+parts[2].padStart(2,'0');
+                            if(parts[2].length===4)return parts[2]+'-'+parts[1].padStart(2,'0')+'-'+parts[0].padStart(2,'0');
+                        }
+                        return today();
+                    }
+
+                    // Process rows
+                    var startRow=1; // Skip header
+                    var added=0,skipped=0,errorRows=[];
+                    var userName=APP.currentUser?APP.currentUser.name:'Bulk Upload';
+                    var userId=APP.currentUser?APP.currentUser.id:'';
+
+                    for(var k=startRow;k<data.length;k++){
+                        var r=data[k];
+                        if(!r||!r.length)continue;
+
+                        var rack=colMap.rack>=0?String(r[colMap.rack]||'').trim().toUpperCase():'';
+                        var material=colMap.material>=0?String(r[colMap.material]||'').trim():'';
+                        var ean=colMap.ean>=0?String(r[colMap.ean]||'').trim():'';
+                        var qty=colMap.qty>=0?parseInt(r[colMap.qty])||0:0;
+                        var action=colMap.action>=0?String(r[colMap.action]||'').trim().toUpperCase():'BULK';
+                        var packing=colMap.packing>=0?String(r[colMap.packing]||'').trim():'';
+                        var box=colMap.box>=0?String(r[colMap.box]||'').trim().toUpperCase():'';
+                        var date=colMap.date>=0?parseDate(r[colMap.date]):today();
+
+                        if(!rack||!material||qty<=0){skipped++;errorRows.push(k+1);continue;}
+
+                        // Get description from material master if EAN exists
+                        var desc=material;
+                        if(ean){
+                            var mm=DB.filter('material_master',function(m){return m.ean&&m.ean.toUpperCase()===ean.toUpperCase();});
+                            if(mm.length>0)desc=mm[0].description||mm[0].material;
+                        }
+
+                        DB.add('location_master',{
+                            date:date,
+                            rack:rack,
+                            ean:ean,
+                            material:material,
+                            description:desc,
+                            quantity:qty,
+                            packing:packing,
+                            box:box,
+                            action:action||'BULK',
+                            user:userName,
+                            userId:userId,
+                            dateTime:new Date().toISOString()
+                        });
+                        added++;
+                    }
+
+                    var t1=performance.now();
+                    var timeSec=((t1-t0)/1000).toFixed(1);
+
+                    var resHtml='<div style="background:var(--bg-secondary);padding:14px;border-radius:var(--radius-sm);border:1px solid var(--border)">';
+                    resHtml+='<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px">';
+                    resHtml+='<div style="text-align:center;flex:1;min-width:80px"><div style="font-size:24px;font-weight:800;color:var(--success)">'+added+'</div><div style="font-size:9px;color:var(--text-muted)">ADDED</div></div>';
+                    if(skipped>0)resHtml+='<div style="text-align:center;flex:1;min-width:80px"><div style="font-size:24px;font-weight:800;color:var(--danger)">'+skipped+'</div><div style="font-size:9px;color:var(--text-muted)">SKIPPED</div></div>';
+                    resHtml+='<div style="text-align:center;flex:1;min-width:80px"><div style="font-size:24px;font-weight:800;color:var(--accent)">'+timeSec+'s</div><div style="font-size:9px;color:var(--text-muted)">TIME</div></div>';
+                    resHtml+='</div>';
+                    if(errorRows.length>0&&errorRows.length<=20){
+                        resHtml+='<div style="font-size:10px;color:var(--danger);margin-bottom:8px"><i class="bx bx-error-circle"></i> Skipped rows: '+errorRows.join(', ')+'</div>';
+                    } else if(errorRows.length>20){
+                        resHtml+='<div style="font-size:10px;color:var(--danger);margin-bottom:8px"><i class="bx bx-error-circle"></i> Skipped rows: '+errorRows.length+' (first 20: '+errorRows.slice(0,20).join(', ')+')</div>';
+                    }
+                    resHtml+='<div style="font-size:11px;color:var(--text-muted)"><i class="bx bx-check-circle" style="color:var(--success)"></i> Upload complete!</div>';
+                    resHtml+='</div>';
+                    progDiv.innerHTML=resHtml;
+
+                    logAction('Location Master','BULK_UPLOAD',added+' rows added, '+skipped+' skipped in '+timeSec+'s');
+                    showToast(added+' rows uploaded! ('+timeSec+'s)','success');
+
+                }catch(err){
+                    progDiv.innerHTML='<div style="background:rgba(255,107,107,0.1);padding:12px;border-radius:var(--radius-sm);color:var(--danger);font-size:12px"><i class="bx bx-error"></i> Error: '+esc(err.message)+'</div>';
+                    showToast('Excel error: '+err.message,'error');
+                }
+            };
+            reader.readAsArrayBuffer(fi.files[0]);
+        }catch(err){
+            progDiv.innerHTML='<div style="color:var(--danger);font-size:12px">'+esc(err.message)+'</div>';
         }
-        html += '</tbody></table></div></div>';
-    }
+    },100);
+}
 
-    // Search Short Report
-    var srtMatch = DB.filter('short_reports', function(s) { return s.reportNo.toUpperCase().indexOf(search) > -1; });
-    if (srtMatch.length > 0) {
-        html += '<div class="card" style="margin-top:16px;border-left:4px solid var(--warning)"><div class="card-title" style="color:var(--warning)">Short/Excess Reports (' + srtMatch.length + ')</div>';
-        html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>Report No</th><th>Vehicle</th><th>Unloader</th><th>Mismatch</th><th>Date</th></tr></thead><tbody>';
-        for (var j = 0; j < srtMatch.length; j++) {
-            var s = srtMatch[j];
-            html += '<tr><td style="font-family:var(--font-display);color:var(--warning)">' + escapeHtml(s.reportNo) + '</td><td>' + escapeHtml(s.vehicleNo) + '</td><td>' + escapeHtml(s.unloader) + '</td><td><span class="badge ' + (s.hasMismatch ? 'badge-danger' : 'badge-success') + '">' + (s.hasMismatch ? 'Yes' : 'No') + '</span></td><td style="font-size:12px">' + formatDateTime(s.dateTime) + '</td></tr>';
+// --- Location Report ---
+function showLocReport(){
+    var locs=DB.get('location_master');
+
+    // Action wise summary
+    var actionMap={};
+    var rackMap={};
+    var dateMap={};
+    var userMap={};
+    var totalQty=0;
+
+    locs.forEach(function(l){
+        totalQty+=l.quantity;
+        // Action
+        if(!actionMap[l.action])actionMap[l.action]={count:0,qty:0};
+        actionMap[l.action].count++;actionMap[l.action].qty+=l.quantity;
+        // Rack
+        if(!rackMap[l.rack])rackMap[l.rack]={count:0,qty:0};
+        rackMap[l.rack].count++;rackMap[l.rack].qty+=l.quantity;
+        // Date
+        if(!dateMap[l.date])dateMap[l.date]={count:0,qty:0};
+        dateMap[l.date].count++;dateMap[l.date].qty+=l.quantity;
+        // User
+        if(!userMap[l.user])userMap[l.user]={count:0,qty:0};
+        userMap[l.user].count++;userMap[l.user].qty+=l.quantity;
+    });
+
+    // Sort racks by qty desc
+    var sortedRacks=Object.keys(rackMap).sort(function(a,b){return rackMap[b].qty-rackMap[a].qty;});
+    var sortedDates=Object.keys(dateMap).sort().reverse();
+    var sortedUsers=Object.keys(userMap).sort(function(a,b){return userMap[b].qty-userMap[a].qty;});
+
+    var h='<div style="text-align:center;margin-bottom:16px"><div style="font-size:11px;color:var(--text-muted);letter-spacing:2px">LOCATION MASTER REPORT</div><div style="font-size:20px;font-weight:800;color:var(--accent)">'+locs.length+' Records | '+totalQty+' Total Qty</div></div>';
+
+    // Summary Cards
+    h+='<div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">';
+    Object.keys(actionMap).forEach(function(a){
+        var cls=a==='PUTAWAY'?'var(--accent)':(a==='PIV'?'var(--info)':'var(--accent2)');
+        h+='<div style="flex:1;min-width:120px;padding:12px;background:var(--bg-secondary);border:1px solid '+cls+';border-radius:var(--radius-sm);text-align:center"><div style="font-size:20px;font-weight:800;color:'+cls+'">'+actionMap[a].qty+'</div><div style="font-size:10px;color:var(--text-muted)">'+esc(a)+' QTY</div><div style="font-size:9px;color:var(--text-muted)">'+actionMap[a].count+' rows</div></div>';
+    });
+    h+='</div>';
+
+    // Rack Wise
+    h+='<div class="card-title"><i class="bx bx-diamond" style="color:var(--accent)"></i> Rack Wise Summary ('+sortedRacks.length+' racks)</div>';
+    h+='<div class="table-wrapper" style="max-height:200px;overflow-y:auto"><table class="data-table"><thead><tr><th>#</th><th>Rack</th><th>Rows</th><th>Total Qty</th><th>Share %</th></tr></thead><tbody>';
+    sortedRacks.forEach(function(r,i){
+        var pct=totalQty>0?((rackMap[r].qty/totalQty)*100).toFixed(1):'0.0';
+        h+='<tr><td>'+(i+1)+'</td><td><span class="badge badge-accent">'+esc(r)+'</span></td><td>'+rackMap[r].count+'</td><td><strong style="color:var(--accent)">'+rackMap[r].qty+'</strong></td><td><div style="display:flex;align-items:center;gap:6px"><div style="background:var(--border);height:6px;border-radius:3px;width:80px"><div style="background:var(--accent);height:100%;border-radius:3px;width:'+pct+'%"></div></div><span style="font-size:10px;color:var(--text-muted)">'+pct+'%</span></div></td></tr>';
+    });
+    h+='</tbody></table></div>';
+
+    // Date Wise
+    h+='<div class="card-title" style="margin-top:14px"><i class="bx bx-calendar" style="color:var(--success)"></i> Date Wise ('+sortedDates.length+' days)</div>';
+    h+='<div class="table-wrapper" style="max-height:180px;overflow-y:auto"><table class="data-table"><thead><tr><th>Date</th><th>Rows</th><th>Total Qty</th></tr></thead><tbody>';
+    sortedDates.slice(0,30).forEach(function(d){
+        h+='<tr><td>'+esc(d)+'</td><td>'+dateMap[d].count+'</td><td><strong style="color:var(--success)">'+dateMap[d].qty+'</strong></td></tr>';
+    });
+    h+='</tbody></table></div>';
+
+    // User Wise
+    h+='<div class="card-title" style="margin-top:14px"><i class="bx bx-user" style="color:var(--accent2)"></i> User Wise ('+sortedUsers.length+' users)</div>';
+    h+='<div class="table-wrapper" style="max-height:180px;overflow-y:auto"><table class="data-table"><thead><tr><th>User</th><th>Rows</th><th>Total Qty</th></tr></thead><tbody>';
+    sortedUsers.forEach(function(u){
+        h+='<tr><td>'+esc(u)+'</td><td>'+userMap[u].count+'</td><td><strong style="color:var(--accent2)">'+userMap[u].qty+'</strong></td></tr>';
+    });
+    h+='</tbody></table></div>';
+
+    h+='<div class="form-actions" style="margin-top:16px"><button class="btn btn-glass" onclick="downloadLocReportPDF()"><i class="bx bx-download"></i> Download Report PDF</button><button class="btn btn-glass" onclick="closeModal()">Close</button></div>';
+
+    showModal('Location Master Report',h,'xl','');
+}
+
+// --- Report PDF Download ---
+function downloadLocReportPDF(){
+    var locs=DB.get('location_master');
+    var actionMap={},rackMap={},totalQty=0;
+    locs.forEach(function(l){
+        totalQty+=l.quantity;
+        if(!actionMap[l.action])actionMap[l.action]={count:0,qty:0};
+        actionMap[l.action].count++;actionMap[l.action].qty+=l.quantity;
+        if(!rackMap[l.rack])rackMap[l.rack]={count:0,qty:0};
+        rackMap[l.rack].count++;rackMap[l.rack].qty+=l.quantity;
+    });
+    var sortedRacks=Object.keys(rackMap).sort(function(a,b){return rackMap[b].qty-rackMap[a].qty;});
+
+    var jsPDF=window.jspdf.jsPDF;
+    var doc=new jsPDF({unit:'mm',format:'a4'});
+    var y=15;
+
+    // Header
+    doc.setFillColor(15,23,42);doc.rect(0,0,210,35,'F');
+    doc.setTextColor(0,255,136);doc.setFontSize(16);doc.setFont('helvetica','bold');
+    doc.text('LOCATION MASTER REPORT',105,y+8,{align:'center'});
+    doc.setTextColor(180,180,180);doc.setFontSize(9);doc.setFont('helvetica','normal');
+    doc.text('Total: '+locs.length+' records | '+totalQty+' qty | Generated: '+fmtDT(new Date()),105,y+18,{align:'center'});
+    y=45;
+
+    // Action Summary
+    doc.setFontSize(11);doc.setFont('helvetica','bold');doc.setTextColor(30,30,30);
+    doc.text('Action Summary',10,y);y+=7;
+    doc.setFillColor(240,240,240);doc.rect(10,y,190,7,'F');
+    doc.setFontSize(8);doc.setFont('helvetica','bold');doc.setTextColor(80,80,80);
+    doc.text('Action',12,y+5);doc.text('Rows',100,y+5);doc.text('Total Qty',140,y+5);y+=10;
+    doc.setFont('helvetica','normal');doc.setTextColor(30,30,30);
+    Object.keys(actionMap).forEach(function(a){
+        doc.text(a,12,y+1);doc.text(String(actionMap[a].count),100,y+1);doc.text(String(actionMap[a].qty),140,y+1);y+=6;
+    });
+    y+=8;
+
+    // Rack Summary
+    doc.setFontSize(11);doc.setFont('helvetica','bold');
+    doc.text('Rack Summary ('+sortedRacks.length+' racks)',10,y);y+=7;
+    doc.setFillColor(240,240,240);doc.rect(10,y,190,7,'F');
+    doc.setFontSize(8);doc.setFont('helvetica','bold');doc.setTextColor(80,80,80);
+    doc.text('#',12,y+5);doc.text('Rack',22,y+5);doc.text('Rows',80,y+5);doc.text('Total Qty',110,y+5);doc.text('Share %',150,y+5);y+=10;
+    doc.setFont('helvetica','normal');doc.setTextColor(30,30,30);
+    sortedRacks.forEach(function(r,i){
+        if(y>270){doc.addPage();y=15;}
+        var pct=totalQty>0?((rackMap[r].qty/totalQty)*100).toFixed(1):'0.0';
+        doc.text(String(i+1),12,y+1);doc.text(r,22,y+1);doc.text(String(rackMap[r].count),80,y+1);doc.text(String(rackMap[r].qty),110,y+1);doc.text(pct+'%',150,y+1);y+=6;
+    });
+
+    // Footer
+    y=285;
+    doc.setDrawColor(150,150,150);doc.line(10,y,200,y);
+    doc.setTextColor(130,130,130);doc.setFontSize(7);
+    doc.text('Location Master Report — '+APP.currentUser.name+' — '+new Date().toISOString(),105,y+4,{align:'center'});
+
+    doc.save('Location_Master_Report_'+today()+'.pdf');
+    showToast('Report PDF downloaded!','success');
+    logAction('Location Master','REPORT_PDF','Report downloaded');
+}
+
+// ==================== BIN MASTER ====================
+function renderRackMaster(){
+    var bins=DB.get('rack_master');
+    var locs=DB.get('location_master');
+
+    var h='<div class="section-header"><h2><i class="bx bx-grid-alt"></i> Bin Master ('+bins.length+')</h2>';
+    h+='<div style="display:flex;gap:6px;flex-wrap:wrap">';
+    h+='<button class="btn btn-glass" onclick="showAddRack()"><i class="bx bx-plus"></i> Add Bin</button>';
+    h+='<button class="btn btn-glass" onclick="showBulkBinUpload()"><i class="bx bx-upload"></i> Bulk Upload</button>';
+    h+='<button class="btn btn-glass" onclick="downloadBinTemplate()"><i class="bx bx-file"></i> Template</button>';
+    h+='</div></div>';
+
+    // Quick Stats
+    var occMap={};var totalMats=0;
+    locs.forEach(function(l){
+        if(l.quantity>0){
+            if(!occMap[l.rack])occMap[l.rack]={mats:0,qty:0};
+            occMap[l.rack].mats++;occMap[l.rack].qty+=l.quantity;totalMats++;
         }
-        html += '</tbody></table></div></div>';
-    }
+    });
+    var occupiedCount=Object.keys(occMap).length;
+    var emptyCount=bins.length-occupiedCount;
 
-    // Search Invoice
-    var invMatch = DB.filter('invoices', function(inv) { return inv.invoiceNo.toUpperCase().indexOf(search) > -1; });
-    if (invMatch.length > 0) {
-        html += '<div class="card" style="margin-top:16px;border-left:4px solid var(--info)"><div class="card-title" style="color:var(--info)">Invoices (' + invMatch.length + ')</div>';
-        html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>Invoice No</th><th>Vehicle</th><th>Status</th><th>GRN</th></tr></thead><tbody>';
-        for (var k = 0; k < invMatch.length; k++) {
-            var inv = invMatch[k];
-            var veh = DB.find('vehicles', inv.vehicleId);
-            var grnRec = DB.filter('grn_records', function(g) { return g.invoiceId === inv.id; })[0];
-            html += '<tr><td style="font-family:var(--font-display);color:var(--info)">' + escapeHtml(inv.invoiceNo) + '</td><td>' + escapeHtml(veh ? veh.vehicleNo : '-') + '</td><td><span class="badge badge-' + (inv.status === 'Posted' ? 'success' : 'warning') + '">' + escapeHtml(inv.status) + '</span></td><td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(grnRec ? grnRec.grnNo : '-') + '</td></tr>';
+    h+='<div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap">';
+    h+='<div style="flex:1;min-width:100px;padding:12px;background:var(--accent-dim);border:1px solid var(--accent);border-radius:var(--radius-sm);text-align:center"><div style="font-size:22px;font-weight:800;color:var(--accent)">'+bins.length+'</div><div style="font-size:9px;color:var(--text-muted);letter-spacing:1px">TOTAL BINS</div></div>';
+    h+='<div style="flex:1;min-width:100px;padding:12px;background:rgba(0,255,136,0.06);border:1px solid var(--success);border-radius:var(--radius-sm);text-align:center"><div style="font-size:22px;font-weight:800;color:var(--success)">'+occupiedCount+'</div><div style="font-size:9px;color:var(--text-muted);letter-spacing:1px">OCCUPIED</div></div>';
+    h+='<div style="flex:1;min-width:100px;padding:12px;background:rgba(255,107,107,0.06);border:1px solid var(--danger);border-radius:var(--radius-sm);text-align:center"><div style="font-size:22px;font-weight:800;color:var(--danger)">'+emptyCount+'</div><div style="font-size:9px;color:var(--text-muted);letter-spacing:1px">EMPTY</div></div>';
+    h+='<div style="flex:1;min-width:100px;padding:12px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);text-align:center"><div style="font-size:22px;font-weight:800;color:var(--accent2)">'+totalMats+'</div><div style="font-size:9px;color:var(--text-muted);letter-spacing:1px">MATERIALS</div></div>';
+    h+='</div>';
+
+    // Search
+    h+='<div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">';
+    h+='<div class="search-box" style="flex:1;min-width:200px"><i class="bx bx-search"></i><input type="text" id="binSearchInput" placeholder="Search bin..." oninput="filterBinGrid()"></div>';
+    h+='<select class="form-input" id="binStatusFilter" onchange="filterBinGrid()" style="width:auto;min-width:130px;font-size:12px"><option value="">All</option><option value="occupied">Occupied</option><option value="empty">Empty</option></select>';
+    h+='</div>';
+
+    // Bin Visualization Grid
+    h+='<div class="card"><div class="card-title"><i class="bx bx-grid"></i> Bin Visualization <span style="font-size:10px;color:var(--text-muted);font-weight:normal">(Click to see materials)</span></div>';
+    h+='<div id="binGridWrap"><div class="rack-grid">';
+    bins.forEach(function(b){
+        var occ=occMap[b.rack];
+        h+='<div class="rack-cell '+(occ?'occupied':'empty')+'" onclick="showBinMaterials(\''+esc(b.rack).replace(/'/g,"\\'")+'\')" title="'+esc(b.rack)+(occ?' — '+occ.mats+' materials, '+occ.qty+' qty':' — Empty')+'"><div style="font-size:13px;font-weight:700">'+esc(b.rack.replace('RACK-','').replace('BIN-',''))+'</div>';
+        if(occ)h+='<div style="font-size:8px;color:var(--success);margin-top:2px">'+occ.mats+' items</div>';
+        h+='</div>';
+    });
+    if(!bins.length)h+='<div style="text-align:center;color:var(--text-muted);padding:24px;grid-column:1/-1"><i class="bx bx-inbox" style="font-size:24px;display:block;margin-bottom:8px"></i>No bins added</div>';
+    h+='</div></div></div>';
+
+    // Bin List Table with Pagination
+    var pg=paginate(bins,APP.binPage||1,APP.binPerPage||100);
+    h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-list-ul"></i> Bin List</div>';
+    h+='<div id="binTableWrap">'+buildBinTable(bins,pg.items,occMap)+'</div>';
+    h+=renderPag(APP.binPage||1,pg.pages,'goBinPage');
+    h+='</div>';
+
+    setHtml(h);
+}
+
+function buildBinTable(allBins,pageBins,occMap){
+    var h='<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>Bin</th><th>Status</th><th>Materials</th><th>Total Qty</th><th>Actions</th></tr></thead><tbody>';
+    if(!pageBins.length)h+='<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:20px">No bins</td></tr>';
+    else {
+        var startIdx=((APP.binPage||1)-1)*(APP.binPerPage||100);
+        pageBins.forEach(function(b,i){
+            var occ=occMap[b.rack];
+            h+='<tr style="cursor:pointer" onclick="showBinMaterials(\''+esc(b.rack).replace(/'/g,"\\'")+'\')"><td>'+(startIdx+i+1)+'</td><td><strong>'+esc(b.rack)+'</strong></td><td><span class="badge '+(occ?'badge-success':'badge-danger')+'">'+(occ?'Occupied':'Empty')+'</span></td><td>'+(occ?occ.mats:0)+'</td><td>'+(occ?occ.qty:0)+'</td><td><div class="table-actions"><button class="btn btn-glass btn-sm" onclick="event.stopPropagation();showBinMaterials(\''+esc(b.rack).replace(/'/g,"\\'")+'\')"><i class="bx bx-eye"></i> View</button><button class="btn btn-danger btn-sm" onclick="event.stopPropagation();deleteRack(\''+b.id+'\')"><i class="bx bx-trash"></i></button></div></td></tr>';
+        });
+    }
+    h+='</tbody></table></div>';
+    return h;
+}
+
+function goBinPage(p){APP.binPage=p;renderRackMaster();}
+
+function filterBinGrid(){
+    var q=(document.getElementById('binSearchInput').value||'').trim().toLowerCase();
+    var statusF=document.getElementById('binStatusFilter').value;
+    var bins=DB.get('rack_master');
+    var locs=DB.get('location_master');
+    var occMap={};
+    locs.forEach(function(l){
+        if(l.quantity>0){if(!occMap[l.rack])occMap[l.rack]={mats:0,qty:0};occMap[l.rack].mats++;occMap[l.rack].qty+=l.quantity;}
+    });
+    if(q)bins=bins.filter(function(b){return(b.rack||'').toLowerCase().indexOf(q)>-1;});
+    if(statusF==='occupied')bins=bins.filter(function(b){return occMap[b.rack];});
+    else if(statusF==='empty')bins=bins.filter(function(b){return !occMap[b.rack];});
+
+    var h='<div class="rack-grid">';
+    bins.forEach(function(b){
+        var occ=occMap[b.rack];
+        h+='<div class="rack-cell '+(occ?'occupied':'empty')+'" onclick="showBinMaterials(\''+esc(b.rack).replace(/'/g,"\\'")+'\')" title="'+esc(b.rack)+(occ?' — '+occ.mats+' materials, '+occ.qty+' qty':' — Empty')+'"><div style="font-size:13px;font-weight:700">'+esc(b.rack.replace('RACK-','').replace('BIN-',''))+'</div>';
+        if(occ)h+='<div style="font-size:8px;color:var(--success);margin-top:2px">'+occ.mats+' items</div>';
+        h+='</div>';
+    });
+    if(!bins.length)h+='<div style="text-align:center;color:var(--text-muted);padding:24px;grid-column:1/-1">No bins found</div>';
+    h+='</div>';
+    document.getElementById('binGridWrap').innerHTML=h;
+
+    // Update table too
+    var pg=paginate(bins,1,APP.binPerPage||100);
+    APP.binPage=1;
+    document.getElementById('binTableWrap').innerHTML=buildBinTable(bins,pg.items,occMap);
+}
+
+// --- Click Bin → Show Materials ---
+function showBinMaterials(binName){
+    var locs=DB.filter('location_master',function(l){return l.rack===binName;});
+    var totalQty=0;locs.forEach(function(l){totalQty+=l.quantity;});
+    var h='<div style="text-align:center;margin-bottom:14px"><div style="font-size:22px;font-weight:800;color:var(--accent);font-family:var(--font-display);letter-spacing:2px">'+esc(binName)+'</div><div style="font-size:11px;color:var(--text-muted)">'+locs.length+' materials | '+totalQty+' total qty</div></div>';
+    if(!locs.length){
+        h+='<div style="text-align:center;color:var(--text-muted);padding:30px"><i class="bx bx-box" style="font-size:32px;display:block;margin-bottom:10px"></i>This bin is empty</div>';
+    } else {
+        h+='<div class="table-wrapper" style="max-height:400px;overflow-y:auto"><table class="data-table"><thead><tr><th>#</th><th>Date</th><th>Material</th><th>Description</th><th>EAN</th><th>Qty</th><th>Action</th><th>Packing</th><th>Box</th><th>User</th></tr></thead><tbody>';
+        locs.forEach(function(l,i){
+            var actCls=l.action==='PUTAWAY'?'badge-accent':(l.action==='PIV'?'badge-info':(l.action==='EAN-SCAN'?'badge-success':'badge-warning'));
+            h+='<tr><td>'+(i+1)+'</td><td style="font-size:11px">'+esc(l.date)+'</td><td><strong>'+esc(l.material)+'</strong></td><td style="font-size:10px;color:var(--text-secondary);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(l.description||'-')+'</td><td style="font-family:var(--font-display);font-size:9px">'+esc(l.ean||'-')+'</td><td><strong style="color:var(--accent)">'+l.quantity+'</strong></td><td><span class="badge '+actCls+'">'+esc(l.action)+'</span></td><td>'+esc(l.packing||'-')+'</td><td>'+esc(l.box||'-')+'</td><td style="font-size:10px">'+esc(l.user||'-')+'</td></tr>';
+        });
+        h+='</tbody></table></div>';
+    }
+    h+='<div class="form-actions" style="margin-top:14px"><button class="btn btn-glass" onclick="closeModal()">Close</button></div>';
+    showModal('Bin Details — '+binName,h,'xl','');
+}
+
+// --- Add Single Bin ---
+function showAddRack(){
+    showModal('Add Bin','<div class="form-group"><label>Bin Name <span class="req">*</span></label><input type="text" id="newRack" class="form-input" placeholder="BIN-001 ya RACK-001" style="text-transform:uppercase"></div>','sm',
+        '<button class="btn btn-glass" onclick="closeModal()">Cancel</button><button class="btn btn-glass" onclick="saveRack()"><i class="bx bx-check"></i> Save</button>');
+    setTimeout(function(){document.getElementById('newRack').focus();},300);
+}
+function saveRack(){
+    var name=document.getElementById('newRack').value.trim().toUpperCase();if(!name){showToast('Enter bin name','error');return;}
+    var exists=DB.filter('rack_master',function(r){return r.rack===name;});
+    if(exists.length){showToast('Bin already exists','error');return;}
+    DB.add('rack_master',{rack:name});logAction('Bin','ADD',name);showToast('Bin added!','success');closeModal();renderRackMaster();
+}
+function deleteRack(id){if(!confirm('Delete this bin?'))return;DB.remove('rack_master',id);showToast('Bin deleted','success');renderRackMaster();}
+
+// --- Download Template ---
+function downloadBinTemplate(){
+    var rows=[];
+    rows.push(['BIN']);
+    for(var i=1;i<=20;i++)rows.push(['BIN-'+String(i).padStart(3,'0')]);
+    var ws=XLSX.utils.aoa_to_sheet(rows);
+    ws['!cols']=[{wch:16}];
+    var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Template');
+    XLSX.writeFile(wb,'Bin_Master_Template.xlsx');
+    showToast('Template downloaded! Sirf BIN column mein data bharein','success');
+}
+
+// --- Bulk Upload ---
+function showBulkBinUpload(){
+    var h='<div style="background:var(--accent-dim);padding:12px;border-radius:var(--radius-sm);margin-bottom:14px;font-size:12px;color:var(--accent);border:1px solid var(--accent)"><i class="bx bx-info-circle" style="font-size:16px"></i> <strong>15000+ bins</strong> ek saath upload kar sakte hain. Hang nahi hoga.</div>';
+    h+='<div class="form-group"><label>Upload Excel/CSV <span class="req">*</span></label>';
+    h+='<label class="btn btn-glass btn-sm" style="cursor:pointer;display:inline-flex;align-items:center;gap:6px"><i class="bx bx-upload"></i> Choose File<input type="file" id="binBulkFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="document.getElementById(\'binBulkFName\').innerText=this.files[0].name+\' (\'+(this.files[0].size/1024).toFixed(1)+\' KB)\'"></label>';
+    h+='<div id="binBulkFName" style="font-size:11px;color:var(--text-muted);margin-top:6px">No file chosen</div></div>';
+    h+='<div style="background:var(--bg-secondary);padding:12px;border-radius:var(--radius-sm);font-size:11px;color:var(--text-muted);border:1px dashed var(--border)">';
+    h+='<div style="font-weight:700;color:var(--warning);margin-bottom:6px"><i class="bx bx-table"></i> Excel Format:</div>';
+    h+='<div style="display:flex;gap:4px;margin-bottom:8px"><span style="background:var(--accent-dim);color:var(--accent);padding:3px 12px;border-radius:4px;font-size:11px;font-weight:600;border:1px solid var(--accent)">BIN</span></div>';
+    h+='<div style="font-family:var(--font-display);font-size:10px;background:var(--bg-primary);padding:8px;border-radius:4px">BIN-001<br>BIN-002<br>BIN-003<br>...</div>';
+    h+='</div>';
+    h+='<div id="binBulkProgress" style="display:none;margin-top:12px"></div>';
+    showModal('Bulk Upload — Bins',h,'lg',
+        '<button class="btn btn-glass" onclick="closeModal()">Cancel</button>'+
+        '<button class="btn btn-glass" onclick="processBulkBinUpload()"><i class="bx bx-check-double"></i> Upload</button>');
+}
+
+function processBulkBinUpload(){
+    var fi=document.getElementById('binBulkFile');
+    if(!fi||!fi.files[0]){showToast('File select karein','error');return;}
+
+    var progDiv=document.getElementById('binBulkProgress');
+    progDiv.style.display='';
+    progDiv.innerHTML='<div style="background:var(--bg-secondary);padding:16px;border-radius:var(--radius-sm);text-align:center;color:var(--accent)"><i class="bx bx-loader-circle bx-spin" style="font-size:24px;display:block;margin-bottom:8px"></i>Processing... 15000+ rows bhi handle honge</div>';
+
+    setTimeout(function(){
+        try{
+            var reader=new FileReader();
+            reader.onload=function(e){
+                try{
+                    var t0=performance.now();
+                    var wb=XLSX.read(e.target.result,{type:'array'});
+                    var ws=wb.Sheets[wb.SheetNames[0]];
+                    var data=XLSX.utils.sheet_to_json(ws,{header:1,raw:false});
+
+                    if(!data||data.length<1){showToast('File empty hai','error');progDiv.innerHTML='';return;}
+
+                    // Existing bins set for fast lookup
+                    var existingBins={};
+                    DB.get('rack_master').forEach(function(r){existingBins[r.rack]=true;});
+
+                    // Detect column — find first column with "bin" or "rack" in header, or just use col 0
+                    var colIdx=0;
+                    var header0=String(data[0][0]||'').trim().toLowerCase();
+                    if(header0.indexOf('bin')>-1||header0.indexOf('rack')>-1||header0.indexOf('name')>-1){
+                        colIdx=0;
+                    }
+
+                    var startRow=0;
+                    // Check if first row is header
+                    var firstVal=String(data[0][colIdx]||'').trim().toLowerCase();
+                    if(firstVal.indexOf('bin')>-1||firstVal.indexOf('rack')>-1||firstVal.indexOf('name')>-1||firstVal.indexOf('header')>-1){
+                        startRow=1;
+                    }
+
+                    var added=0,duplicate=0,skipped=0;
+                    var userName=APP.currentUser?APP.currentUser.name:'Bulk Upload';
+
+                    for(var k=startRow;k<data.length;k++){
+                        var r=data[k];
+                        if(!r)continue;
+                        var binName=String(r[colIdx]||'').trim().toUpperCase();
+                        if(!binName){skipped++;continue;}
+                        if(existingBins[binName]){duplicate++;continue;}
+                        DB.add('rack_master',{rack:binName});
+                        existingBins[binName]=true; // Add to set so no dupes in same upload
+                        added++;
+                    }
+
+                    var t1=performance.now();
+                    var timeSec=((t1-t0)/1000).toFixed(1);
+
+                    var resHtml='<div style="background:var(--bg-secondary);padding:14px;border-radius:var(--radius-sm);border:1px solid var(--border)">';
+                    resHtml+='<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px">';
+                    resHtml+='<div style="text-align:center;flex:1;min-width:80px"><div style="font-size:24px;font-weight:800;color:var(--success)">'+added+'</div><div style="font-size:9px;color:var(--text-muted)">ADDED</div></div>';
+                    if(duplicate>0)resHtml+='<div style="text-align:center;flex:1;min-width:80px"><div style="font-size:24px;font-weight:800;color:var(--warning)">'+duplicate+'</div><div style="font-size:9px;color:var(--text-muted)">DUPLICATES</div></div>';
+                    if(skipped>0)resHtml+='<div style="text-align:center;flex:1;min-width:80px"><div style="font-size:24px;font-weight:800;color:var(--danger)">'+skipped+'</div><div style="font-size:9px;color:var(--text-muted)">SKIPPED</div></div>';
+                    resHtml+='<div style="text-align:center;flex:1;min-width:80px"><div style="font-size:24px;font-weight:800;color:var(--accent)">'+timeSec+'s</div><div style="font-size:9px;color:var(--text-muted)">TIME</div></div>';
+                    resHtml+='</div>';
+                    resHtml+='<div style="font-size:11px;color:var(--text-muted)"><i class="bx bx-check-circle" style="color:var(--success)"></i> Upload complete!</div>';
+                    resHtml+='</div>';
+                    progDiv.innerHTML=resHtml;
+
+                    logAction('Bin','BULK_UPLOAD',added+' bins added, '+duplicate+' duplicates, '+skipped+' skipped in '+timeSec+'s');
+                    showToast(added+' bins uploaded! ('+timeSec+'s)','success');
+
+                }catch(err){
+                    progDiv.innerHTML='<div style="background:rgba(255,107,107,0.1);padding:12px;border-radius:var(--radius-sm);color:var(--danger);font-size:12px"><i class="bx bx-error"></i> Error: '+esc(err.message)+'</div>';
+                    showToast('Excel error: '+err.message,'error');
+                }
+            };
+            reader.readAsArrayBuffer(fi.files[0]);
+        }catch(err){
+            progDiv.innerHTML='<div style="color:var(--danger);font-size:12px">'+esc(err.message)+'</div>';
         }
-        html += '</tbody></table></div></div>';
+    },150);
+}
+
+// ==================== MATERIAL MASTER ====================
+function renderMaterialMaster(){
+    var mats=DB.get('material_master');var pg=paginate(mats,APP.matPage,APP.matPerPage);
+    var h='<div class="section-header"><h2><i class="bx bx-label"></i> Material Master ('+mats.length+')</h2><div style="display:flex;gap:6px"><button class="btn btn-glass" onclick="exportTableExcel(\'material_master\',\'Material_Master\')"><i class="bx bx-download"></i> Excel</button><button class="btn btn-glass" onclick="showAddMaterial()"><i class="bx bx-plus"></i> Add</button></div></div>';
+    h+='<div class="search-box"><i class="bx bx-search"></i><input type="text" id="matSearch" placeholder="Search material, EAN..." oninput="searchMat()"></div>';
+    h+='<div id="matTable">'+buildMatTable(pg.items)+'</div>';
+    h+=renderPag(APP.matPage,pg.pages,'goMatPage');
+    setHtml(h);
+}
+function buildMatTable(mats){
+    var h='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>Description</th><th>EAN</th><th>Division</th><th>Brand</th><th>Actions</th></tr></thead><tbody>';
+    if(!mats.length)h+='<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:20px">No data</td></tr>';
+    else mats.forEach(function(m){h+='<tr><td><strong>'+esc(m.material)+'</strong></td><td>'+esc(m.description)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(m.ean)+'</td><td>'+esc(m.division)+'</td><td>'+esc(m.brand)+'</td><td><div class="table-actions"><button class="btn btn-glass btn-sm" onclick="editMaterial(\''+m.id+'\')"><i class="bx bx-edit"></i></button><button class="btn btn-danger btn-sm" onclick="deleteMaterial(\''+m.id+'\')"><i class="bx bx-trash"></i></button></div></td></tr>';});
+    h+='</tbody></table></div>';return h;
+}
+function goMatPage(p){APP.matPage=p;renderMaterialMaster();}
+function searchMat(){
+    var q=document.getElementById('matSearch').value.trim().toLowerCase();
+    var mats=DB.get('material_master');
+    if(q)mats=mats.filter(function(m){return(m.material||'').toLowerCase().indexOf(q)>-1||(m.ean||'').toLowerCase().indexOf(q)>-1;});
+    document.getElementById('matTable').innerHTML=buildMatTable(mats);
+}
+function showAddMaterial(){
+    var h='<div class="form-row"><div class="form-group"><label>Material Name <span class="req">*</span></label><input type="text" id="matName" class="form-input"></div><div class="form-group"><label>EAN <span class="req">*</span></label><input type="text" id="matEan" class="form-input"></div></div>';
+    h+='<div class="form-row"><div class="form-group"><label>Description</label><input type="text" id="matDesc" class="form-input"></div><div class="form-group"><label>Division</label><input type="text" id="matDiv" class="form-input"></div><div class="form-group"><label>Brand</label><input type="text" id="matBrand" class="form-input"></div></div>';
+    showModal('Add Material',h,'','<button class="btn btn-glass" onclick="closeModal()">Cancel</button><button class="btn btn-glass" onclick="saveMaterial()"><i class="bx bx-check"></i> Save</button>');
+}
+function saveMaterial(){
+    var name=document.getElementById('matName').value.trim(),ean=document.getElementById('matEan').value.trim();
+    if(!name||!ean){showToast('Fill required fields','error');return;}
+    DB.add('material_master',{material:name,ean:ean,description:document.getElementById('matDesc').value.trim(),division:document.getElementById('matDiv').value.trim(),brand:document.getElementById('matBrand').value.trim()});
+    logAction('Material','ADD',name);showToast('Material added!','success');closeModal();renderMaterialMaster();
+}
+function editMaterial(id){
+    var m=DB.find('material_master',id);if(!m)return;
+    var h='<div class="form-row"><div class="form-group"><label>Material Name</label><input type="text" id="emName" class="form-input" value="'+esc(m.material)+'"></div><div class="form-group"><label>EAN</label><input type="text" id="emEan" class="form-input" value="'+esc(m.ean)+'"></div></div>';
+    h+='<div class="form-row"><div class="form-group"><label>Description</label><input type="text" id="emDesc" class="form-input" value="'+esc(m.description||'')+'"></div><div class="form-group"><label>Division</label><input type="text" id="emDiv" class="form-input" value="'+esc(m.division||'')+'"></div><div class="form-group"><label>Brand</label><input type="text" id="emBrand" class="form-input" value="'+esc(m.brand||'')+'"></div></div>';
+    showModal('Edit Material',h,'','<button class="btn btn-glass" onclick="closeModal()">Cancel</button><button class="btn btn-glass" onclick="updateMaterial(\''+id+'\')"><i class="bx bx-check"></i> Update</button>');
+}
+function updateMaterial(id){
+    DB.update('material_master',id,{material:document.getElementById('emName').value.trim(),ean:document.getElementById('emEan').value.trim(),description:document.getElementById('emDesc').value.trim(),division:document.getElementById('emDiv').value.trim(),brand:document.getElementById('emBrand').value.trim()});
+    logAction('Material','UPDATE','Material '+id+' updated');showToast('Material updated!','success');closeModal();renderMaterialMaster();
+}
+function deleteMaterial(id){if(!confirm('Delete?'))return;DB.remove('material_master',id);showToast('Deleted','success');renderMaterialMaster();}
+
+// ==================== PICKING ====================
+function renderPicking(sub){
+    switch(sub){
+        case 'obd-upload':renderOBDUpload();break;
+        case 'picking-assign':renderPickingAssign();break;
+        case 'start-picking':renderStartPicking();break;
+        case 'picking-done':renderPickingDone();break;
+        default:renderOBDUpload();
+    }
+}
+
+// --- OBD Upload ---
+function renderOBDUpload(){
+    var obds=DB.get('obd_data').reverse();
+    var h='<div class="section-header"><h2><i class="bx bx-upload"></i> OBD Upload</h2></div>';
+    h+='<div class="card"><div class="card-title"><i class="bx bx-file"></i> Upload OBD (Bulk Excel)</div>';
+    h+='<label class="btn btn-glass" style="cursor:pointer;margin-bottom:12px"><i class="bx bx-upload"></i> Choose OBD File<input type="file" id="obdFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="document.getElementById(\'obdFName\').innerText=this.files[0].name"></label>';
+    h+='<div id="obdFName" style="font-size:11px;color:var(--text-muted);margin-bottom:8px">No file chosen</div>';
+    h+='<button class="btn btn-glass" onclick="processOBDUpload()"><i class="bx bx-check-double"></i> Upload OBDs</button>';
+    h+='<div style="background:var(--bg-secondary);padding:10px;border-radius:var(--radius-sm);font-size:11px;color:var(--text-muted);border:1px dashed var(--warning);margin-top:10px"><strong style="color:var(--warning)">Excel Format:</strong><br>OBD No | Material | EAN | Qty | Customer</div>';
+    h+='</div>';
+    h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-list-ul"></i> Uploaded OBDs ('+obds.length+')</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Materials</th><th>Total Qty</th><th>Status</th></tr></thead><tbody>';
+    if(!obds.length)h+='<tr><td colspan="4" style="text-align:center;color:var(--text-muted);padding:20px">No OBDs</td></tr>';
+    else obds.forEach(function(o){
+        var totalQty=0;(o.materials||[]).forEach(function(m){totalQty+=m.qty;});
+        h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(o.obdNo)+'</td><td><span class="badge badge-info">'+(o.materials||[]).length+'</span></td><td><strong>'+totalQty+'</strong></td><td><span class="badge '+(o.status==='Picking Done'?'badge-success':(o.status==='Assigned'?'badge-warning':'badge-accent'))+'">'+esc(o.status||'Pending')+'</span></td></tr>';
+    });
+    h+='</tbody></table></div></div>';
+    setHtml(h);
+}
+function processOBDUpload(){
+    var fi=document.getElementById('obdFile');if(!fi||!fi.files[0]){showToast('Select file','error');return;}
+    var reader=new FileReader();
+    reader.onload=function(e){
+        try{
+            var wb=XLSX.read(e.target.result,{type:'array'});var ws=wb.Sheets[wb.SheetNames[0]];var data=XLSX.utils.sheet_to_json(ws,{header:1});
+            if(!data.length){showToast('Empty file','error');return;}
+            var startR=(String(data[0][0]||'').toLowerCase().indexOf('obd')>-1)?1:0;
+            var obdMap={},count=0;
+            for(var k=startR;k<data.length;k++){
+                var r=data[k];if(!r||!r[0])continue;
+                var obdNo=String(r[0]||'').trim().toUpperCase();
+                var mat=String(r[1]||'').trim();
+                var ean=String(r[2]||'').trim();
+                var qty=parseInt(r[3])||0;
+                var cust=String(r[4]||'').trim();
+                if(!obdNo||!mat||!qty)continue;
+                if(!obdMap[obdNo]){obdMap[obdNo]={materials:[],customer:cust};count++;}
+                obdMap[obdNo].materials.push({material:mat,ean:ean,qty:qty,pickedQty:0});
+            }
+            for(var key in obdMap){
+                DB.add('obd_data',{obdNo:key,customer:obdMap[key].customer,materials:obdMap[key].materials,status:'Pending',createdAt:new Date().toISOString()});
+            }
+            logAction('Picking','OBD_UPLOAD',count+' OBDs uploaded');
+            showToast(count+' OBDs uploaded!','success');
+            renderOBDUpload();
+        }catch(err){showToast('Excel error: '+err.message,'error');}
+    };
+    reader.readAsArrayBuffer(fi.files[0]);
+}
+
+// --- Picking Assign ---
+function renderPickingAssign(){
+    var obds=DB.get('obd_data').filter(function(o){return o.status==='Pending';});
+    var assigned=DB.filter('picking_assignments',function(a){return a.status==='Assigned';});
+    var h='<div class="section-header"><h2><i class="bx bx-user-plus"></i> Picking Assign</h2></div>';
+
+    // Unassigned OBDs
+    h+='<div class="card"><div class="card-title"><i class="bx bx-list-ul"></i> Unassigned OBDs ('+obds.length+')</div>';
+    if(!obds.length)h+='<div style="color:var(--text-muted);padding:16px;text-align:center">All OBDs assigned</div>';
+    else{
+        h+='<div class="form-group" style="margin-bottom:12px"><label>Select User <span class="req">*</span></label><select id="pickAssignUser" class="form-input" style="max-width:300px"><option value="">-- Select User --</option>';
+        var users=DB.get('users').filter(function(u){return u.role==='Picker'||u.role==='Manager';});
+        users.forEach(function(u){h+='<option value="'+u.id+'" data-name="'+esc(u.name)+'">'+esc(u.name)+' ('+esc(u.role)+')</option>';});
+        h+='</select></div>';
+        h+='<div class="chk-list" id="obdChkList">';
+        obds.forEach(function(o){
+            var totalQ=0;(o.materials||[]).forEach(function(m){totalQ+=m.qty;});
+            h+='<label class="chk-list-item"><input type="checkbox" class="obd-chk" value="'+o.id+'" data-no="'+esc(o.obdNo)+'"><span><strong style="color:var(--accent);font-family:var(--font-display);font-size:11px">'+esc(o.obdNo)+'</strong> — '+(o.materials||[]).length+' mats, '+totalQ+' qty</span></label>';
+        });
+        h+='</div>';
+        h+='<div class="form-actions"><button class="btn btn-glass" onclick="doPickingAssign()"><i class="bx bx-check-double"></i> Assign Selected</button></div>';
+    }
+    h+='</div>';
+
+    // Assigned
+    if(assigned.length){
+        h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-user-check"></i> Assigned ('+assigned.length+')</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Assigned To</th><th>Materials</th><th>Actions</th></tr></thead><tbody>';
+        assigned.forEach(function(a){
+            var obd=DB.find('obd_data',a.obdId);
+            h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(obd?obd.obdNo:'-')+'</td><td>'+esc(a.assignedToName)+'</td><td><span class="badge badge-info">'+(obd?obd.materials.length:0)+'</span></td><td><button class="btn btn-danger btn-sm" onclick="unassignPicking(\''+a.id+'\')"><i class="bx bx-user-minus"></i> Unassign</button></td></tr>';
+        });
+        h+='</tbody></table></div></div>';
+    }
+    setHtml(h);
+}
+function doPickingAssign(){
+    var userSel=document.getElementById('pickAssignUser');if(!userSel.value){showToast('Select a user','error');return;}
+    var userName=userSel.options[userSel.selectedIndex].getAttribute('data-name');
+    var checks=document.querySelectorAll('.obd-chk:checked');
+    if(!checks.length){showToast('Select at least one OBD','error');return;}
+    var count=0;
+    checks.forEach(function(chk){
+        var obdId=chk.value,obdNo=chk.getAttribute('data-no');
+        DB.add('picking_assignments',{obdId:obdId,obdNo:obdNo,assignedTo:userSel.value,assignedToName:userName,status:'Assigned',assignedAt:new Date().toISOString()});
+        DB.update('obd_data',obdId,{status:'Assigned'});
+        count++;
+    });
+    logAction('Picking','ASSIGN',count+' OBDs assigned to '+userName);
+    showToast(count+' OBDs assigned to '+userName,'success');
+    renderPickingAssign();
+}
+function unassignPicking(assignId){
+    if(!confirm('Unassign?'))return;
+    var a=DB.find('picking_assignments',assignId);if(!a)return;
+    DB.update('picking_assignments',assignId,{status:'Unassigned'});
+    DB.update('obd_data',a.obdId,{status:'Pending'});
+    logAction('Picking','UNASSIGN','OBD '+a.obdNo+' unassigned');
+    showToast('Unassigned','success');renderPickingAssign();
+}
+
+// --- Start Picking ---
+function renderStartPicking(){
+    if(!APP.currentUser)return;
+    var myAssign=DB.filter('picking_assignments',function(a){return a.assignedTo===APP.currentUser.id&&a.status==='Assigned';});
+    var h='<div class="section-header"><h2><i class="bx bx-box"></i> My Picking</h2></div>';
+    if(!myAssign.length){h+='<div class="card"><div class="empty-state"><i class="bx bx-inbox"></i><p>No OBDs assigned to you</p></div></div>';setHtml(h);return;}
+
+    // Show OBD list
+    h+='<div class="card"><div class="card-title"><i class="bx bx-list-ul"></i> Your OBDs ('+myAssign.length+')</div>';
+    myAssign.forEach(function(a){
+        var obd=DB.find('obd_data',a.obdId);if(!obd)return;
+        var totalQ=0;(obd.materials||[]).forEach(function(m){totalQ+=m.qty;});
+        h+='<div class="inv-list-item" onclick="openPickingOBD(\''+a.obdId+'\')"><div class="ili-left"><span class="ili-invno">'+esc(obd.obdNo)+'</span><span class="ili-info">'+(obd.materials||[]).length+' materials | '+totalQ+' total qty</span></div><span class="badge badge-warning">Pick</span></div>';
+    });
+    h+='</div>';
+    setHtml(h);
+}
+
+function openPickingOBD(obdId){
+    var obd=DB.find('obd_data',obdId);if(!obd)return;
+    window._pickData={obdId:obdId,obdNo:obd.obdNo,materials:JSON.parse(JSON.stringify(obd.materials)),pickedLocations:{}};
+
+    var h='<div style="margin-bottom:12px"><strong style="color:var(--accent);font-family:var(--font-display)">'+esc(obd.obdNo)+'</strong></div>';
+    h+='<div class="card-title"><i class="bx bx-package"></i> Materials — Click to see locations</div>';
+    h+='<div class="mat-cards-grid" id="pickMatCards">';
+    obd.materials.forEach(function(m,idx){
+        var picked=(window._pickData.pickedLocations[m.material]||[]).length>0;
+        h+='<div class="mat-card '+(picked?'picked':'')+'" onclick="showPickLocations('+idx+')">';
+        h+='<div class="mc-name"><i class="bx bx-box" style="color:var(--accent)"></i> '+esc(m.material)+'</div>';
+        h+='<div class="mc-ean">'+esc(m.ean)+'</div>';
+        h+='<div class="mc-qty">Need: <strong>'+m.qty+'</strong></div>';
+        h+='<div class="mc-status">'+(picked?'<span class="status-dot green"></span> Picked':'<span class="status-dot yellow"></span> Pending')+'</div>';
+        h+='</div>';
+    });
+    h+='</div>';
+    h+='<div class="form-actions"><button class="btn btn-glass" onclick="submitPicking()"><i class="bx bx-check-double"></i> Submit Picking</button></div>';
+    showModal('Picking — '+obd.obdNo,h,'xl','<button class="btn btn-glass" onclick="closeModal()">Cancel</button>');
+}
+
+function showPickLocations(matIdx){
+    var pd=window._pickData;if(!pd)return;
+    var mat=pd.materials[matIdx];
+    // Find locations for this material
+    var locs=DB.filter('location_master',function(l){return l.ean===mat.ean&&l.quantity>0;});
+    if(!locs.length){
+        // Ask admin to assign location
+        var h='<div style="text-align:center;padding:20px"><i class="bx bx-map-pin" style="font-size:40px;color:var(--warning);opacity:.5"></i><p style="color:var(--text-muted);margin:10px 0">No stock found for <strong>'+esc(mat.material)+'</strong> at any location.</p>';
+        h+='<div class="form-group"><label>Reason</label><textarea id="pickNoLocReason" class="form-input" placeholder="Why material not found?"></textarea></div>';
+        h+='<div class="form-group"><label>Request Alternative Location</label><input type="text" id="pickAltLoc" class="form-input" placeholder="RACK-XXX"></div>';
+        h+='</div>';
+        showModal('No Location Found',h,'sm',
+            '<button class="btn btn-glass" onclick="closeModal();openPickingOBD(\''+pd.obdId+'\')">Back</button>'+
+            '<button class="btn btn-glass" onclick="requestAdminLocation('+matIdx+')"><i class="bx bx-send"></i> Request Admin</button>');
+        return;
+    }
+    // Show location cards
+    var totalPicked=0;
+    (pd.pickedLocations[mat.material]||[]).forEach(function(p){totalPicked+=p.qty;});
+    var remaining=mat.qty-totalPicked;
+
+    var h='<div style="margin-bottom:12px"><strong>'+esc(mat.material)+'</strong> | Need: <span style="color:var(--accent)">'+mat.qty+'</span> | Already Picked: <span style="color:var(--success)">'+totalPicked+'</span> | Remaining: <span style="color:var(--warning)">'+remaining+'</span></div>';
+    h+='<div class="loc-cards-grid">';
+    locs.forEach(function(l,idx){
+        var alreadyPicked=0;
+        (pd.pickedLocations[mat.material]||[]).forEach(function(p){if(p.rack===l.rack)alreadyPicked+=p.qty;});
+        var avail=l.quantity-alreadyPicked;
+        if(avail<0)avail=0;
+        var isPicked=alreadyPicked>0;
+        h+='<div class="loc-card '+(isPicked?'lc-picked':'')+'">';
+        h+='<div class="lc-rack"><i class="bx bx-map-pin"></i> '+esc(l.rack)+'</div>';
+        h+='<div class="lc-mat">'+esc(l.material)+'</div>';
+        h+='<div class="lc-avail">Available: <strong>'+avail+'</strong></div>';
+        if(avail>0&&remaining>0){
+            var maxPick=Math.min(avail,remaining);
+            h+='<input type="number" id="pickQty_'+idx+'" value="'+maxPick+'" min="1" max="'+maxPick+'" placeholder="Qty to pick">';
+            h+='<button class="btn btn-glass btn-sm" style="width:100%;margin-top:6px;justify-content:center" onclick="doPickFromLocation('+matIdx+','+idx+',\''+esc(l.rack)+'\','+avail+')"><i class="bx bx-check"></i> Pick</button>';
+        }else if(isPicked){
+            h+='<div style="text-align:center;color:var(--success);font-size:11px;margin-top:6px"><i class="bx bx-check-circle"></i> Picked '+alreadyPicked+'</div>';
+        }else{
+            h+='<div style="text-align:center;color:var(--text-muted);font-size:11px;margin-top:6px">Not available</div>';
+        }
+        h+='</div>';
+    });
+    h+='</div>';
+    showModal('Pick Locations — '+mat.material,h,'lg',
+        '<button class="btn btn-glass" onclick="closeModal();openPickingOBD(\''+pd.obdId+'\')"><i class="bx bx-arrow-back"></i> Back</button>');
+}
+
+function doPickFromLocation(matIdx,locIdx,rack,avail){
+    var pd=window._pickData;if(!pd)return;
+    var mat=pd.materials[matIdx];
+    var qtyInput=document.getElementById('pickQty_'+locIdx);
+    var qty=parseInt(qtyInput?qtyInput.value:0)||0;
+    if(qty<=0){showToast('Enter quantity','error');return;}
+    if(qty>avail){showToast('Cannot pick more than available','error');return;}
+    var totalPicked=0;
+    (pd.pickedLocations[mat.material]||[]).forEach(function(p){totalPicked+=p.qty;});
+    if(totalPicked+qty>mat.qty){showToast('Exceeds required quantity','error');return;}
+
+    if(!pd.pickedLocations[mat.material])pd.pickedLocations[mat.material]=[];
+    pd.pickedLocations[mat.material].push({rack:rack,qty:qty,ean:mat.ean,material:mat.material});
+    showToast('Picked '+qty+' from '+rack,'success');
+    closeModal();openPickingOBD(pd.obdId);
+}
+
+function requestAdminLocation(matIdx){
+    var pd=window._pickData;if(!pd)return;
+    var mat=pd.materials[matIdx];
+    var reason=document.getElementById('pickNoLocReason').value.trim();
+    var altLoc=document.getElementById('pickAltLoc').value.trim();
+    addNotif('Admin: Location needed for '+mat.material+' (OBD: '+pd.obdNo+'). Reason: '+(reason||'Not found')+'. Alt: '+(altLoc||'N/A'),'warning');
+    logAction('Picking','LOCATION_REQUEST','Material '+mat.material+' location requested. Alt: '+(altLoc||'N/A'));
+    showToast('Location request sent to admin','success');
+    closeModal();openPickingOBD(pd.obdId);
+}
+
+function submitPicking(){
+    var pd=window._pickData;if(!pd)return;
+    var allPicked=true;
+    pd.materials.forEach(function(m){
+        var total=0;(pd.pickedLocations[m.material]||[]).forEach(function(p){total+=p.qty;});
+        if(total<m.qty)allPicked=false;
+    });
+    if(!allPicked&&!confirm('Some materials not fully picked. Submit anyway?'))return;
+
+    var pickingDetails=[];
+    pd.materials.forEach(function(m){
+        var locs=pd.pickedLocations[m.material]||[];
+        var totalPicked=0;locs.forEach(function(l){totalPicked+=l.qty;});
+        pickingDetails.push({material:m.material,ean:m.ean,requiredQty:m.qty,pickedQty:totalPicked,locations:locs,short:m.qty-totalPicked});
+    });
+
+    DB.add('picking_done',{obdId:pd.obdId,obdNo:pd.obdNo,pickedBy:APP.currentUser.id,pickedByName:APP.currentUser.name,pickedAt:new Date().toISOString(),details:pickingDetails,status:'Done'});
+    DB.update('obd_data',pd.obdId,{status:'Picking Done'});
+    // Update assignment
+    var assign=DB.filter('picking_assignments',function(a){return a.obdId===pd.obdId&&a.status==='Assigned';});
+    assign.forEach(function(a){DB.update('picking_assignments',a.id,{status:'Done'});});
+
+    // Deduct from location master
+    pickingDetails.forEach(function(d){
+        d.locations.forEach(function(loc){
+            var locRecords=DB.filter('location_master',function(l){return l.rack===loc.rack&&l.ean===loc.ean&&l.quantity>0;});
+            var remaining=loc.qty;
+            locRecords.forEach(function(lr){
+                if(remaining<=0)return;
+                var deduct=Math.min(lr.quantity,remaining);
+                DB.update('location_master',lr.id,{quantity:lr.quantity-deduct});
+                remaining-=deduct;
+            });
+            // Delete location records with 0 qty
+            var zeroLocs=DB.filter('location_master',function(l){return l.rack===loc.rack&&l.ean===loc.ean&&l.quantity<=0;});
+            zeroLocs.forEach(function(zl){DB.remove('location_master',zl.id);});
+        });
+    });
+
+    // Create short report if any
+    var shorts=pickingDetails.filter(function(d){return d.short>0;});
+    if(shorts.length>0){
+        DB.add('short_reports',{shortNo:DB.shortNo(),vehicleNo:pd.obdNo,lrNo:'OBD',unloadNo:pd.obdNo,items:shorts.map(function(s){return{invoiceNo:pd.obdNo,material:s.material,ean:s.ean,expected:s.requiredQty,scanned:s.pickedQty,short:s.short};}),posted:false,createdAt:new Date().toISOString()});
     }
 
-    if (!html) {
-        html = '<div class="card" style="margin-top:16px"><div class="empty-state"><i class="bx bx-search-alt"></i><p>No results found for "' + escapeHtml(search) + '"</p></div></div>';
+    // Create picking report
+    var reportRows=[];
+    pickingDetails.forEach(function(d){
+        d.locations.forEach(function(loc){
+            reportRows.push({obdNo:pd.obdNo,material:d.material,ean:d.ean,rack:loc.rack,qty:loc.qty,pickedBy:APP.currentUser.name,pickedAt:new Date().toISOString()});
+        });
+    });
+    DB.add('picking_reports',{reportNo:'PR-'+Date.now().toString(36).toUpperCase(),obdNo:pd.obdNo,rows:reportRows,createdAt:new Date().toISOString()});
+
+    logAction('Picking','DONE','OBD '+pd.obdNo+' picked by '+APP.currentUser.name);
+    addNotif('OBD '+pd.obdNo+' picking completed by '+APP.currentUser.name,'success');
+    showToast('Picking completed for '+pd.obdNo,'success');
+    closeModal();renderStartPicking();
+}
+
+// --- Picking Done ---
+function renderPickingDone(){
+    var done=DB.get('picking_done').reverse();
+    var h='<div class="section-header"><h2><i class="bx bx-check-circle"></i> Picking Done ('+done.length+')</h2>';
+    h+='<div style="display:flex;gap:6px"><button class="btn btn-glass" onclick="exportPickingDoneExcel()"><i class="bx bx-download"></i> Excel</button><button class="btn btn-glass" onclick="exportPickingDonePDF()"><i class="bx bx-file"></i> PDF</button></div></div>';
+    h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Materials</th><th>Picked By</th><th>Time</th><th>Short</th><th>Actions</th></tr></thead><tbody>';
+    if(!done.length)h+='<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:24px">No picking done yet</td></tr>';
+    else done.forEach(function(d){
+        var shortCount=0;(d.details||[]).forEach(function(det){if(det.short>0)shortCount++;});
+        h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(d.obdNo)+'</td><td><span class="badge badge-info">'+(d.details||[]).length+'</span></td><td>'+esc(d.pickedByName)+'</td><td style="font-size:11px;color:var(--text-muted)">'+fmtDT(d.pickedAt)+'</td><td>'+(shortCount?'<span class="badge badge-danger">'+shortCount+' short</span>':'<span class="badge badge-success">Complete</span>')+'</td><td><button class="btn btn-glass btn-sm" onclick="viewPickingDoneDetail(\''+d.id+'\')"><i class="bx bx-eye"></i></button></td></tr>';
+    });
+    h+='</tbody></table></div>';
+    setHtml(h);
+}
+function viewPickingDoneDetail(id){
+    var d=DB.find('picking_done',id);if(!d)return;
+    var h='<div style="margin-bottom:12px"><strong>OBD:</strong> <span style="color:var(--accent)">'+esc(d.obdNo)+'</span> | <strong>By:</strong> '+esc(d.pickedByName)+' | <strong>Time:</strong> '+fmtDT(d.pickedAt)+'</div>';
+    h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>EAN</th><th>Required</th><th>Picked</th><th>Short</th><th>Locations</th></tr></thead><tbody>';
+    (d.details||[]).forEach(function(det){
+        var locStr=(det.locations||[]).map(function(l){return l.rack+':'+l.qty;}).join(', ');
+        h+='<tr class="'+(det.short>0?'scan-row-red':'scan-row-green')+'"><td>'+esc(det.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(det.ean)+'</td><td>'+det.requiredQty+'</td><td><strong>'+det.pickedQty+'</strong></td><td class="'+(det.short>0?'qty-mismatch':'qty-match')+'">'+(det.short>0?'-'+det.short:'0')+'</td><td style="font-size:11px">'+esc(locStr)+'</td></tr>';
+    });
+    h+='</tbody></table></div>';
+    showModal('Picking Detail — '+d.obdNo,h,'lg','<button class="btn btn-glass" onclick="closeModal()">Close</button>');
+}
+function exportPickingDoneExcel(){
+    var done=DB.get('picking_done');var rows=[['OBD No','Material','EAN','Required','Picked','Short','Picked By','Time']];
+    done.forEach(function(d){(d.details||[]).forEach(function(det){rows.push([d.obnNo||d.obdNo,det.material,det.ean,det.requiredQty,det.pickedQty,det.short,det.pickedByName,fmtDT(d.pickedAt)]);});});
+    var ws=XLSX.utils.aoa_to_sheet(rows);var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'PickingDone');XLSX.writeFile(wb,'Picking_Done_'+today()+'.xlsx');showToast('Excel downloaded!','success');
+}
+function exportPickingDonePDF(){
+    var done=DB.get('picking_done');var rows=[];
+    done.forEach(function(d){(d.details||[]).forEach(function(det){rows.push([d.obdNo,det.material,det.ean,det.requiredQty,det.pickedQty,det.short,det.pickedByName,fmtDT(d.pickedAt)]);});});
+    var pdf=new jspdf.jsPDF({orientation:'landscape'});pdf.setFontSize(14);pdf.text('Picking Done Report — VIP INDUSTRIES MD20',14,15);pdf.setFontSize(8);pdf.text('Generated: '+fmtDT(new Date()),14,22);
+    pdf.autoTable({startY:28,head:[['OBD No','Material','EAN','Req','Picked','Short','By','Time']],body:rows,theme:'grid',headStyles:{fillColor:[0,180,120]},styles:{fontSize:7}});
+    pdf.save('Picking_Done_'+today()+'.pdf');showToast('PDF downloaded!','success');
+}
+
+// ==================== LOADING ====================
+function renderLoading(sub){
+    switch(sub){
+        case 'loading-assign':renderLoadingAssign();break;
+        case 'start-loading':renderStartLoading();break;
+        case 'loading-done':renderLoadingDone();break;
+        case 'qty-mismatch':renderQtyMismatch();break;
+        default:renderLoadingAssign();
     }
-    container.innerHTML = html;
+}
+
+// --- Loading Assign ---
+function renderLoadingAssign(){
+    // Get loading pending vehicles (entered by security for loading)
+    var loadVehs=DB.filter('vehicles',function(v){return v.vehicleType==='Loading'&&(v.status==='Loading Pending'||v.status==='Loading Assigned');});
+    // Get picking done OBDs
+    var pickedOBDs=DB.get('picking_done').filter(function(p){return p.status==='Done';});
+    // Get assigned loadings
+    var assigned=DB.filter('loading_assignments',function(a){return a.status==='Assigned';});
+
+    var h='<div class="section-header"><h2><i class="bx bx-truck"></i> Loading Assign</h2></div>';
+
+    // Unassigned loading vehicles
+    var unassigned=loadVehs.filter(function(v){return v.status==='Loading Pending';});
+    h+='<div class="card"><div class="card-title"><i class="bx bx-clock"></i> Pending Loading Vehicles ('+unassigned.length+')</div>';
+    if(!unassigned.length)h+='<div style="color:var(--text-muted);padding:16px;text-align:center">No pending vehicles</div>';
+    else{
+        h+='<div class="form-group" style="margin-bottom:12px"><label>Select User <span class="req">*</span></label><select id="loadAssignUser" class="form-input" style="max-width:300px"><option value="">-- Select User --</option>';
+        DB.get('users').filter(function(u){return u.role==='Loader'||u.role==='Manager';}).forEach(function(u){h+='<option value="'+u.id+'" data-name="'+esc(u.name)+'">'+esc(u.name)+' ('+esc(u.role)+')</option>';});
+        h+='</select></div>';
+        h+='<div class="form-group" style="margin-bottom:12px"><label>Vehicle Number (from Security Entry) <span class="req">*</span></label>';
+        h+='<select id="loadVehSelect" class="form-input" style="max-width:300px"><option value="">-- Select Vehicle --</option>';
+        unassigned.forEach(function(v){h+='<option value="'+v.id+'" data-no="'+esc(v.vehicleNo)+'">'+esc(v.vehicleNo)+' | '+esc(v.transportName||'')+'</option>';});
+        h+='</select></div>';
+        h+='<div class="card-title" style="margin-top:12px"><i class="bx bx-box"></i> Select OBDs to Load</div>';
+        h+='<div class="chk-list" id="loadObdChkList" style="max-height:200px;overflow-y:auto">';
+        if(!pickedOBDs.length)h+='<div style="padding:12px;text-align:center;color:var(--text-muted)">No picked OBDs available</div>';
+        else pickedOBDs.forEach(function(o){
+            var totalQ=0;(o.details||[]).forEach(function(d){totalQ+=d.pickedQty;});
+            h+='<label class="chk-list-item"><input type="checkbox" class="load-obd-chk" value="'+o.id+'" data-no="'+esc(o.obdNo)+'"><span><strong style="color:var(--accent);font-family:var(--font-display);font-size:11px">'+esc(o.obdNo)+'</strong> — '+(o.details||[]).length+' mats, '+totalQ+' qty</span></label>';
+        });
+        h+='</div>';
+        h+='<div class="form-actions"><button class="btn btn-glass" onclick="doLoadingAssign()"><i class="bx bx-check-double"></i> Assign Loading</button></div>';
+    }
+    h+='</div>';
+
+    // Assigned
+    if(assigned.length){
+        h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-user-check"></i> Assigned Loadings ('+assigned.length+')</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>Load No</th><th>Vehicle</th><th>User</th><th>OBDs</th><th>Actions</th></tr></thead><tbody>';
+        assigned.forEach(function(a){
+            h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(a.loadNo)+'</td><td>'+esc(a.vehicleNo)+'</td><td>'+esc(a.assignedToName)+'</td><td><span class="badge badge-info">'+(a.obdIds||[]).length+'</span></td><td><button class="btn btn-danger btn-sm" onclick="unassignLoading(\''+a.id+'\')"><i class="bx bx-user-minus"></i> Unassign</button></td></tr>';
+        });
+        h+='</tbody></table></div></div>';
+    }
+    setHtml(h);
+}
+function doLoadingAssign(){
+    var userSel=document.getElementById('loadAssignUser');
+    var vehSel=document.getElementById('loadVehSelect');
+    if(!userSel.value){showToast('Select user','error');return;}
+    if(!vehSel.value){showToast('Select vehicle','error');return;}
+    var userName=userSel.options[userSel.selectedIndex].getAttribute('data-name');
+    var vehicleNo=vehSel.options[vehSel.selectedIndex].getAttribute('data-no');
+    var checks=document.querySelectorAll('.load-obd-chk:checked');
+    if(!checks.length){showToast('Select at least one OBD','error');return;}
+    var loadNo=DB.loadNo();
+    var obdIds=[],obdNos=[];
+    checks.forEach(function(chk){obdIds.push(chk.value);obdNos.push(chk.getAttribute('data-no'));});
+    DB.add('loading_assignments',{loadNo:loadNo,vehicleId:vehSel.value,vehicleNo:vehicleNo,obdIds:obdIds,obdNos:obdNos,assignedTo:userSel.value,assignedToName:userName,status:'Assigned',assignedAt:new Date().toISOString()});
+    DB.update('vehicles',vehSel.value,{status:'Loading Assigned'});
+    logAction('Loading','ASSIGN',loadNo+' assigned to '+userName+' for vehicle '+vehicleNo+' with '+obdIds.length+' OBDs');
+    showToast('Loading assigned! '+obdIds.length+' OBDs','success');
+    renderLoadingAssign();
+}
+function unassignLoading(assignId){
+    if(!confirm('Unassign?'))return;
+    var a=DB.find('loading_assignments',assignId);if(!a)return;
+    DB.update('loading_assignments',assignId,{status:'Unassigned'});
+    if(a.vehicleId)DB.update('vehicles',a.vehicleId,{status:'Loading Pending'});
+    logAction('Loading','UNASSIGN','Loading '+a.loadNo+' unassigned');
+    showToast('Unassigned','success');renderLoadingAssign();
+}
+
+// --- Start Loading ---
+function renderStartLoading(){
+    if(!APP.currentUser)return;
+    var myAssign=DB.filter('loading_assignments',function(a){return a.assignedTo===APP.currentUser.id&&a.status==='Assigned';});
+    var h='<div class="section-header"><h2><i class="bx bx-truck"></i> My Loading</h2></div>';
+    if(!myAssign.length){h+='<div class="card"><div class="empty-state"><i class="bx bx-inbox"></i><p>No loading assigned to you</p></div></div>';setHtml(h);return;}
+    myAssign.forEach(function(a){
+        h+='<div class="card" style="margin-bottom:12px"><div class="card-title"><i class="bx bxs-truck"></i> '+esc(a.vehicleNo)+' — '+esc(a.loadNo)+'</div>';
+        h+='<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">';
+        (a.obdNos||[]).forEach(function(n){h+='<span class="badge badge-info">'+esc(n)+'</span>';});
+        h+='</div>';
+        if(chkAct('canLoad'))h+='<button class="btn btn-glass" onclick="startLoadingScan(\''+a.id+'\')"><i class="bx bx-scan"></i> Start Loading</button>';
+        h+='</div>';
+    });
+    setHtml(h);
+}
+function startLoadingScan(assignId){
+    var a=DB.find('loading_assignments',assignId);if(!a)return;
+    // Build expected materials from all OBDs
+    var expected=[];
+    (a.obdIds||[]).forEach(function(oid){
+        var pd=DB.find('picking_done',oid);
+        if(pd){(pd.details||[]).forEach(function(d){expected.push({obdNo:d.obdNo,material:d.material,ean:d.ean,qty:d.pickedQty,scannedQty:0,scanned:false});});}
+    });
+    if(!expected.length){showToast('No materials to load','error');return;}
+    window._loadData={assignId:assignId,loadNo:a.loadNo,vehicleNo:a.vehicleNo,expected:expected,scannedItems:[]};
+
+    var h='<div style="margin-bottom:12px"><strong style="color:var(--accent)">'+esc(a.vehicleNo)+'</strong> — '+esc(a.loadNo)+'</div>';
+    h+='<div class="search-box" style="max-width:100%;margin-bottom:12px"><i class="bx bx-search"></i><input type="text" id="scanLoadInput" placeholder="Scan material / EAN..." onkeydown="if(event.key===\'Enter\')addScanLoadItem()"></div>';
+    h+='<div style="display:flex;gap:6px;margin-bottom:12px"><button class="btn btn-glass btn-sm" onclick="openScannerForLoad()"><i class="bx bx-qr"></i> Scanner</button><button class="btn btn-glass btn-sm" onclick="addScanLoadItem()"><i class="bx bx-plus"></i> Add</button></div>';
+    h+='<div class="table-wrapper" style="max-height:350px;overflow-y:auto"><table class="data-table"><thead><tr><th>#</th><th>OBD</th><th>Material</th><th>EAN</th><th>Expected</th><th>Scanned</th><th>Match</th></tr></thead><tbody id="scanLoadBody"></tbody></table></div>';
+    h+='<div class="form-actions" style="margin-top:14px"><button class="btn btn-glass" onclick="submitLoading()"><i class="bx bx-check-double"></i> Submit Loading</button></div>';
+    showModal('Loading Scan — '+a.vehicleNo,h,'xl','<button class="btn btn-glass" onclick="closeModal()">Cancel</button>');
+    renderScanLoadTable();
+}
+function openScannerForLoad(){
+    APP.scanCallback=function(code){document.getElementById('scanLoadInput').value=code;addScanLoadItem();};
+    document.getElementById('scannerModal').style.display='flex';focusForBluetoothScanner();
+}
+function addScanLoadItem(){
+    var input=document.getElementById('scanLoadInput');if(!input)return;
+    var val=input.value.trim().toUpperCase();input.value='';if(!val)return;
+    var ld=window._loadData;if(!ld)return;
+    var found=null;
+    ld.expected.forEach(function(e){if(!found&&(e.ean&&e.ean.toUpperCase()===val||e.material.toUpperCase()===val)){found=e;}});
+    if(found){found.scannedQty++;found.scanned=true;ld.scannedItems.push({ean:val,material:found.material,match:true,obdNo:found.obdNo,time:new Date().toISOString()});}
+    else{ld.scannedItems.push({ean:val,material:'UNKNOWN',match:false,obdNo:'-',time:new Date().toISOString()});}
+    renderScanLoadTable();
+}
+function renderScanLoadTable(){
+    var ld=window._loadData;if(!ld)return;
+    var body=document.getElementById('scanLoadBody');if(!body)return;
+    var h='';
+    ld.expected.forEach(function(e,idx){
+        var cls=e.scanned?(e.scannedQty<=e.qty?'scan-row-green':'scan-row-red'):'';
+        var status=e.scanned?(e.scannedQty<=e.qty?'<span class="badge badge-success">Match</span>':'<span class="badge badge-danger">Excess</span>'):'<span class="badge badge-warning">Pending</span>';
+        h+='<tr class="'+cls+'"><td>'+(idx+1)+'</td><td style="font-size:11px">'+esc(e.obdNo)+'</td><td>'+esc(e.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(e.ean)+'</td><td>'+e.qty+'</td><td><strong>'+(e.scannedQty||0)+'</strong></td><td>'+status+'</td></tr>';
+    });
+    ld.scannedItems.filter(function(s){return!s.match;}).forEach(function(s){
+        h+='<tr class="scan-row-red"><td>-</td><td>'+esc(s.obdNo)+'</td><td>UNKNOWN</td><td style="font-family:var(--font-display);font-size:10px">'+esc(s.ean)+'</td><td>0</td><td>1</td><td><span class="badge badge-danger">Wrong</span></td></tr>';
+    });
+    body.innerHTML=h;
+}
+function submitLoading(){
+    var ld=window._loadData;if(!ld)return;
+    var hasScan=ld.expected.some(function(e){return e.scanned;});
+    if(!hasScan){showToast('Scan at least one material','error');return;}
+    var materials=[];var wrongItems=[];
+    ld.expected.forEach(function(e){
+        materials.push({obdNo:e.obdNo,material:e.material,ean:e.ean,expectedQty:e.qty,scannedQty:e.scannedQty,diff:e.qty-e.scannedQty});
+    });
+    ld.scannedItems.filter(function(s){return!s.match;}).forEach(function(s){
+        materials.push({obdNo:'-',material:'UNKNOWN',ean:s.ean,expectedQty:0,scannedQty:1,diff:-1});
+        wrongItems.push(s);
+    });
+
+    DB.add('loaded_vehicles',{loadNo:ld.loadNo,vehicleNo:ld.vehicleNo,loadedBy:APP.currentUser.id,loadedByName:APP.currentUser.name,loadedAt:new Date().toISOString(),materials:materials,status:'Loaded'});
+    DB.update('loading_assignments',ld.assignId,{status:'Done'});
+    // Update vehicle
+    var vehs=DB.filter('vehicles',function(v){return v.vehicleNo===ld.vehicleNo;});
+    vehs.forEach(function(v){DB.update('vehicles',v.id,{status:'Loading Done'});});
+    // Qty mismatch report
+    var mismatches=materials.filter(function(m){return m.diff!==0;});
+    if(mismatches.length>0){
+        DB.add('loading_data',{loadNo:ld.loadNo,vehicleNo:ld.vehicleNo,mismatches:mismatches,createdAt:new Date().toISOString()});
+    }
+    logAction('Loading','DONE',ld.loadNo+' for vehicle '+ld.vehicleNo);
+    addNotif('Loading '+ld.loadNo+' completed for '+ld.vehicleNo,'success');
+    showToast('Loading completed!','success');
+    closeModal();renderStartLoading();
+}
+
+// --- Loading Done ---
+function renderLoadingDone(){
+    var loaded=DB.get('loaded_vehicles').reverse();
+    var h='<div class="section-header"><h2><i class="bx bx-check-circle"></i> Loaded Vehicles ('+loaded.length+')</h2>';
+    h+='<div style="display:flex;gap:6px"><button class="btn btn-glass" onclick="exportLoadingExcel()"><i class="bx bx-download"></i> Excel</button><button class="btn btn-glass" onclick="exportLoadingPDF()"><i class="bx bx-file"></i> PDF</button></div></div>';
+    h+='<div class="search-box"><i class="bx bx-search"></i><input type="text" id="loadDoneSearch" placeholder="Search vehicle, load no..." oninput="searchLoadDone()"></div>';
+    h+='<div id="loadDoneTable">'+buildLoadDoneTable(loaded)+'</div>';
+    setHtml(h);
+}
+function buildLoadDoneTable(loaded){
+    var h='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Load No</th><th>Vehicle</th><th>Materials</th><th>Loaded By</th><th>Time</th><th>Actions</th></tr></thead><tbody>';
+    if(!loaded.length)h+='<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:24px">No loaded vehicles</td></tr>';
+    else loaded.forEach(function(l){
+        h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(l.loadNo)+'</td><td><strong>'+esc(l.vehicleNo)+'</strong></td><td><span class="badge badge-info">'+(l.materials||[]).length+'</span></td><td>'+esc(l.loadedByName)+'</td><td style="font-size:11px;color:var(--text-muted)">'+fmtDT(l.loadedAt)+'</td><td><button class="btn btn-glass btn-sm" onclick="viewLoadDetail(\''+l.id+'\')"><i class="bx bx-eye"></i></button></td></tr>';
+    });
+    h+='</tbody></table></div>';return h;
+}
+function searchLoadDone(){
+    var q=document.getElementById('loadDoneSearch').value.trim().toLowerCase();
+    var loaded=DB.get('loaded_vehicles').reverse();
+    if(q)loaded=loaded.filter(function(l){return(l.vehicleNo||'').toLowerCase().indexOf(q)>-1||(l.loadNo||'').toLowerCase().indexOf(q)>-1;});
+    document.getElementById('loadDoneTable').innerHTML=buildLoadDoneTable(loaded);
+}
+function viewLoadDetail(id){
+    var l=DB.find('loaded_vehicles',id);if(!l)return;
+    var h='<div style="margin-bottom:12px"><strong>Load No:</strong> <span style="color:var(--accent);font-family:var(--font-display)">'+esc(l.loadNo)+'</span> | <strong>Vehicle:</strong> '+esc(l.vehicleNo)+'</div>';
+    h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD</th><th>Material</th><th>EAN</th><th>Expected</th><th>Scanned</th><th>Diff</th></tr></thead><tbody>';
+    (l.materials||[]).forEach(function(m){
+        var cls=m.diff===0?'qty-match':'qty-mismatch';
+        h+='<tr class="'+(m.diff===0?'':'scan-row-red')+'"><td>'+esc(m.obdNo)+'</td><td>'+esc(m.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(m.ean)+'</td><td>'+m.expectedQty+'</td><td>'+m.scannedQty+'</td><td class="'+cls+'">'+(m.diff>0?'-'+m.diff:(m.diff<0?'+'+Math.abs(m.diff):'0'))+'</td></tr>';
+    });
+    h+='</tbody></table></div>';
+    showModal('Loading Detail — '+l.loadNo,h,'lg','<button class="btn btn-glass" onclick="closeModal()">Close</button>');
+}
+function exportLoadingExcel(){
+    var loaded=DB.get('loaded_vehicles');var rows=[['Load No','Vehicle','Material','EAN','Expected','Scanned','Diff','By','Time']];
+    loaded.forEach(function(l){(l.materials||[]).forEach(function(m){rows.push([l.loadNo,l.vehicleNo,m.material,m.ean,m.expectedQty,m.scannedQty,m.diff,l.loadedByName,fmtDT(l.loadedAt)]);});});
+    var ws=XLSX.utils.aoa_to_sheet(rows);var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Loading');XLSX.writeFile(wb,'Loading_Done_'+today()+'.xlsx');showToast('Excel downloaded!','success');
+}
+function exportLoadingPDF(){
+    var loaded=DB.get('loaded_vehicles');var rows=[];
+    loaded.forEach(function(l){(l.materials||[]).forEach(function(m){rows.push([l.loadNo,l.vehicleNo,m.material,m.ean,m.expectedQty,m.scannedQty,m.diff,l.loadedByName,fmtDT(l.loadedAt)]);});});
+    var pdf=new jspdf.jsPDF({orientation:'landscape'});pdf.setFontSize(14);pdf.text('Loading Report — VIP INDUSTRIES MD20',14,15);pdf.setFontSize(8);pdf.text('Generated: '+fmtDT(new Date()),14,22);
+    pdf.autoTable({startY:28,head:[['Load No','Vehicle','Material','EAN','Exp','Scan','Diff','By','Time']],body:rows,theme:'grid',headStyles:{fillColor:[0,180,120]},styles:{fontSize:7}});
+    pdf.save('Loading_Report_'+today()+'.pdf');showToast('PDF downloaded!','success');
+}
+
+// --- Qty Mismatch ---
+function renderQtyMismatch(){
+    var shorts=DB.get('short_reports').reverse();
+    var loadMismatches=DB.get('loading_data').reverse();
+    var h='<div class="section-header"><h2><i class="bx bx-error-circle"></i> Quantity Mismatch Reports</h2>';
+    h+='<div style="display:flex;gap:6px"><button class="btn btn-glass" onclick="exportMismatchExcel()"><i class="bx bx-download"></i> Excel</button><button class="btn btn-glass" onclick="exportMismatchPDF()"><i class="bx bx-file"></i> PDF</button></div></div>';
+
+    // Short reports (unloading)
+    h+='<div class="card"><div class="card-title"><i class="bx bx-error" style="color:var(--danger)"></i> Unloading Short Reports ('+shorts.length+')</div>';
+    if(!shorts.length)h+='<div style="color:var(--text-muted);padding:16px;text-align:center">No shorts</div>';
+    else{
+        h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Short No</th><th>Vehicle/OBD</th><th>Invoice</th><th>Material</th><th>Expected</th><th>Actual</th><th>Short</th><th>Posted</th></tr></thead><tbody>';
+        shorts.forEach(function(s){
+            (s.items||[]).forEach(function(it){
+                h+='<tr class="scan-row-red"><td style="font-family:var(--font-display);font-size:10px">'+esc(s.shortNo)+'</td><td>'+esc(s.vehicleNo)+'</td><td>'+esc(it.invoiceNo)+'</td><td>'+esc(it.material)+'</td><td>'+it.expected+'</td><td>'+it.scanned+'</td><td class="qty-mismatch">-'+it.short+'</td><td>'+(s.posted?'<span class="badge badge-success">Yes</span>':'<span class="badge badge-warning">No</span>')+'</td></tr>';
+            });
+        });
+        h+='</tbody></table></div>';
+    }
+    h+='</div>';
+
+    // Loading mismatches
+    h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-error" style="color:var(--warning)"></i> Loading Mismatches ('+loadMismatches.length+')</div>';
+    if(!loadMismatches.length)h+='<div style="color:var(--text-muted);padding:16px;text-align:center">No mismatches</div>';
+    else{
+        h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Load No</th><th>Vehicle</th><th>Material</th><th>Expected</th><th>Scanned</th><th>Diff</th></tr></thead><tbody>';
+        loadMismatches.forEach(function(lm){
+            (lm.mismatches||[]).forEach(function(m){
+                if(m.diff!==0){
+                    h+='<tr class="'+(m.diff<0?'scan-row-red':'scan-row-red')+'"><td style="font-family:var(--font-display);font-size:10px">'+esc(lm.loadNo)+'</td><td>'+esc(lm.vehicleNo)+'</td><td>'+esc(m.material)+'</td><td>'+m.expectedQty+'</td><td>'+m.scannedQty+'</td><td class="qty-mismatch">'+(m.diff>0?'-'+m.diff:'+'+Math.abs(m.diff))+'</td></tr>';
+                }
+            });
+        });
+        h+='</tbody></table></div>';
+    }
+    h+='</div>';
+    setHtml(h);
+}
+function exportMismatchExcel(){
+    var shorts=DB.get('short_reports');var rows=[['Short No','Vehicle','Invoice','Material','EAN','Expected','Actual','Short','Posted']];
+    shorts.forEach(function(s){(s.items||[]).forEach(function(it){rows.push([s.shortNo,s.vehicleNo,it.invoiceNo,it.material,it.ean,it.expected,it.scanned,it.short,s.posted?'Yes':'No']);});});
+    var ws=XLSX.utils.aoa_to_sheet(rows);var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Mismatch');XLSX.writeFile(wb,'Qty_Mismatch_'+today()+'.xlsx');showToast('Excel downloaded!','success');
+}
+function exportMismatchPDF(){
+    var shorts=DB.get('short_reports');var rows=[];
+    shorts.forEach(function(s){(s.items||[]).forEach(function(it){rows.push([s.shortNo,s.vehicleNo,it.invoiceNo,it.material,it.ean,it.expected,it.scanned,it.short]);});});
+    var pdf=new jspdf.jsPDF({orientation:'landscape'});pdf.setFontSize(14);pdf.text('Quantity Mismatch Report — VIP INDUSTRIES MD20',14,15);
+    pdf.autoTable({startY:22,head:[['Short No','Vehicle','Invoice','Material','EAN','Exp','Act','Short']],body:rows,theme:'grid',headStyles:{fillColor:[220,38,38]},styles:{fontSize:7}});
+    pdf.save('Qty_Mismatch_'+today()+'.pdf');showToast('PDF downloaded!','success');
+}
+
+// ==================== USER WORKING TIME ====================
+function renderUserWorkingTime(){
+    var logs=DB.get('user_work_log').reverse();
+    var h='<div class="section-header"><h2><i class="bx bx-time-five"></i> User Working Time</h2>';
+    h+='<div style="display:flex;gap:6px"><button class="btn btn-glass" onclick="exportWorkTimeExcel()"><i class="bx bx-download"></i> Excel</button><button class="btn btn-glass" onclick="exportWorkTimePDF()"><i class="bx bx-file"></i> PDF</button></div></div>';
+    h+='<div class="form-row" style="margin-bottom:16px"><div class="form-group"><label>From Date</label><input type="date" id="wtFrom" class="form-input" value="'+today()+'"></div><div class="form-group"><label>To Date</label><input type="date" id="wtTo" class="form-input" value="'+today()+'"></div><div class="form-group"><label>User</label><select id="wtUser" class="form-input"><option value="">All Users</option>';
+    var users=DB.get('users');
+    users.forEach(function(u){h+='<option value="'+u.id+'">'+esc(u.name)+'</option>';});
+    h+='</select></div><div class="form-group" style="display:flex;align-items:flex-end"><button class="btn btn-glass" onclick="filterWorkTime()"><i class="bx bx-filter"></i> Filter</button></div></div>';
+    h+='<div id="wtResult">'+buildWorkTimeTable(logs)+'</div>';
+    setHtml(h);
+}
+function buildWorkTimeTable(logs){
+    // Group by user + date
+    var grouped={};
+    logs.forEach(function(l){
+        var dt=l.dateTime?l.dateTime.split('T')[0]:'Unknown';
+        var key=l.userName+'|'+dt;
+        if(!grouped[key])grouped[key]={user:l.userName,date:dt,activities:[]};
+        grouped[key].activities.push({module:l.module,action:l.action,time:l.dateTime});
+    });
+    var keys=Object.keys(grouped);
+    var h='';
+    if(!keys.length){h='<div class="card"><div class="empty-state"><i class="bx bx-time"></i><p>No work logs</p></div></div>';return h;}
+    keys.forEach(function(k){
+        var g=grouped[k];
+        var firstTime=g.activities[0]?g.activities[0].time:null;
+        var lastTime=g.activities[g.activities.length-1]?g.activities[g.activities.length-1].time:null;
+        var total=timeDiff(firstTime,lastTime);
+        h+='<div class="time-card"><div class="tc-user"><i class="bx bx-user"></i> '+esc(g.user)+' <span style="font-size:11px;color:var(--text-muted);font-weight:400;margin-left:auto">'+esc(g.date)+'</span></div>';
+        g.activities.forEach(function(a){
+            h+='<div class="tc-activity"><span>'+esc(a.module)+' — '+esc(a.action)+'</span><span class="tc-time">'+fmtDT(a.time)+'</span></div>';
+        });
+        h+='<div style="display:flex;justify-content:space-between;margin-top:8px;padding-top:8px;border-top:1px solid var(--border);font-size:12px"><span style="color:var(--text-muted)">Total Time</span><strong style="color:var(--accent)">'+total+'</strong></div>';
+        h+='</div>';
+    });
+    return h;
+}
+function filterWorkTime(){
+    var from=document.getElementById('wtFrom').value;
+    var to=document.getElementById('wtTo').value;
+    var userId=document.getElementById('wtUser').value;
+    var logs=DB.get('user_work_log').reverse();
+    if(from)logs=logs.filter(function(l){return l.dateTime&&l.dateTime.split('T')[0]>=from;});
+    if(to)logs=logs.filter(function(l){return l.dateTime&&l.dateTime.split('T')[0]<=to;});
+    if(userId)logs=logs.filter(function(l){return l.userId===userId;});
+    document.getElementById('wtResult').innerHTML=buildWorkTimeTable(logs);
+}
+function exportWorkTimeExcel(){
+    var logs=DB.get('user_work_log').reverse();var rows=[['User','Module','Action','Date Time']];
+    logs.forEach(function(l){rows.push([l.userName,l.module,l.action,fmtDT(l.dateTime)]);});
+    var ws=XLSX.utils.aoa_to_sheet(rows);var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'WorkTime');XLSX.writeFile(wb,'User_Work_Time_'+today()+'.xlsx');showToast('Excel downloaded!','success');
+}
+function exportWorkTimePDF(){
+    var logs=DB.get('user_work_log').reverse();var rows=[];
+    logs.forEach(function(l){rows.push([l.userName,l.module,l.action,fmtDT(l.dateTime)]);});
+    var pdf=new jspdf.jsPDF({orientation:'landscape'});pdf.setFontSize(14);pdf.text('User Working Time — VIP INDUSTRIES MD20',14,15);
+    pdf.autoTable({startY:22,head:[['User','Module','Action','Date Time']],body:rows,theme:'grid',headStyles:{fillColor:[0,180,120]},styles:{fontSize:7}});
+    pdf.save('User_Work_Time_'+today()+'.pdf');showToast('PDF downloaded!','success');
+}
+
+// ==================== ADMIN ====================
+function renderAdmin(){
+    var users=DB.get('users');
+    var h='<div class="section-header"><h2><i class="bx bx-user-detail"></i> User Management</h2><button class="btn btn-glass" onclick="showAddUser()"><i class="bx bx-plus"></i> Add User</button></div>';
+    h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Username</th><th>Name</th><th>Role</th><th>Actions</th></tr></thead><tbody>';
+    users.forEach(function(u){
+        h+='<tr><td><strong>'+esc(u.username)+'</strong></td><td>'+esc(u.name)+'</td><td><span class="badge badge-accent">'+esc(u.role)+'</span></td><td><div class="table-actions"><button class="btn btn-glass btn-sm" onclick="editUser(\''+u.id+'\')"><i class="bx bx-edit"></i></button>'+(u.role!=='Super Admin'?'<button class="btn btn-danger btn-sm" onclick="deleteUser(\''+u.id+'\')"><i class="bx bx-trash"></i></button>':'')+'</div></td></tr>';
+    });
+    h+='</tbody></table></div>';
+    setHtml(h);
+}
+function showAddUser(){
+    var h='<div class="form-row"><div class="form-group"><label>Username <span class="req">*</span></label><input type="text" id="auUser" class="form-input"></div><div class="form-group"><label>Password <span class="req">*</span></label><input type="text" id="auPass" class="form-input"></div></div>';
+    h+='<div class="form-row"><div class="form-group"><label>Full Name <span class="req">*</span></label><input type="text" id="auName" class="form-input"></div><div class="form-group"><label>Role <span class="req">*</span></label><select id="auRole" class="form-input"><option>Admin</option><option>Manager</option><option>DEO</option><option>Security</option><option>Unloader</option><option>Picker</option><option>Loader</option></select></div></div>';
+    h+='<div class="card-title" style="margin-top:12px"><i class="bx bx-shield"></i> Permissions</div><div class="perm-grid">';
+    var perms=[['canSecurityEntry','Security Entry'],['canUploadInvoice','Upload Invoice'],['canAssignVehicle','Assign Vehicle'],['canStartUnloading','Start Unloading'],['canPostVehicle','Post Vehicle'],['canApprove','Approve'],['canViewReports','View Reports'],['canPutaway','Putaway'],['canPIV','PIV'],['canPick','Picking'],['canLoad','Loading'],['canAdmin','Admin']];
+    perms.forEach(function(p){h+='<div class="perm-item"><input type="checkbox" id="au_'+p[0]+'" checked><label for="au_'+p[0]+'">'+p[1]+'</label></div>';});
+    h+='</div>';
+    showModal('Add User',h,'lg','<button class="btn btn-glass" onclick="closeModal()">Cancel</button><button class="btn btn-glass" onclick="saveUser()"><i class="bx bx-check"></i> Save</button>');
+}
+function saveUser(){
+    var un=document.getElementById('auUser').value.trim(),pw=document.getElementById('auPass').value.trim(),nm=document.getElementById('auName').value.trim(),rl=document.getElementById('auRole').value;
+    if(!un||!pw||!nm){showToast('Fill required fields','error');return;}
+    var actions={};
+    var perms=['canSecurityEntry','canUploadInvoice','canAssignVehicle','canStartUnloading','canPostVehicle','canApprove','canViewReports','canPutaway','canPIV','canPick','canLoad','canAdmin'];
+    perms.forEach(function(p){actions[p]=document.getElementById('au_'+p).checked;});
+    var modMap={Admin:['all'],Manager:['dashboard','inbound','reports','audit','picking','loading','user-time'],DEO:['inbound'],Security:['inbound','loading'],Unloader:['inbound'],Picker:['picking'],Loader:['loading']};
+    DB.add('users',{username:un,password:pw,name:nm,role:rl,permissions:{modules:modMap[rl]||['dashboard'],actions:actions}});
+    logAction('Admin','ADD_USER','User '+un+' ('+rl+') created');showToast('User created!','success');closeModal();renderAdmin();
+}
+function editUser(id){
+    var u=DB.find('users',id);if(!u)return;
+    var h='<div class="form-row"><div class="form-group"><label>Full Name</label><input type="text" id="euName" class="form-input" value="'+esc(u.name)+'"></div><div class="form-group"><label>Role</label><select id="euRole" class="form-input"><option'+(u.role==='Admin'?' selected':'')+'>Admin</option><option'+(u.role==='Manager'?' selected':'')+'>Manager</option><option'+(u.role==='DEO'?' selected':'')+'>DEO</option><option'+(u.role==='Security'?' selected':'')+'>Security</option><option'+(u.role==='Unloader'?' selected':'')+'>Unloader</option><option'+(u.role==='Picker'?' selected':'')+'>Picker</option><option'+(u.role==='Loader'?' selected':'')+'>Loader</option></select></div></div>';
+    h+='<div class="form-group"><label>New Password (leave blank to keep)</label><input type="text" id="euPass" class="form-input" placeholder="New password"></div>';
+    h+='<div class="card-title" style="margin-top:12px"><i class="bx bx-shield"></i> Permissions</div><div class="perm-grid">';
+    var perms=['canSecurityEntry','canUploadInvoice','canAssignVehicle','canStartUnloading','canPostVehicle','canApprove','canViewReports','canPutaway','canPIV','canPick','canLoad','canAdmin'];
+    var pLabels=['Security Entry','Upload Invoice','Assign Vehicle','Start Unloading','Post Vehicle','Approve','View Reports','Putaway','PIV','Picking','Loading','Admin'];
+    perms.forEach(function(p,i){h+='<div class="perm-item"><input type="checkbox" id="eu_'+p+'" '+(u.permissions.actions&&u.permissions.actions[p]?'checked':'')+'><label for="eu_'+p+'">'+pLabels[i]+'</label></div>';});
+    h+='</div>';
+    showModal('Edit User — '+u.name,h,'lg','<button class="btn btn-glass" onclick="closeModal()">Cancel</button><button class="btn btn-glass" onclick="updateUser(\''+id+'\')"><i class="bx bx-check"></i> Update</button>');
+}
+function updateUser(id){
+    var up={name:document.getElementById('euName').value.trim(),role:document.getElementById('euRole').value};
+    var pw=document.getElementById('euPass').value.trim();if(pw)up.password=pw;
+    var actions={};var perms=['canSecurityEntry','canUploadInvoice','canAssignVehicle','canStartUnloading','canPostVehicle','canApprove','canViewReports','canPutaway','canPIV','canPick','canLoad','canAdmin'];
+    perms.forEach(function(p){actions[p]=document.getElementById('eu_'+p).checked;});
+    var modMap={Admin:['all'],Manager:['dashboard','inbound','reports','audit','picking','loading','user-time'],DEO:['inbound'],Security:['inbound','loading'],Unloader:['inbound'],Picker:['picking'],Loader:['loading']};
+    up.permissions={modules:modMap[up.role]||['dashboard'],actions:actions};
+    DB.update('users',id,up);logAction('Admin','EDIT_USER','User '+id+' updated');showToast('User updated!','success');closeModal();renderAdmin();
+}
+function deleteUser(id){if(!confirm('Delete user?'))return;DB.remove('users',id);logAction('Admin','DELETE_USER','User '+id+' deleted');showToast('User deleted','success');renderAdmin();}
+
+// ==================== SETTINGS (10 UI Options) ====================
+function renderSettings(){
+    var h='<div class="section-header"><h2><i class="bx bx-cog"></i> Settings</h2></div>';
+    h+='<div class="settings-grid">';
+    h+='<div class="settings-card" onclick="toggleTheme()"><div class="sc-icon" style="background:var(--accent-dim);color:var(--accent)"><i class="bx bx-moon"></i></div><div class="sc-title">Theme Toggle</div><div class="sc-desc">Switch between Dark and Light mode. Current: '+APP.theme+'</div></div>';
+    h+='<div class="settings-card" onclick="clearAllData()"><div class="sc-icon" style="background:var(--danger-dim);color:var(--danger)"><i class="bx bx-trash"></i></div><div class="sc-title">Clear All Data</div><div class="sc-desc">Reset entire system. This cannot be undone.</div></div>';
+    h+='<div class="settings-card" onclick="reseedData()"><div class="sc-icon" style="background:var(--warning-dim);color:var(--warning)"><i class="bx bx-refresh"></i></div><div class="sc-title">Re-seed Sample Data</div><div class="sc-desc">Add sample vehicles, invoices, materials again.</div></div>';
+    h+='<div class="settings-card" onclick="showExportAll()"><div class="sc-icon" style="background:var(--info-dim);color:var(--info)"><i class="bx bx-download"></i></div><div class="sc-title">Export All Data</div><div class="sc-desc">Download complete database as Excel backup.</div></div>';
+    h+='<div class="settings-card" onclick="showGlobalReport()"><div class="sc-icon" style="background:var(--accent-dim);color:var(--accent)"><i class="bx bx-bar-chart-alt-2"></i></div><div class="sc-title">Global Report</div><div class="sc-desc">Complete warehouse report with date filter.</div></div>';
+    h+='<div class="settings-card" onclick="showInboundReport()"><div class="sc-icon" style="background:var(--accent2-dim);color:var(--accent2)"><i class="bx bxs-truck"></i></div><div class="sc-title">Inbound Report</div><div class="sc-desc">All inbound vehicles — loaded or not.</div></div>';
+    h+='<div class="settings-card" onclick="showLoadingReport()"><div class="sc-icon" style="background:var(--info-dim);color:var(--info)"><i class="bx bxs-truck"></i></div><div class="sc-title">Loading Report</div><div class="sc-desc">All loading vehicles report.</div></div>';
+    h+='<div class="settings-card" onclick="showChangePassword()"><div class="sc-icon" style="background:var(--warning-dim);color:var(--warning)"><i class="bx bx-lock"></i></div><div class="sc-title">Change Password</div><div class="sc-desc">Update your login password.</div></div>';
+    h+='<div class="settings-card" onclick="showFrontCustomize()"><div class="sc-icon" style="background:var(--accent-dim);color:var(--accent)"><i class="bx bx-palette"></i></div><div class="sc-title">Front Customization</div><div class="sc-desc">Change accent color and UI style.</div></div>';
+    h+='<div class="settings-card" onclick="showSessionInfo()"><div class="sc-icon" style="background:var(--info-dim);color:var(--info)"><i class="bx bx-info-circle"></i></div><div class="sc-title">Session Info</div><div class="sc-desc">View current session and system details.</div></div>';
+    h+='</div>';
+    setHtml(h);
+}
+function toggleTheme(){
+    APP.theme=APP.theme==='dark'?'light':'dark';
+    document.documentElement.setAttribute('data-theme',APP.theme);
+    localStorage.setItem('wms_theme',APP.theme);
+    var icon=document.getElementById('themeToggle').querySelector('i');
+    icon.className=APP.theme==='dark'?'bx bx-moon':'bx bx-sun';
+    showToast('Theme: '+APP.theme,'success');renderSettings();
+}
+function clearAllData(){
+    if(!confirm('WARNING: This will delete ALL data. Continue?'))return;
+    if(!confirm('Are you REALLY sure? This cannot be undone!'))return;
+    var keys=Object.keys(localStorage).filter(function(k){return k.indexOf('wms_')===0;});
+    keys.forEach(function(k){localStorage.removeItem(k);});
+    showToast('All data cleared! Reloading...','warning');
+    setTimeout(function(){location.reload();},1500);
+}
+function reseedData(){seedData();showToast('Sample data re-seeded!','success');renderSettings();}
+function showExportAll(){
+    var tables=['users','vehicles','invoices','invoice_materials','location_master','material_master','rack_master','obd_data','picking_done','loaded_vehicles','grn_records','short_reports','unloading_records','audit_log'];
+    var wb=XLSX.utils.book_new();
+    tables.forEach(function(t){
+        var data=DB.get(t);
+        if(!data.length)return;
+        var rows=[];
+        var keys=Object.keys(data[0]);
+        rows.push(keys);
+        data.forEach(function(d){rows.push(keys.map(function(k){return d[k]===null||d[k]===undefined?'':String(d[k]);}));});
+        var ws=XLSX.utils.aoa_to_sheet(rows);XLSX.utils.book_append_sheet(wb,ws,t.substring(0,31));
+    });
+    XLSX.writeFile(wb,'WMS_Full_Backup_'+today()+'.xlsx');showToast('Full backup downloaded!','success');
+}
+function showGlobalReport(){
+    var h='<div class="form-row"><div class="form-group"><label>From Date</label><input type="date" id="grFrom" class="form-input" value="'+today()+'"></div><div class="form-group"><label>To Date</label><input type="date" id="grTo" class="form-input" value="'+today()+'"></div></div>';
+    h+='<div class="form-actions"><button class="btn btn-glass" onclick="generateGlobalReport()"><i class="bx bx-bar-chart-alt-2"></i> Generate</button><button class="btn btn-glass" onclick="exportGlobalPDF()"><i class="bx bx-file"></i> PDF</button><button class="btn btn-glass" onclick="exportGlobalExcel()"><i class="bx bx-download"></i> Excel</button></div>';
+    h+='<div id="grResult" style="margin-top:16px"></div>';
+    showModal('Global Report',h,'xl','<button class="btn btn-glass" onclick="closeModal()">Close</button>');
+}
+function getGlobalData(){
+    var from=document.getElementById('grFrom').value;
+    var to=document.getElementById('grTo').value;
+    var data={vehicles:0,posted:0,pending:0,putaway:0,piv:0,picked:0,loaded:0,shorts:0};
+    var vehs=DB.get('vehicles').filter(function(v){return v.reportedAt&&v.reportedAt.split('T')[0]>=from&&v.reportedAt.split('T')[0]<=to;});
+    data.vehicles=vehs.length;
+    vehs.forEach(function(v){if(v.status==='Posted'||v.status==='Unloaded')data.posted++;else data.pending++;});
+    var locs=DB.get('location_master').filter(function(l){return l.date>=from&&l.date<=to;});
+    locs.forEach(function(l){if(l.action==='PUTAWAY')data.putaway++;else if(l.action==='PIV')data.piv++;});
+    data.picked=DB.get('picking_done').filter(function(p){return p.pickedAt&&p.pickedAt.split('T')[0]>=from&&p.pickedAt.split('T')[0]<=to;}).length;
+    data.loaded=DB.get('loaded_vehicles').filter(function(l){return l.loadedAt&&l.loadedAt.split('T')[0]>=from&&l.loadedAt.split('T')[0]<=to;}).length;
+    data.shorts=DB.get('short_reports').filter(function(s){return s.createdAt&&s.createdAt.split('T')[0]>=from&&s.createdAt.split('T')[0]<=to;}).length;
+    return data;
+}
+function generateGlobalReport(){
+    var d=getGlobalData();
+    var h='<div class="kpi-grid">';
+    h+=kpi('bxs-truck',d.vehicles,'Total Vehicles','accent');
+    h+=kpi('bxs-check-circle',d.posted,'Posted','success');
+    h+=kpi('bx-time-five',d.pending,'Pending','warning');
+    h+=kpi('bxs-package',d.putaway,'Putaway','info');
+    h+=kpi('bxs-clipboard',d.piv,'PIV','accent2');
+    h+=kpi('bxs-box',d.picked,'Picked','success');
+    h+=kpi('bxs-truck',d.loaded,'Loaded','info');
+    h+=kpi('bx-error-circle',d.shorts,'Shorts','danger');
+    h+='</div>';
+    document.getElementById('grResult').innerHTML=h;
+}
+function exportGlobalExcel(){
+    var d=getGlobalData();var rows=[['Metric','Value'],['Total Vehicles',d.vehicles],['Posted',d.posted],['Pending',d.pending],['Putaway',d.putaway],['PIV',d.piv],['Picked',d.picked],['Loaded',d.loaded],['Shorts',d.shorts]];
+    var ws=XLSX.utils.aoa_to_sheet(rows);var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Global');XLSX.writeFile(wb,'Global_Report_'+today()+'.xlsx');showToast('Excel downloaded!','success');
+}
+function exportGlobalPDF(){
+    var d=getGlobalData();var rows=[['Total Vehicles',d.vehicles],['Posted',d.posted],['Pending',d.pending],['Putaway',d.putaway],['PIV',d.piv],['Picked',d.picked],['Loaded',d.loaded],['Shorts',d.shorts]];
+    var pdf=new jspdf.jsPDF();pdf.setFontSize(16);pdf.text('Global Warehouse Report',14,20);pdf.setFontSize(9);pdf.text('VIP INDUSTRIES LIMITED MD20 | '+fmtDT(new Date()),14,28);
+    pdf.autoTable({startY:34,head:[['Metric','Value']],body:rows,theme:'grid',headStyles:{fillColor:[0,180,120]}});
+    pdf.save('Global_Report_'+today()+'.pdf');showToast('PDF downloaded!','success');
+}
+function showInboundReport(){
+    var vehs=DB.get('vehicles').filter(function(v){return v.vehicleType==='Unloading';});
+    var unloaded=vehs.filter(function(v){return v.status==='Posted'||v.status==='Unloaded';});
+    var notUnloaded=vehs.filter(function(v){return v.status!=='Posted'&&v.status!=='Unloaded';});
+    var h='<div class="kpi-grid" style="margin-bottom:16px">';
+    h+=kpi('bxs-truck',vehs.length,'Total Inbound','accent');
+    h+=kpi('bxs-check-circle',unloaded.length,'Unloaded','success');
+    h+=kpi('bx-time-five',notUnloaded.length,'Not Unloaded','danger');
+    h+='</div>';
+    h+='<div class="form-actions" style="margin-bottom:12px"><button class="btn btn-glass" onclick="exportInboundReportPDF()"><i class="bx bx-file"></i> PDF</button><button class="btn btn-glass" onclick="exportInboundReportExcel()"><i class="bx bx-download"></i> Excel</button></div>';
+    if(notUnloaded.length){
+        h+='<div class="card"><div class="card-title"><i class="bx bx-error" style="color:var(--danger)"></i> Not Yet Unloaded</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>Vehicle</th><th>LR</th><th>Status</th><th>Reported</th></tr></thead><tbody>';
+        notUnloaded.forEach(function(v){h+='<tr><td>'+esc(v.vehicleNo)+'</td><td>'+esc(v.lrNo||'-')+'</td><td><span class="badge badge-warning">'+esc(v.status)+'</span></td><td style="font-size:11px">'+fmtDT(v.reportedAt)+'</td></tr>';});
+        h+='</tbody></table></div></div>';
+    }
+    showModal('Inbound Report',h,'xl','<button class="btn btn-glass" onclick="closeModal()">Close</button>');
+}
+function exportInboundReportPDF(){
+    var vehs=DB.get('vehicles').filter(function(v){return v.vehicleType==='Unloading';});var rows=[];
+    vehs.forEach(function(v){rows.push([v.vehicleNo,v.lrNo||'',v.transportName||'',v.status,fmtDT(v.reportedAt)]);});
+    var pdf=new jspdf.jsPDF({orientation:'landscape'});pdf.setFontSize(14);pdf.text('Inbound Report — VIP INDUSTRIES MD20',14,15);
+    pdf.autoTable({startY:22,head:[['Vehicle','LR','Transport','Status','Reported']],body:rows,theme:'grid',headStyles:{fillColor:[0,180,120]},styles:{fontSize:7}});
+    pdf.save('Inbound_Report_'+today()+'.pdf');showToast('PDF downloaded!','success');
+}
+function exportInboundReportExcel(){
+    var vehs=DB.get('vehicles').filter(function(v){return v.vehicleType==='Unloading';});var rows=[['Vehicle','LR','Transport','Status','Reported']];
+    vehs.forEach(function(v){rows.push([v.vehicleNo,v.lrNo||'',v.transportName||'',v.status,fmtDT(v.reportedAt)]);});
+    var ws=XLSX.utils.aoa_to_sheet(rows);var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Inbound');XLSX.writeFile(wb,'Inbound_Report_'+today()+'.xlsx');showToast('Excel downloaded!','success');
+}
+function showLoadingReport(){
+    var loaded=DB.get('loaded_vehicles');
+    var h='<div class="kpi-grid" style="margin-bottom:16px">';
+    h+=kpi('bxs-truck',loaded.length,'Total Loaded','accent');
+    h+='</div>';
+    h+='<div class="form-actions" style="margin-bottom:12px"><button class="btn btn-glass" onclick="exportLoadingExcel()"><i class="bx bx-download"></i> Excel</button><button class="btn btn-glass" onclick="exportLoadingPDF()"><i class="bx bx-file"></i> PDF</button></div>';
+    showModal('Loading Report',h,'lg','<button class="btn btn-glass" onclick="closeModal()">Close</button>');
+}
+function showChangePassword(){
+    var h='<div class="form-group"><label>Current Password <span class="req">*</span></label><input type="password" id="cpCurr" class="form-input"></div>';
+    h+='<div class="form-group"><label>New Password <span class="req">*</span></label><input type="password" id="cpNew" class="form-input"></div>';
+    h+='<div class="form-group"><label>Confirm New Password <span class="req">*</span></label><input type="password" id="cpConf" class="form-input"></div>';
+    showModal('Change Password',h,'sm','<button class="btn btn-glass" onclick="closeModal()">Cancel</button><button class="btn btn-glass" onclick="doChangePassword()"><i class="bx bx-check"></i> Update</button>');
+}
+function doChangePassword(){
+    var curr=document.getElementById('cpCurr').value,newP=document.getElementById('cpNew').value,conf=document.getElementById('cpConf').value;
+    if(curr!==APP.currentUser.password){showToast('Current password incorrect','error');return;}
+    if(newP!==conf){showToast('Passwords do not match','error');return;}
+    if(newP.length<4){showToast('Password too short','error');return;}
+    DB.update('users',APP.currentUser.id,{password:newP});
+    APP.currentUser.password=newP;showToast('Password updated!','success');closeModal();
+}
+function showFrontCustomize(){
+    var colors=[
+        {name:'Emerald',val:'#00E5A0'},{name:'Cyan',val:'#06B6D4'},{name:'Blue',val:'#3B82F6'},
+        {name:'Purple',val:'#8B5CF6'},{name:'Pink',val:'#EC4899'},{name:'Red',val:'#EF4444'},
+        {name:'Orange',val:'#F97316'},{name:'Amber',val:'#F59E0B'}
+    ];
+    var h='<div class="card-title">Accent Color</div><div style="display:flex;gap:10px;flex-wrap:wrap">';
+    colors.forEach(function(c){
+        h+='<div style="width:40px;height:40px;border-radius:10px;background:'+c.val+';cursor:pointer;border:3px solid transparent;transition:all .2s" onclick="setAccentColor(\''+c.val+'\',this)" title="'+c.name+'"></div>';
+    });
+    h+='</div>';
+    showModal('Front Customization',h,'sm','<button class="btn btn-glass" onclick="closeModal()">Close</button>');
+}
+function setAccentColor(color,el){
+    document.documentElement.style.setProperty('--accent',color);
+    var r=parseInt(color.slice(1,3),16),g=parseInt(color.slice(3,5),16),b=parseInt(color.slice(5,7),16);
+    document.documentElement.style.setProperty('--accent-rgb',r+','+g+','+b);
+    document.documentElement.style.setProperty('--accent-dim','rgba('+r+','+g+','+b+',.1)');
+    localStorage.setItem('wms_accent',color);
+    showToast('Accent color changed!','success');
+}
+function showSessionInfo(){
+    var h='<div class="form-group"><label>Logged In As</label><div class="form-input" style="background:transparent;border:none;font-weight:700">'+esc(APP.currentUser.name)+' ('+esc(APP.currentUser.role)+')</div></div>';
+    h+='<div class="form-group"><label>Login Time</label><div class="form-input" style="background:transparent;border:none">'+fmtDT(APP.sessionStart?new Date(APP.sessionStart):new Date())+'</div></div>';
+    h+='<div class="form-group"><label>Session Duration</label><div class="form-input" style="background:transparent;border:none;color:var(--accent);font-weight:700">'+timeDiff(APP.sessionStart,new Date().toISOString())+'</div></div>';
+    h+='<div class="form-group"><label>Theme</label><div class="form-input" style="background:transparent;border:none">'+APP.theme+'</div></div>';
+    h+='<div class="form-group"><label>Supabase Connected</label><div class="form-input" style="background:transparent;border:none;color:'+(supabaseClient?'var(--success)':'var(--danger)')+'">'+(supabaseClient?'Yes':'No')+'</div></div>';
+    showModal('Session Info',h,'sm','<button class="btn btn-glass" onclick="closeModal()">Close</button>');
+}
+
+// ==================== REPORTS ====================
+function renderReports(){
+    var h='<div class="section-header"><h2><i class="bx bx-bar-chart-alt-2"></i> Reports</h2></div>';
+    h+='<div class="settings-grid">';
+    h+='<div class="settings-card" onclick="showGlobalReport()"><div class="sc-icon" style="background:var(--accent-dim);color:var(--accent)"><i class="bx bx-bar-chart-alt-2"></i></div><div class="sc-title">Global Report</div><div class="sc-desc">Complete warehouse summary with date filter.</div></div>';
+    h+='<div class="settings-card" onclick="showInboundReport()"><div class="sc-icon" style="background:var(--accent2-dim);color:var(--accent2)"><i class="bx bxs-truck"></i></div><div class="sc-title">Inbound Report</div><div class="sc-desc">All inbound vehicles — unloaded or not.</div></div>';
+    h+='<div class="settings-card" onclick="showLoadingReport()"><div class="sc-icon" style="background:var(--info-dim);color:var(--info)"><i class="bx bxs-truck"></i></div><div class="sc-title">Loading Report</div><div class="sc-desc">All loaded vehicles report.</div></div>';
+    h+='<div class="settings-card" onclick="navTo(\'qty-mismatch\')"><div class="sc-icon" style="background:var(--danger-dim);color:var(--danger)"><i class="bx bx-error-circle"></i></div><div class="sc-title">Qty Mismatch</div><div class="sc-desc">Short reports and loading mismatches.</div></div>';
+    h+='<div class="settings-card" onclick="navTo(\'user-time\')"><div class="sc-icon" style="background:var(--warning-dim);color:var(--warning)"><i class="bx bx-time-five"></i></div><div class="sc-title">User Working Time</div><div class="sc-desc">Who did what and how long.</div></div>';
+    h+='<div class="settings-card" onclick="navTo(\'picking\',\'picking-done\')"><div class="sc-icon" style="background:var(--success);color:#fff;opacity:.8"><i class="bx bx-check-circle"></i></div><div class="sc-title">Picking Done</div><div class="sc-desc">All completed picking with details.</div></div>';
+    h+='</div>';
+    setHtml(h);
 }
 
 // ==================== AUDIT LOG ====================
-function renderAuditLog() {
-    var allLogs = DB.get('audit_log').reverse();
-    var pg = paginate(allLogs, APP.auditPage, APP.auditPerPage);
+function renderAuditLog(){
+    var logs=DB.get('audit_log').reverse();
+    var pg=paginate(logs,APP.auditPage,APP.auditPerPage);
+    var h='<div class="section-header"><h2><i class="bx bx-receipt"></i> Audit Log ('+logs.length+')</h2><button class="btn btn-glass" onclick="exportAuditExcel()"><i class="bx bx-download"></i> Excel</button></div>';
+    h+='<div class="search-box"><i class="bx bx-search"></i><input type="text" id="auditSearch" placeholder="Search module, action, user..." oninput="searchAudit()"></div>';
+    h+='<div id="auditTable">'+buildAuditTable(pg.items)+'</div>';
+    h+=renderPag(APP.auditPage,pg.pages,'goAuditPage');
+    setHtml(h);
+}
+function buildAuditTable(logs){
+    var h='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Module</th><th>Action</th><th>Details</th><th>User</th><th>Date Time</th></tr></thead><tbody>';
+    if(!logs.length)h+='<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:20px">No logs</td></tr>';
+    else logs.forEach(function(l){h+='<tr><td>'+esc(l.module)+'</td><td><strong>'+esc(l.action)+'</strong></td><td style="font-size:11px;color:var(--text-secondary);max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(l.details)+'</td><td>'+esc(l.userName)+'</td><td style="font-size:11px;color:var(--text-muted)">'+fmtDT(l.dateTime)+'</td></tr>';});
+    h+='</tbody></table></div>';return h;
+}
+function goAuditPage(p){APP.auditPage=p;renderAuditLog();}
+function searchAudit(){
+    var q=document.getElementById('auditSearch').value.trim().toLowerCase();
+    var logs=DB.get('audit_log').reverse();
+    if(q)logs=logs.filter(function(l){return(l.module||'').toLowerCase().indexOf(q)>-1||(l.action||'').toLowerCase().indexOf(q)>-1||(l.userName||'').toLowerCase().indexOf(q)>-1;});
+    document.getElementById('auditTable').innerHTML=buildAuditTable(logs);
+}
+function exportAuditExcel(){
+    var logs=DB.get('audit_log');var rows=[['Module','Action','Details','User','Date Time']];
+    logs.forEach(function(l){rows.push([l.module,l.action,l.details,l.userName,fmtDT(l.dateTime)]);});
+    var ws=XLSX.utils.aoa_to_sheet(rows);var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Audit');XLSX.writeFile(wb,'Audit_Log_'+today()+'.xlsx');showToast('Excel downloaded!','success');
+}
 
-    var html = '<div class="section-header"><h2><i class="bx bxs-receipt"></i> Audit Log</h2>' +
-        '<div style="font-size:12px;color:var(--text-muted)">Total: ' + allLogs.length + ' entries</div></div>';
+// ==================== EXPORT UTILITY ====================
+function exportTableExcel(tableKey,fileName){
+    var data=DB.get(tableKey);if(!data.length){showToast('No data','error');return;}
+    var rows=[];var keys=Object.keys(data[0]);
+    rows.push(keys);
+    data.forEach(function(d){rows.push(keys.map(function(k){return d[k]===null||d[k]===undefined?'':String(d[k]);}));});
+    var ws=XLSX.utils.aoa_to_sheet(rows);var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,fileName);
+    XLSX.writeFile(wb,fileName+'_'+today()+'.xlsx');showToast('Excel downloaded!','success');
+}
 
-    // Filter bar
-    html += '<div class="card" style="margin-bottom:16px"><div class="form-row">';
-    html += '<div class="form-group"><label>Filter by Module</label><select id="auditFilterModule" class="form-input" onchange="APP.auditPage=1;renderAuditLog()"><option value="">All Modules</option>';
-    var modules = ['Auth','Security Gate','Inbound','Putaway','PIV','Picking','Loading','Admin','Settings','System'];
-    for (var m = 0; m < modules.length; m++) {
-        html += '<option value="' + modules[m] + '">' + modules[m] + '</option>';
-    }
-    html += '</select></div>';
-    html += '<div class="form-group"><label>Filter by User</label><input type="text" id="auditFilterUser" class="form-input" placeholder="Username" onchange="APP.auditPage=1;renderAuditLog()"></div>';
-    html += '<div class="form-group"><label>Filter by Date</label><input type="date" id="auditFilterDate" class="form-input" onchange="APP.auditPage=1;renderAuditLog()"></div>';
-    html += '<div class="form-group"><label>Export</label><button class="btn btn-secondary btn-sm" style="margin-top:20px" onclick="exportAuditLog()"><i class="bx bx-download"></i> Export PDF</button></div>';
-    html += '</div></div>';
-
-    // Apply filters
-    var filterModule = document.getElementById('auditFilterModule') ? document.getElementById('auditFilterModule').value : '';
-    var filterUser = document.getElementById('auditFilterUser') ? document.getElementById('auditFilterUser').value.trim().toLowerCase() : '';
-    var filterDate = document.getElementById('auditFilterDate') ? document.getElementById('auditFilterDate').value : '';
-
-    var filtered = allLogs;
-    if (filterModule) filtered = filtered.filter(function(l) { return l.module === filterModule; });
-    if (filterUser) filtered = filtered.filter(function(l) { return (l.userName || '').toLowerCase().indexOf(filterUser) > -1; });
-    if (filterDate) filtered = filtered.filter(function(l) { return l.dateTime && l.dateTime.indexOf(filterDate) > -1; });
-
-    var fpg = paginate(filtered, APP.auditPage, APP.auditPerPage);
-
-    html += '<div class="card"><div class="table-wrapper"><table class="data-table"><thead><tr><th>Action No</th><th>DateTime</th><th>User</th><th>Module</th><th>Action</th><th>Details</th></tr></thead><tbody>';
-    if (fpg.items.length === 0) {
-        html += '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:30px">No audit entries found</td></tr>';
-    } else {
-        for (var i = 0; i < fpg.items.length; i++) {
-            var log = fpg.items[i];
-            html += '<tr><td style="font-family:var(--font-display);font-size:10px;color:var(--accent);white-space:nowrap">' + escapeHtml(log.actionNo) + '</td>';
-            html += '<td style="font-size:11px;white-space:nowrap">' + formatDateTime(log.dateTime) + '</td>';
-            html += '<td>' + escapeHtml(log.userName) + '</td>';
-            html += '<td><span class="badge badge-info">' + escapeHtml(log.module) + '</span></td>';
-            html += '<td><strong>' + escapeHtml(log.action) + '</strong></td>';
-            html += '<td style="font-size:12px;color:var(--text-secondary);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escapeHtml(log.details) + '">' + escapeHtml(log.details) + '</td></tr>';
+// ==================== SCANNER ====================
+function startCameraScan(){
+    var readerEl=document.getElementById('qr-reader');
+    if(!readerEl)return;
+    if(window._html5QrCode){try{window._html5QrCode.stop();}catch(e){}}
+    window._html5QrCode=new Html5Qrcode('qr-reader');
+    window._html5QrCode.start({facingMode:'environment'},{fps:10,qrbox:{width:250,height:250}},function(code){
+        if(window._html5QrCode){try{window._html5QrCode.stop();}catch(e){}}
+        closeScannerModal();
+        if(APP.scanCallback){APP.scanCallback(code);APP.scanCallback=null;}
+        showToast('Scanned: '+code,'success');
+    },function(){}).catch(function(err){showToast('Camera error: '+err,'error');});
+}
+function focusForBluetoothScanner(){
+    var inp=document.createElement('input');
+    inp.style.cssText='position:fixed;top:-100px;left:-100px;opacity:0';
+    inp.placeholder='Scan barcode with Bluetooth/USB scanner...';
+    inp.autofocus=true;
+    document.body.appendChild(inp);
+    setTimeout(function(){inp.focus();},100);
+    inp.addEventListener('keydown',function(e){
+        if(e.key==='Enter'){
+            var code=inp.value.trim();
+            document.body.removeChild(inp);
+            closeScannerModal();
+            if(code&&APP.scanCallback){APP.scanCallback(code);APP.scanCallback=null;}
+            else if(code)showToast('Scanned: '+code,'success');
         }
-    }
-    html += '</tbody></table></div>';
-    html += renderPagination(fpg.pages, APP.auditPage, 'goAuditPage');
-    html += '</div>';
-
-    document.getElementById('section-audit').innerHTML = html;
+    });
+    // Timeout - if no scan in 30s, remove
+    setTimeout(function(){if(document.body.contains(inp)){document.body.removeChild(inp);}},30000);
+}
+function closeScannerModal(){
+    document.getElementById('scannerModal').style.display='none';
+    if(window._html5QrCode){try{window._html5QrCode.stop();}catch(e){}}
 }
 
-function goAuditPage(p) {
-    APP.auditPage = p;
-    renderAuditLog();
-}
-
-function exportAuditLog() {
-    try {
-        var doc = new jspdf.jsPDF('l', 'mm', 'a4');
-        doc.setFontSize(16);
-        doc.text('VIP INDUSTRIES LIMITED (MD20) — Audit Log', 14, 15);
-        doc.setFontSize(9);
-        doc.text('Generated: ' + formatDateTime(new Date()), 14, 22);
-
-        var logs = DB.get('audit_log').reverse();
-        var tableData = [];
-        for (var i = 0; i < logs.length; i++) {
-            var l = logs[i];
-            tableData.push([l.actionNo, formatDateTime(l.dateTime), l.userName, l.module, l.action, l.details || '']);
-        }
-        doc.autoTable({
-            head: [['Action No', 'DateTime', 'User', 'Module', 'Action', 'Details']],
-            body: tableData,
-            startY: 28,
-            styles: { fontSize: 7 },
-            headStyles: { fillColor: [0, 229, 160] },
-            columnStyles: { 0: { cellWidth: 30 }, 5: { cellWidth: 80 } }
-        });
-        doc.save('AuditLog_' + today() + '.pdf');
-        showToast('Audit log exported!', 'success');
-    } catch(e) { showToast('Export failed: ' + e.message, 'error'); }
-}
-
-// ==================== GLOBAL SEARCH ====================
-function performGlobalSearch(query) {
-    query = query.trim().toLowerCase();
-    if (!query) return;
-    var results = [];
-
-    // Search vehicles
-    var vehs = DB.filter('vehicles', function(v) {
-        return (v.vehicleNo || '').toLowerCase().indexOf(query) > -1 ||
-               (v.lrNo || '').toLowerCase().indexOf(query) > -1 ||
-               (v.driverName || '').toLowerCase().indexOf(query) > -1;
-    });
-    for (var i = 0; i < vehs.length; i++) {
-        results.push({ type: 'Vehicle', label: vehs[i].vehicleNo + ' (LR: ' + vehs[i].lrNo + ')', action: "navigateTo('inbound','inbound-record')" });
-    }
-
-    // Search invoices
-    var invs = DB.filter('invoices', function(inv) {
-        return (inv.invoiceNo || '').toLowerCase().indexOf(query) > -1;
-    });
-    for (var j = 0; j < invs.length; j++) {
-        results.push({ type: 'Invoice', label: invs[j].invoiceNo, action: "navigateTo('inbound','inbound-record')" });
-    }
-
-    // Search materials
-    var mats = DB.filter('material_master', function(m) {
-        return (m.material || '').toLowerCase().indexOf(query) > -1 ||
-               (m.ean || '').toLowerCase().indexOf(query) > -1;
-    });
-    for (var k = 0; k < mats.length; k++) {
-        results.push({ type: 'Material', label: mats[k].material + ' (EAN: ' + mats[k].ean + ')', action: "navigateTo('material')" });
-    }
-
-    // Search GRN
-    var grns = DB.filter('grn_records', function(g) {
-        return (g.grnNo || '').toLowerCase().indexOf(query) > -1;
-    });
-    for (var g = 0; g < grns.length; g++) {
-        results.push({ type: 'GRN', label: grns[g].grnNo, action: "navigateTo('reports')" });
-    }
-
-    // Search Short Reports
-    var srts = DB.filter('short_reports', function(s) {
-        return (s.reportNo || '').toLowerCase().indexOf(query) > -1;
-    });
-    for (var s = 0; s < srts.length; s++) {
-        results.push({ type: 'Report', label: srts[s].reportNo, action: "navigateTo('reports')" });
-    }
-
-    if (results.length === 0) {
-        showToast('No results found for "' + query + '"', 'info');
-        return;
-    }
-
-    var html = '<div style="max-height:400px;overflow-y:auto">';
-    for (var r = 0; r < Math.min(results.length, 20); r++) {
-        var res = results[r];
-        html += '<div class="notif-item" style="cursor:pointer" onclick="' + res.action + ';document.getElementById(\'searchInput\').value=\'\';document.getElementById(\'searchDropdown\').remove()">';
-        html += '<span class="badge badge-info" style="margin-right:8px">' + res.type + '</span> ' + escapeHtml(res.label);
-        html += '</div>';
-    }
-    html += '</div>';
-
-    // Remove old dropdown
-    var old = document.getElementById('searchDropdown');
-    if (old) old.remove();
-
-    var dropdown = document.createElement('div');
-    dropdown.id = 'searchDropdown';
-    dropdown.style.cssText = 'position:fixed;top:50px;left:50%;transform:translateX(-50%);width:500px;max-width:90vw;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 40px rgba(0,0,0,.5);z-index:700;overflow:hidden;animation:dropIn .2s ease-out';
-    dropdown.innerHTML = '<div style="padding:10px 16px;border-bottom:1px solid var(--border);font-size:12px;color:var(--text-muted)">' + results.length + ' results found</div>' + html;
-    document.body.appendChild(dropdown);
-
-    // Close on outside click
-    setTimeout(function() {
-        document.addEventListener('click', function closeSearch(e) {
-            if (!e.target.closest('#searchDropdown') && !e.target.closest('#globalSearch')) {
-                var dd = document.getElementById('searchDropdown');
-                if (dd) dd.remove();
-                document.removeEventListener('click', closeSearch);
-            }
-        });
-    }, 100);
-}
-
-// ==================== MATRIX ANIMATION (Login Page) ====================
-function initMatrix() {
-    var canvas = document.getElementById('matrixCanvas');
-    if (!canvas) return;
-    var ctx = canvas.getContext('2d');
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
-    var cols = Math.floor(canvas.width / 14);
-    var drops = [];
-    for (var i = 0; i < cols; i++) { drops[i] = Math.random() * -100; }
-    var chars = 'VIPINDUSTRIESMD20WMS01';
-    function draw() {
-        ctx.fillStyle = 'rgba(5, 8, 16, 0.05)';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.fillStyle = '#00E5A0';
-        ctx.font = '13px monospace';
-        for (var j = 0; j < drops.length; j++) {
-            var text = chars[Math.floor(Math.random() * chars.length)];
-            ctx.fillText(text, j * 14, drops[j] * 14);
-            if (drops[j] * 14 > canvas.height && Math.random() > 0.975) { drops[j] = 0; }
-            drops[j]++;
-        }
-    }
-    setInterval(draw, 50);
-    window.addEventListener('resize', function() {
-        canvas.width = window.innerWidth;
-        canvas.height = window.innerHeight;
-    });
-}
-
-// ==================== SIDEBAR TOGGLE ====================
-function openSidebar() {
-    document.getElementById('sidebar').classList.add('open');
-    document.getElementById('sidebarOverlay').classList.add('open');
-}
-function closeSidebar() {
+// ==================== SIDEBAR MOBILE ====================
+function closeSidebar(){
     document.getElementById('sidebar').classList.remove('open');
     document.getElementById('sidebarOverlay').classList.remove('open');
 }
 
-// ==================== SESSION TIMEOUT ====================
-function checkSessionTimeout() {
-    if (!APP.sessionStart) return;
-    var elapsed = Date.now() - APP.sessionStart;
-    if (elapsed >= APP.SESSION_TIMEOUT) {
-        showToast('Session expired! Please login again.', 'warning');
-        logout();
-        return;
-    }
-    if (elapsed >= APP.SESSION_TIMEOUT - APP.WARNING_BEFORE) {
-        var remaining = Math.ceil((APP.SESSION_TIMEOUT - elapsed) / 60000);
-        showToast('Session will expire in ' + remaining + ' minutes!', 'warning');
-    }
-}
-setInterval(checkSessionTimeout, 60000);
-
-// ==================== AUTO 6PM DIFFERENCE REPORT ====================
-function checkAutoReport() {
-    var now = new Date();
-    if (now.getHours() === 18 && now.getMinutes() === 0 && now.getSeconds() < 2) {
-        var diffReports = DB.filter('difference_reports', function(r) {
-            return r.dateTime && r.dateTime.indexOf(today()) > -1;
+// ==================== BOTTOM NAV ====================
+function initBottomNav(){
+    document.querySelectorAll('.bnav-item').forEach(function(el){
+        el.addEventListener('click',function(e){
+            e.preventDefault();
+            var bnav=this.getAttribute('data-bnav');
+            if(bnav==='more'){document.getElementById('morePanel').classList.add('open');return;}
+            var secMap={dashboard:'dashboard',inbound:'inbound',picking:'picking',loading:'loading'};
+            if(secMap[bnav])navTo(secMap[bnav]);
         });
-        if (diffReports.length > 0) {
-            var managers = DB.filter('users', function(u) { return u.role === 'Manager' || u.role === 'Super Admin'; });
-            for (var i = 0; i < managers.length; i++) {
-                addNotification('Daily Difference Report: ' + diffReports.length + ' picking differences logged today.', 'warning', managers[i].username);
-            }
-            logAction('System', 'AUTO_REPORT', '6PM auto difference report sent. Count: ' + diffReports.length);
-        }
-    }
-}
-setInterval(checkAutoReport, 1000);
-
-// ==================== APP INITIALIZATION ====================
-function initApp() {
-    // Apply saved theme
-    document.documentElement.setAttribute('data-theme', APP.theme);
-    var themeIcon = document.querySelector('#themeToggle i');
-    if (themeIcon) themeIcon.className = APP.theme === 'dark' ? 'bx bx-moon' : 'bx bx-sun';
-
-    // Seed data if first time
-    seedData();
-
-    // Check for existing session
-    var session = null;
-    try { session = JSON.parse(localStorage.getItem('wms_session')); } catch(e) {}
-    if (session && session.userId) {
-        var user = DB.find('users', session.userId);
-        if (user) {
-            APP.currentUser = user;
-            APP.sessionStart = Date.now();
-            // Re-open session record
-            DB.add('user_sessions', { userId: user.id, userName: user.name, loginTime: new Date().toISOString(), logoutTime: null, status: 'Active' });
-            showMainApp();
-            return;
-        }
-    }
-
-    // Show login
-    document.getElementById('loginPage').style.display = 'flex';
-    document.getElementById('mainApp').style.display = 'none';
-    initMatrix();
+    });
+    // More panel
+    document.getElementById('morePanelOverlay').addEventListener('click',function(){document.getElementById('morePanel').classList.remove('open');});
+    document.getElementById('morePanelClose').addEventListener('click',function(){document.getElementById('morePanel').classList.remove('open');});
+    var modules=[
+        {id:'putaway',icon:'bxs-package',label:'Putaway'},
+        {id:'piv',icon:'bxs-clipboard',label:'PIV'},
+        {id:'location',icon:'bxs-map-pin',label:'Location'},
+        {id:'rack',icon:'bxs-grid-alt',label:'Rack Master'},
+        {id:'material',icon:'bxs-label',label:'Material'},
+        {id:'admin',icon:'bxs-user-detail',label:'Admin'},
+        {id:'settings',icon:'bxs-cog',label:'Settings'},
+        {id:'reports',icon:'bxs-bar-chart-alt-2',label:'Reports'},
+        {id:'audit',icon:'bxs-receipt',label:'Audit Log'},
+        {id:'user-time',icon:'bx-time-five',label:'Work Time'}
+    ];
+    var gh='';
+    modules.forEach(function(m){
+        gh+='<div class="more-grid-item" onclick="document.getElementById(\'morePanel\').classList.remove(\'open\');navTo(\''+m.id+'\')"><i class="bx '+m.icon+'"></i><span>'+m.label+'</span></div>';
+    });
+    document.getElementById('morePanelGrid').innerHTML=gh;
 }
 
-function showMainApp() {
-    document.getElementById('loginPage').style.display = 'none';
-    document.getElementById('mainApp').style.display = 'flex';
+// ==================== GLOBAL SEARCH ====================
+function initGlobalSearch(){
+    var input=document.getElementById('searchInput');
+    if(!input)return;
+    input.addEventListener('keydown',function(e){
+        if(e.key==='Enter'){
+            var q=input.value.trim().toLowerCase();if(!q)return;
+            // Search across all tables
+            var results=[];
+            DB.get('vehicles').forEach(function(v){if((v.vehicleNo||'').toLowerCase().indexOf(q)>-1||(v.lrNo||'').toLowerCase().indexOf(q)>-1)results.push({type:'Vehicle',label:v.vehicleNo,sub:v.lrNo||'',nav:'inbound',subNav:'inbound-record'});});
+            DB.get('material_master').forEach(function(m){if((m.material||'').toLowerCase().indexOf(q)>-1||(m.ean||'').toLowerCase().indexOf(q)>-1)results.push({type:'Material',label:m.material,sub:m.ean||'',nav:'material'});});
+            DB.get('location_master').forEach(function(l){if((l.rack||'').toLowerCase().indexOf(q)>-1||(l.material||'').toLowerCase().indexOf(q)>-1)results.push({type:'Location',label:l.rack+' - '+l.material,sub:'Qty: '+l.quantity,nav:'location'});});
+            DB.get('obd_data').forEach(function(o){if((o.obdNo||'').toLowerCase().indexOf(q)>-1)results.push({type:'OBD',label:o.obdNo,sub:(o.materials||[]).length+' materials',nav:'picking',subNav:'obd-upload'});});
+            DB.get('grn_records').forEach(function(g){if((g.grnNo||'').toLowerCase().indexOf(q)>-1||(g.invoiceNo||'').toLowerCase().indexOf(q)>-1)results.push({type:'GRN',label:g.grnNo,sub:g.invoiceNo,nav:'inbound',subNav:'unloading-stock'});});
+            if(!results.length){showToast('No results found for "'+q+'"','warning');return;}
+            var h='<div class="card-title"><i class="bx bx-search"></i> Search Results ('+results.length+')</div>';
+            results.slice(0,15).forEach(function(r){
+                h+='<div class="inv-list-item" onclick="closeModal();navTo(\''+r.nav+'\','+(r.subNav||'')+'\')"><div class="ili-left"><span class="badge badge-info" style="margin-right:8px">'+r.type+'</span><span class="ili-invno">'+esc(r.label)+'</span><span class="ili-info">'+esc(r.sub)+'</span></div><i class="bx bx-chevron-right" style="color:var(--text-muted)"></i></div>';
+            });
+            showModal('Search Results',h,'lg','<button class="btn btn-glass" onclick="closeModal()">Close</button>');
+            input.value='';
+        }
+    });
+    // Ctrl+K shortcut
+    document.addEventListener('keydown',function(e){
+        if((e.ctrlKey||e.metaKey)&&e.key==='k'){e.preventDefault();input.focus();}
+    });
+}
 
-    // Set user info in shell bar
-    document.getElementById('userAvatar').textContent = (APP.currentUser.name || 'A').charAt(0).toUpperCase();
-    document.getElementById('userName').textContent = APP.currentUser.name;
+// ==================== MATRIX LOGIN ANIMATION ====================
+function initMatrix(){
+    var canvas=document.getElementById('matrixCanvas');if(!canvas)return;
+    var ctx=canvas.getContext('2d');
+    canvas.width=window.innerWidth;canvas.height=window.innerHeight;
+    var cols=Math.floor(canvas.width/14);
+    var drops=[];
+    for(var i=0;i<cols;i++)drops[i]=Math.random()*canvas.height/14;
+    function draw(){
+        ctx.fillStyle='rgba(5,8,16,0.05)';ctx.fillRect(0,0,canvas.width,canvas.height);
+        ctx.fillStyle='#00E5A0';ctx.font='12px monospace';
+        for(var i=0;i<drops.length;i++){
+            var ch=String.fromCharCode(0x30A0+Math.random()*96);
+            ctx.fillText(ch,i*14,drops[i]*14);
+            if(drops[i]*14>canvas.height&&Math.random()>0.975)drops[i]=0;
+            drops[i]++;
+        }
+    }
+    window._matrixInterval=setInterval(draw,45);
+    window.addEventListener('resize',function(){canvas.width=window.innerWidth;canvas.height=window.innerHeight;});
+}
 
-    // Render sidebar with permissions
-    renderSidebar();
-
-    // Update notifications
-    updateNotifBadge();
-
-    // Navigate to dashboard
-    navigateTo('dashboard');
-
-    // Pull server data in background
-    pullAllServerData();
-
-    logAction('System', 'SESSION_START', 'Session started for ' + APP.currentUser.name);
+// ==================== SESSION TIMEOUT ====================
+function initSessionTimeout(){
+    setInterval(function(){
+        if(!APP.currentUser||!APP.sessionStart)return;
+        var elapsed=Date.now()-APP.sessionStart;
+        if(elapsed>APP.SESSION_TIMEOUT){
+            showToast('Session expired! Please login again.','warning');
+            setTimeout(function(){doLogout();},2000);
+        }
+    },30000);
 }
 
 // ==================== EVENT LISTENERS ====================
-document.addEventListener('DOMContentLoaded', function() {
-    initApp();
-
+function initEvents(){
     // Login form
-    document.getElementById('loginForm').addEventListener('submit', function(e) {
+    document.getElementById('loginForm').addEventListener('submit',function(e){
         e.preventDefault();
-        var username = document.getElementById('loginUser').value.trim();
-        var password = document.getElementById('loginPass').value;
-        if (login(username, password)) {
-            showMainApp();
+        if(doLogin(document.getElementById('loginUser').value.trim(),document.getElementById('loginPass').value)){
+            document.getElementById('loginPage').style.display='none';
+            document.getElementById('mainApp').style.display='flex';
+            if(window._matrixInterval)clearInterval(window._matrixInterval);
+            document.getElementById('userAvatar').textContent=APP.currentUser.name.charAt(0).toUpperCase();
+            document.getElementById('userName').textContent=APP.currentUser.name;
+            renderSidebar();initBottomNav();navTo('dashboard');initSessionTimeout();
         }
     });
 
     // Menu toggle
-    document.getElementById('menuToggle').addEventListener('click', openSidebar);
-    document.getElementById('sidebarClose').addEventListener('click', closeSidebar);
-    document.getElementById('sidebarOverlay').addEventListener('click', closeSidebar);
+    document.getElementById('menuToggle').addEventListener('click',function(){
+        document.getElementById('sidebar').classList.toggle('open');
+        document.getElementById('sidebarOverlay').classList.toggle('open');
+    });
+    document.getElementById('sidebarClose').addEventListener('click',closeSidebar);
+    document.getElementById('sidebarOverlay').addEventListener('click',closeSidebar);
 
     // Theme toggle
-    document.getElementById('themeToggle').addEventListener('click', function() {
-        setTheme(APP.theme === 'dark' ? 'light' : 'dark');
+    document.getElementById('themeToggle').addEventListener('click',function(){
+        APP.theme=APP.theme==='dark'?'light':'dark';
+        document.documentElement.setAttribute('data-theme',APP.theme);
+        localStorage.setItem('wms_theme',APP.theme);
+        this.querySelector('i').className=APP.theme==='dark'?'bx bx-moon':'bx bx-sun';
     });
 
-    // Notification panel
-    document.getElementById('notifBtn').addEventListener('click', function(e) {
+    // Notifications
+    document.getElementById('notifBtn').addEventListener('click',function(e){
         e.stopPropagation();
-        var panel = document.getElementById('notifPanel');
-        panel.classList.toggle('open');
-        if (panel.classList.contains('open')) renderNotifPanel();
-    });
-    document.addEventListener('click', function(e) {
-        if (!e.target.closest('#notifPanel') && !e.target.closest('#notifBtn')) {
-            document.getElementById('notifPanel').classList.remove('open');
-        }
-    });
-    document.getElementById('clearNotifs').addEventListener('click', function() {
-        DB.set('notifications', []);
-        updateNotifBadge();
+        document.getElementById('notifPanel').classList.toggle('open');
         renderNotifPanel();
-        showToast('Notifications cleared', 'info');
+    });
+    document.addEventListener('click',function(e){
+        if(!e.target.closest('#notifPanel')&&!e.target.closest('#notifBtn'))document.getElementById('notifPanel').classList.remove('open');
+    });
+    document.getElementById('clearNotifs').addEventListener('click',function(){
+        DB.set('notifications',[]);updateNotifBadge();renderNotifPanel();showToast('Notifications cleared','success');
     });
 
     // User dropdown
-    document.getElementById('userMenu').addEventListener('click', function(e) {
+    document.getElementById('userMenu').addEventListener('click',function(e){
         e.stopPropagation();
         document.getElementById('userDropdown').classList.toggle('open');
     });
-    document.addEventListener('click', function(e) {
-        if (!e.target.closest('#userMenu')) {
-            document.getElementById('userDropdown').classList.remove('open');
-        }
+    document.addEventListener('click',function(e){
+        if(!e.target.closest('#userMenu'))document.getElementById('userDropdown').classList.remove('open');
     });
-
-    // User menu actions
-    document.getElementById('ddProfile').addEventListener('click', function(e) {
-        e.preventDefault();
-        document.getElementById('userDropdown').classList.remove('open');
-        if (APP.currentUser) {
-            showModal('My Profile',
-                '<div class="form-row">' +
-                '<div class="form-group"><label>Name</label><div class="form-input" style="background:var(--bg-secondary)">' + escapeHtml(APP.currentUser.name) + '</div></div>' +
-                '<div class="form-group"><label>Username</label><div class="form-input" style="background:var(--bg-secondary)">' + escapeHtml(APP.currentUser.username) + '</div></div>' +
-                '<div class="form-group"><label>Role</label><div class="form-input" style="background:var(--bg-secondary)"><span class="badge badge-accent">' + escapeHtml(APP.currentUser.role) + '</span></div></div>' +
-                '<div class="form-group"><label>Modules</label><div class="form-input" style="background:var(--bg-secondary);font-size:12px">' + escapeHtml(APP.currentUser.permissions.modules.join(', ')) + '</div></div>' +
-                '</div>', 'md', '<button class="btn btn-secondary" onclick="closeModal()">Close</button>');
-        }
+    document.getElementById('ddLogout').addEventListener('click',function(e){e.preventDefault();doLogout();});
+    document.getElementById('ddProfile').addEventListener('click',function(e){
+        e.preventDefault();document.getElementById('userDropdown').classList.remove('open');
+        showSessionInfo();
     });
-
-    document.getElementById('ddPassword').addEventListener('click', function(e) {
-        e.preventDefault();
-        document.getElementById('userDropdown').classList.remove('open');
-        showModal('Change Password',
-            '<div class="form-group"><label>Current Password</label><input type="password" id="cpOld" class="form-input" placeholder="Enter current password"></div>' +
-            '<div class="form-group"><label>New Password</label><input type="password" id="cpNew" class="form-input" placeholder="Enter new password"></div>' +
-            '<div class="form-group"><label>Confirm New Password</label><input type="password" id="cpConfirm" class="form-input" placeholder="Confirm new password"></div>',
-            'sm',
-            '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-            '<button class="btn btn-primary" onclick="changePassword()"><i class="bx bx-check"></i> Change</button>');
-    });
-
-    document.getElementById('ddLogout').addEventListener('click', function(e) {
-        e.preventDefault();
-        document.getElementById('userDropdown').classList.remove('open');
-        if (confirm('Are you sure you want to logout?')) logout();
+    document.getElementById('ddPassword').addEventListener('click',function(e){
+        e.preventDefault();document.getElementById('userDropdown').classList.remove('open');
+        showChangePassword();
     });
 
     // Global search
-    document.getElementById('searchInput').addEventListener('keydown', function(e) {
-        if (e.key === 'Enter') {
-            performGlobalSearch(this.value);
-        }
-    });
-
-    // Ctrl+K shortcut
-    document.addEventListener('keydown', function(e) {
-        if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
-            e.preventDefault();
-            document.getElementById('searchInput').focus();
-        }
-        if (e.key === 'Escape') {
-            var dd = document.getElementById('searchDropdown');
-            if (dd) dd.remove();
-            document.getElementById('notifPanel').classList.remove('open');
-            document.getElementById('userDropdown').classList.remove('open');
-            closeModal();
-            closeScannerModal();
-        }
-    });
-
-    // 3D Card tilt effect disabled
-});
-
-function changePassword() {
-    var oldPass = document.getElementById('cpOld').value;
-    var newPass = document.getElementById('cpNew').value;
-    var confirmPass = document.getElementById('cpConfirm').value;
-    if (!oldPass || !newPass || !confirmPass) { showToast('All fields required', 'error'); return; }
-    if (oldPass !== APP.currentUser.password) { showToast('Current password is wrong!', 'error'); return; }
-    if (newPass.length < 4) { showToast('New password must be at least 4 characters', 'error'); return; }
-    if (newPass !== confirmPass) { showToast('New passwords do not match!', 'error'); return; }
-    DB.update('users', APP.currentUser.id, { password: newPass });
-    APP.currentUser.password = newPass;
-    logAction('Auth', 'PASSWORD_CHANGE', 'Password changed for ' + APP.currentUser.name);
-    showToast('Password changed successfully!', 'success');
-    closeModal();
-}
-/* ============================================================
-   PART 2: PUTAWAY + PIV + LOCATION/BIN MASTER + RACK + MATERIAL
-   Developed by Nikhil Patil
-   ============================================================ */
-
-// ==================== PUTAWAY ====================
-var putawayBuffer = [];
-
-function renderPutaway() {
-    var html = '<div class="section-header"><h2><i class="bx bxs-package"></i> Putaway</h2>';
-    html += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
-    html += '<button class="btn btn-primary btn-sm" onclick="clearPutawayBuffer()"><i class="bx bx-plus"></i> New Entry</button>';
-    html += '<button class="btn btn-success btn-sm" onclick="savePutawayBuffer()"><i class="bx bx-save"></i> Save All to Bin Master</button>';
-    html += '<label class="btn btn-warning btn-sm" style="cursor:pointer"><i class="bx bx-upload"></i> Bulk Upload Putaway<input type="file" accept=".xlsx,.xls,.csv" style="display:none" onchange="bulkUploadPutaway(this)"></label>';
-    html += '</div></div>';
-
-    // Mode toggle
-    html += '<div class="card" style="margin-bottom:16px"><div class="form-group">';
-    html += '<label style="margin-bottom:8px;display:block">Putaway Mode</label>';
-    html += '<div style="display:flex;gap:12px">';
-    html += '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:10px 20px;border:2px solid var(--accent);border-radius:8px;background:var(--accent-dim);font-weight:600;color:var(--accent)"><input type="radio" name="putawayMode" value="without" checked style="accent-color:var(--accent);width:16px;height:16px" onchange="togglePutawayInvoiceMode()"> WITHOUT Invoice</label>';
-    html += '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:10px 20px;border:2px solid var(--border);border-radius:8px;font-weight:600;color:var(--text-secondary)"><input type="radio" name="putawayMode" value="with" style="accent-color:var(--info);width:16px;height:16px" onchange="togglePutawayInvoiceMode()"> WITH Invoice</label>';
-    html += '</div></div>';
-
-    // Invoice selector (hidden by default)
-    html += '<div id="putawayInvoiceSelector" style="display:none;margin-top:12px"><div class="form-group"><label>Select Invoice</label>';
-    html += '<select id="putawayInvoiceSelect" class="form-input" onchange="loadPutawayInvoiceMaterials()"><option value="">-- Select --</option>';
-    var postedInvs = DB.filter('invoices', function(inv) { return inv.status === 'Posted'; });
-    for (var i = 0; i < postedInvs.length; i++) {
-        var veh = DB.find('vehicles', postedInvs[i].vehicleId);
-        html += '<option value="' + postedInvs[i].id + '">' + escapeHtml(postedInvs[i].invoiceNo) + ' — ' + escapeHtml(veh ? veh.vehicleNo : '') + '</option>';
-    }
-    html += '</select></div>';
-    html += '<div id="putawayInvoiceMaterials"></div></div>';
-    html += '</div>';
-
-    // Scan form
-    html += '<div class="card" style="border:2px solid var(--accent);margin-bottom:16px"><div class="card-title" style="color:var(--accent)"><i class="bx bx-scan"></i> Scan & Putaway</div>';
-    html += '<div class="form-row">';
-    html += '<div class="form-group"><label>EAN / Barcode <span class="req">*</span></label>';
-    html += '<div style="display:flex;gap:6px"><input type="text" id="putEanInput" class="form-input" placeholder="Scan or type EAN..." style="flex:1" onkeydown="if(event.key===\'Enter\')addPutawayItem()">';
-    html += '<button class="btn btn-primary btn-sm" onclick="addPutawayItem()"><i class="bx bx-plus"></i></button>';
-    html += '<button class="btn btn-secondary btn-sm scan-btn" onclick="openScannerModal(function(code){document.getElementById(\'putEanInput\').value=code;addPutawayItem()})"><i class="bx bx-qr"></i></button></div></div>';
-    html += '<div class="form-group"><label>Material (Auto)</label><input type="text" id="putMaterial" class="form-input" placeholder="Auto from master" readonly style="background:var(--bg-secondary)"></div>';
-    html += '<div class="form-group"><label>Description (Auto)</label><input type="text" id="putDesc" class="form-input" placeholder="Auto from master" readonly style="background:var(--bg-secondary)"></div>';
-    html += '<div class="form-group"><label>Rack / Location <span class="req">*</span></label>';
-    html += '<select id="putRack" class="form-input"><option value="">-- Select Rack --</option>';
-    var racks = DB.get('rack_master');
-    for (var r = 0; r < racks.length; r++) {
-        html += '<option value="' + escapeHtml(racks[r].rack) + '">' + escapeHtml(racks[r].rack) + '</option>';
-    }
-    html += '</select></div>';
-    html += '<div class="form-group"><label>Qty <span class="req">*</span></label><input type="number" id="putQty" class="form-input" value="1" min="1" style="max-width:120px"></div>';
-    html += '<div class="form-group"><label>Packing</label><select id="putPacking" class="form-input"><option value="Bag">Bag</option><option value="Box">Box</option><option value="Carton">Carton</option><option value="Pallet">Pallet</option><option value="Bottle">Bottle</option><option value="Pouch">Pouch</option><option value="Loose">Loose</option></select></div>';
-    html += '<div class="form-group"><label>Box No</label><input type="text" id="putBoxNo" class="form-input" placeholder="e.g. B001"></div>';
-    html += '</div>';
-    html += '<div class="form-actions"><button class="btn btn-primary" onclick="addPutawayItem()"><i class="bx bx-plus-circle"></i> Add to Buffer</button></div>';
-    html += '</div>';
-
-    // Buffer table
-    html += '<div class="card"><div class="card-title">Putaway Buffer (' + putawayBuffer.length + ' items)</div>';
-    html += '<div id="putawayBufferTable"></div>';
-    if (putawayBuffer.length > 0) {
-        html += '<div class="form-actions" style="margin-top:12px"><button class="btn btn-success" onclick="savePutawayBuffer()"><i class="bx bx-save"></i> Save All to Bin Master</button><button class="btn btn-danger" onclick="clearPutawayBuffer()"><i class="bx bx-trash"></i> Clear Buffer</button></div>';
-    }
-    html += '</div>';
-
-    // Today's putaway history
-    var todayPutaway = DB.filter('location_master', function(l) { return l.action === 'PUTAWAY' && l.date === today(); });
-    if (todayPutaway.length > 0) {
-        html += '<div class="card" style="margin-top:16px"><div class="card-title">Today\'s Putaway (' + todayPutaway.length + ')</div>';
-        html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>Time</th><th>EAN</th><th>Material</th><th>Rack</th><th>Qty</th><th>Packing</th><th>Box</th><th>User</th></tr></thead><tbody>';
-        for (var t = 0; t < todayPutaway.length; t++) {
-            var tp = todayPutaway[t];
-            html += '<tr><td>' + (t + 1) + '</td><td style="font-size:11px;color:var(--text-muted)">' + formatDateTime(tp.dateTime) + '</td>';
-            html += '<td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(tp.ean) + '</td>';
-            html += '<td>' + escapeHtml(tp.material) + '</td><td><span class="badge badge-accent">' + escapeHtml(tp.rack) + '</span></td>';
-            html += '<td><strong>' + tp.quantity + '</strong></td><td>' + escapeHtml(tp.packing) + '</td><td>' + escapeHtml(tp.box) + '</td>';
-            html += '<td>' + escapeHtml(tp.user) + '</td></tr>';
-        }
-        html += '</tbody></table></div></div>';
-    }
-
-    document.getElementById('section-putaway').innerHTML = html;
-    renderPutawayBuffer();
-}
-
-function togglePutawayInvoiceMode() {
-    var mode = document.querySelector('input[name="putawayMode"]:checked').value;
-    var selector = document.getElementById('putawayInvoiceSelector');
-    if (selector) selector.style.display = mode === 'with' ? 'block' : 'none';
-    // Update radio styling
-    var labels = document.querySelectorAll('input[name="putawayMode"]');
-    for (var i = 0; i < labels.length; i++) {
-        var parent = labels[i].closest('label');
-        if (labels[i].checked) {
-            parent.style.borderColor = labels[i].value === 'without' ? 'var(--accent)' : 'var(--info)';
-            parent.style.background = labels[i].value === 'without' ? 'var(--accent-dim)' : 'var(--info-dim)';
-            parent.style.color = labels[i].value === 'without' ? 'var(--accent)' : 'var(--info)';
-        } else {
-            parent.style.borderColor = 'var(--border)';
-            parent.style.background = 'transparent';
-            parent.style.color = 'var(--text-secondary)';
-        }
-    }
-}
-
-function loadPutawayInvoiceMaterials() {
-    var invId = document.getElementById('putawayInvoiceSelect').value;
-    var container = document.getElementById('putawayInvoiceMaterials');
-    if (!invId) { container.innerHTML = ''; return; }
-    var mats = DB.filter('invoice_materials', function(m) { return m.invoiceId === invId; });
-    var html = '<div class="table-wrapper" style="margin-top:12px"><table class="data-table"><thead><tr><th>Material</th><th>EAN</th><th>Invoice Qty</th><th>Unloaded Qty</th><th>Remaining</th></tr></thead><tbody>';
-    for (var i = 0; i < mats.length; i++) {
-        var m = mats[i];
-        var putawayDone = 0;
-        // Check how much already putaway for this invoice+material
-        var allLoc = DB.get('location_master');
-        for (var j = 0; j < allLoc.length; j++) {
-            if (allLoc[j].invoiceId === invId && allLoc[j].material === m.material && allLoc[j].action === 'PUTAWAY') {
-                putawayDone += allLoc[j].quantity;
-            }
-        }
-        var remaining = (m.unloadedQty || 0) - putawayDone;
-        html += '<tr><td>' + escapeHtml(m.material) + '</td><td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(m.ean || '-') + '</td>';
-        html += '<td>' + m.qty + '</td><td>' + (m.unloadedQty || 0) + '</td>';
-        html += '<td class="' + (remaining > 0 ? 'qty-match' : 'qty-mismatch') + '">' + remaining + '</td></tr>';
-    }
-    html += '</tbody></table></div>';
-    container.innerHTML = html;
-}
-
-function addPutawayItem() {
-    var ean = document.getElementById('putEanInput').value.trim();
-    var rack = document.getElementById('putRack').value;
-    var qty = parseInt(document.getElementById('putQty').value) || 0;
-    var packing = document.getElementById('putPacking').value;
-    var boxNo = document.getElementById('putBoxNo').value.trim();
-
-    if (!ean) { showToast('Scan or enter EAN', 'error'); return; }
-    if (!rack) { showToast('Select a rack', 'error'); return; }
-    if (qty <= 0) { showToast('Enter valid qty', 'error'); return; }
-
-    var material = document.getElementById('putMaterial').value.trim();
-    var desc = document.getElementById('putDesc').value.trim();
-
-    // Auto-fill from master if empty
-    if (!material || !desc) {
-        var matMaster = DB.get('material_master');
-        for (var i = 0; i < matMaster.length; i++) {
-            if (matMaster[i].ean === ean || matMaster[i].material.toUpperCase() === ean.toUpperCase()) {
-                material = material || matMaster[i].material;
-                desc = desc || matMaster[i].description;
-                ean = matMaster[i].ean || ean;
-                break;
-            }
-        }
-    }
-
-    if (!material) { showToast('Material not found in master! Enter manually.', 'warning'); }
-
-    // Get invoice ID if in "with invoice" mode
-    var invId = '';
-    var invNo = '';
-    var mode = document.querySelector('input[name="putawayMode"]');
-    if (mode && mode.value === 'with') {
-        var sel = document.getElementById('putawayInvoiceSelect');
-        if (sel && sel.value) {
-            invId = sel.value;
-            var inv = DB.find('invoices', invId);
-            invNo = inv ? inv.invoiceNo : '';
-        }
-    }
-
-    putawayBuffer.push({
-        id: DB.uid(), date: today(), ean: ean, material: material || 'UNKNOWN',
-        description: desc || '-', rack: rack, quantity: qty, packing: packing,
-        box: boxNo || '-', action: 'PUTAWAY', user: APP.currentUser ? APP.currentUser.name : 'System',
-        invoiceId: invId, invoiceNo: invNo, dateTime: new Date().toISOString()
-    });
-
-    // Clear inputs
-    document.getElementById('putEanInput').value = '';
-    document.getElementById('putMaterial').value = '';
-    document.getElementById('putDesc').value = '';
-    document.getElementById('putQty').value = '1';
-    document.getElementById('putBoxNo').value = '';
-    document.getElementById('putEanInput').focus();
-
-    renderPutawayBuffer();
-    showToast('Added: ' + (material || ean) + ' → ' + rack, 'success');
-}
-
-function removePutawayItem(id) {
-    putawayBuffer = putawayBuffer.filter(function(p) { return p.id !== id; });
-    renderPutawayBuffer();
-    renderPutaway(); // Re-render to update count
-}
-
-function renderPutawayBuffer() {
-    var container = document.getElementById('putawayBufferTable');
-    if (!container) return;
-    if (putawayBuffer.length === 0) {
-        container.innerHTML = '<div style="text-align:center;color:var(--text-muted);padding:20px">Buffer is empty. Scan items above.</div>';
-        return;
-    }
-    var html = '<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>EAN</th><th>Material</th><th>Rack</th><th>Qty</th><th>Packing</th><th>Box</th><th>Invoice</th><th>Action</th></tr></thead><tbody>';
-    for (var i = 0; i < putawayBuffer.length; i++) {
-        var p = putawayBuffer[i];
-        html += '<tr><td>' + (i + 1) + '</td><td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(p.ean) + '</td>';
-        html += '<td>' + escapeHtml(p.material) + '</td><td><span class="badge badge-accent">' + escapeHtml(p.rack) + '</span></td>';
-        html += '<td><strong>' + p.quantity + '</strong></td><td>' + escapeHtml(p.packing) + '</td><td>' + escapeHtml(p.box) + '</td>';
-        html += '<td>' + escapeHtml(p.invoiceNo || '-') + '</td>';
-        html += '<td><button class="btn btn-danger btn-sm" onclick="removePutawayItem(\'' + p.id + '\')"><i class="bx bx-trash"></i></button></td></tr>';
-    }
-    html += '</tbody></table></div>';
-    container.innerHTML = html;
-}
-
-function savePutawayBuffer() {
-    if (putawayBuffer.length === 0) { showToast('Buffer is empty!', 'error'); return; }
-    for (var i = 0; i < putawayBuffer.length; i++) {
-        var item = Object.assign({}, putawayBuffer[i]);
-        delete item.id; // Let DB.add create new id
-        DB.add('location_master', item);
-    }
-    logAction('Putaway', 'SAVE', 'Saved ' + putawayBuffer.length + ' items to bin master');
-    showToast(putawayBuffer.length + ' items saved to Bin Master!', 'success');
-    var count = putawayBuffer.length;
-    putawayBuffer = [];
-    renderPutaway();
-    addNotification(count + ' items putaway completed by ' + (APP.currentUser ? APP.currentUser.name : 'System'), 'success');
-}
-
-function clearPutawayBuffer() {
-    if (putawayBuffer.length > 0 && !confirm('Clear all ' + putawayBuffer.length + ' items from buffer?')) return;
-    putawayBuffer = [];
-    renderPutaway();
-}
-
-function bulkUploadPutaway(input) {
-    if (!input.files[0]) return;
-    var reader = new FileReader();
-    reader.onload = function(e) {
-        try {
-            var wb = XLSX.read(e.target.result, { type: 'array' });
-            var ws = wb.Sheets[wb.SheetNames[0]];
-            var data = XLSX.utils.sheet_to_json(ws, { header: 1 });
-            if (data.length === 0) { showToast('Empty file', 'error'); return; }
-            var startRow = (String(data[0][0] || '').toLowerCase().indexOf('ean') > -1 || String(data[0][0] || '').toLowerCase().indexOf('date') > -1) ? 1 : 0;
-            var count = 0;
-            for (var k = startRow; k < data.length; k++) {
-                var r = data[k]; if (!r || !r[1]) continue;
-                var ean = String(r[1] || '').trim();
-                var material = String(r[2] || '').trim();
-                var desc = String(r[3] || '').trim();
-                var qty = parseInt(r[4]) || 0;
-                var packing = String(r[5] || 'Bag').trim();
-                var box = String(r[6] || '-').trim();
-                var rack = String(r[7] || '').trim();
-                if (ean && material && qty > 0) {
-                    DB.add('location_master', {
-                        date: String(r[0] || today()), ean: ean, material: material, description: desc,
-                        rack: rack || 'UNASSIGNED', quantity: qty, packing: packing, box: box,
-                        action: 'PUTAWAY', user: APP.currentUser ? APP.currentUser.name : 'System',
-                        dateTime: new Date().toISOString()
-                    });
-                    count++;
-                }
-            }
-            logAction('Putaway', 'BULK_UPLOAD', 'Bulk uploaded ' + count + ' items');
-            showToast('Bulk upload: ' + count + ' items saved!', 'success');
-            renderPutaway();
-        } catch(err) { showToast('Error: ' + err.message, 'error'); }
-    };
-    reader.readAsArrayBuffer(input.files[0]);
-    input.value = '';
-}
-
-// ==================== PIV ====================
-var pivLiveActive = false;
-var pivLiveItems = [];
-
-function renderPIV() {
-    var html = '<div class="section-header"><h2><i class="bx bxs-clipboard"></i> PIV (Physical Inventory Verification)</h2>';
-    html += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
-    html += '<button class="btn btn-primary btn-sm" onclick="togglePivLive()"><i class="bx bx-play"></i> <span id="pivLiveBtnText">Start Live Scan</span></button>';
-    html += '<button class="btn btn-success btn-sm" onclick="savePivData()"><i class="bx bx-save"></i> Save to Bin Master</button>';
-    html += '<label class="btn btn-warning btn-sm" style="cursor:pointer"><i class="bx bx-upload"></i> Bulk Upload PIV<input type="file" accept=".xlsx,.xls,.csv" style="display:none" onchange="bulkUploadPIV(this)"></label>';
-    html += '</div></div>';
-
-    // Scan form (same as putaway but PIV action)
-    html += '<div class="card" style="border:2px solid var(--accent2);margin-bottom:16px"><div class="card-title" style="color:var(--accent2)"><i class="bx bx-scan"></i> PIV Scan Entry</div>';
-    html += '<div class="form-row">';
-    html += '<div class="form-group"><label>EAN / Barcode <span class="req">*</span></label>';
-    html += '<div style="display:flex;gap:6px"><input type="text" id="pivEanInput" class="form-input" placeholder="Scan or type EAN..." style="flex:1" onkeydown="if(event.key===\'Enter\')addPivItem()">';
-    html += '<button class="btn btn-primary btn-sm" onclick="addPivItem()"><i class="bx bx-plus"></i></button>';
-    html += '<button class="btn btn-secondary btn-sm scan-btn" onclick="openScannerModal(function(code){document.getElementById(\'pivEanInput\').value=code;addPivItem()})"><i class="bx bx-qr"></i></button></div></div>';
-    html += '<div class="form-group"><label>Material (Auto)</label><input type="text" id="pivMaterial" class="form-input" placeholder="Auto from master" readonly style="background:var(--bg-secondary)"></div>';
-    html += '<div class="form-group"><label>Description (Auto)</label><input type="text" id="pivDesc" class="form-input" placeholder="Auto from master" readonly style="background:var(--bg-secondary)"></div>';
-    html += '<div class="form-group"><label>Rack / Location</label>';
-    html += '<select id="pivRack" class="form-input"><option value="">-- Select Rack --</option>';
-    var racks = DB.get('rack_master');
-    for (var r = 0; r < racks.length; r++) {
-        html += '<option value="' + escapeHtml(racks[r].rack) + '">' + escapeHtml(racks[r].rack) + '</option>';
-    }
-    html += '</select></div>';
-    html += '<div class="form-group"><label>Qty</label><input type="number" id="pivQty" class="form-input" value="1" min="1" style="max-width:120px"></div>';
-    html += '<div class="form-group"><label>Packing</label><select id="pivPacking" class="form-input"><option value="Bag">Bag</option><option value="Box">Box</option><option value="Carton">Carton</option><option value="Pallet">Pallet</option><option value="Bottle">Bottle</option><option value="Pouch">Pouch</option><option value="Loose">Loose</option></select></div>';
-    html += '<div class="form-group"><label>Box No</label><input type="text" id="pivBoxNo" class="form-input" placeholder="e.g. B001"></div>';
-    html += '</div>';
-    html += '<div class="form-actions"><button class="btn btn-primary" onclick="addPivItem()"><i class="bx bx-plus-circle"></i> Add PIV Entry</button></div>';
-    html += '</div>';
-
-    // Live scan indicator
-    html += '<div id="pivLiveIndicator" style="display:none;padding:10px;background:var(--accent2-dim);border:1px solid var(--accent2);border-radius:8px;margin-bottom:16px;text-align:center;color:var(--accent2);font-weight:700;animation:pulse 1.5s infinite"><i class="bx bx-broadcast"></i> LIVE SCAN MODE ACTIVE — Each scan saves directly to Bin Master</div>';
-
-    // PIV items table
-    html += '<div class="card"><div class="card-title">PIV Entries (This Session: ' + pivLiveItems.length + ')</div>';
-    html += '<div id="pivItemsTable"></div>';
-    html += '</div>';
-
-    // Today's PIV history
-    var todayPiv = DB.filter('location_master', function(l) { return l.action === 'PIV' && l.date === today(); });
-    if (todayPiv.length > 0) {
-        html += '<div class="card" style="margin-top:16px"><div class="card-title">Today\'s PIV History (' + todayPiv.length + ')</div>';
-        html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>Time</th><th>EAN</th><th>Material</th><th>Rack</th><th>Qty</th><th>Packing</th><th>Box</th><th>User</th></tr></thead><tbody>';
-        for (var t = 0; t < todayPiv.length; t++) {
-            var tp = todayPiv[t];
-            html += '<tr><td>' + (t + 1) + '</td><td style="font-size:11px;color:var(--text-muted)">' + formatDateTime(tp.dateTime) + '</td>';
-            html += '<td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(tp.ean) + '</td>';
-            html += '<td>' + escapeHtml(tp.material) + '</td><td><span class="badge badge-accent">' + escapeHtml(tp.rack) + '</span></td>';
-            html += '<td><strong>' + tp.quantity + '</strong></td><td>' + escapeHtml(tp.packing) + '</td><td>' + escapeHtml(tp.box) + '</td>';
-            html += '<td>' + escapeHtml(tp.user) + '</td></tr>';
-        }
-        html += '</tbody></table></div></div>';
-    }
-
-    document.getElementById('section-piv').innerHTML = html;
-    renderPivItems();
-}
-
-function togglePivLive() {
-    pivLiveActive = !pivLiveActive;
-    var btn = document.getElementById('pivLiveBtnText');
-    var indicator = document.getElementById('pivLiveIndicator');
-    if (pivLiveActive) {
-        if (btn) btn.textContent = 'Stop Live Scan';
-        if (indicator) indicator.style.display = 'block';
-        document.getElementById('pivEanInput').focus();
-        showToast('LIVE SCAN ON — Each scan saves directly!', 'warning');
-    } else {
-        if (btn) btn.textContent = 'Start Live Scan';
-        if (indicator) indicator.style.display = 'none';
-        showToast('Live scan stopped', 'info');
-    }
-}
-
-function addPivItem() {
-    var ean = document.getElementById('pivEanInput').value.trim();
-    var rack = document.getElementById('pivRack').value || 'UNASSIGNED';
-    var qty = parseInt(document.getElementById('pivQty').value) || 1;
-    var packing = document.getElementById('pivPacking').value;
-    var boxNo = document.getElementById('pivBoxNo').value.trim();
-
-    if (!ean) { showToast('Scan or enter EAN', 'error'); return; }
-
-    var material = document.getElementById('pivMaterial').value.trim();
-    var desc = document.getElementById('pivDesc').value.trim();
-
-    // Auto-fill from master
-    if (!material || !desc) {
-        var matMaster = DB.get('material_master');
-        for (var i = 0; i < matMaster.length; i++) {
-            if (matMaster[i].ean === ean || matMaster[i].material.toUpperCase() === ean.toUpperCase()) {
-                material = material || matMaster[i].material;
-                desc = desc || matMaster[i].description;
-                ean = matMaster[i].ean || ean;
-                break;
-            }
-        }
-    }
-
-    var item = {
-        id: DB.uid(), date: today(), ean: ean, material: material || 'UNKNOWN',
-        description: desc || '-', rack: rack, quantity: qty, packing: packing,
-        box: boxNo || '-', action: 'PIV', user: APP.currentUser ? APP.currentUser.name : 'System',
-        dateTime: new Date().toISOString()
-    };
-
-    // LIVE MODE: Save directly to bin master
-    if (pivLiveActive) {
-        var saved = DB.add('location_master', item);
-        logAction('PIV', 'LIVE_SCAN', 'Live PIV: ' + item.material + ' qty=' + qty + ' at ' + rack);
-        showToast('LIVE SAVED: ' + (material || ean), 'success');
-    } else {
-        pivLiveItems.push(item);
-    }
-
-    // Clear inputs
-    document.getElementById('pivEanInput').value = '';
-    document.getElementById('pivMaterial').value = '';
-    document.getElementById('pivDesc').value = '';
-    document.getElementById('pivQty').value = '1';
-    document.getElementById('pivBoxNo').value = '';
-    document.getElementById('pivEanInput').focus();
-
-    if (!pivLiveActive) {
-        renderPivItems();
-        showToast('Added: ' + (material || ean), 'success');
-    }
-}
-
-function removePivItem(id) {
-    pivLiveItems = pivLiveItems.filter(function(p) { return p.id !== id; });
-    renderPivItems();
-}
-
-function renderPivItems() {
-    var container = document.getElementById('pivItemsTable');
-    if (!container) return;
-    if (pivLiveItems.length === 0) {
-        container.innerHTML = '<div style="text-align:center;color:var(--text-muted);padding:20px">No PIV entries yet. ' + (pivLiveActive ? 'Live mode ON — just scan!' : 'Scan items or enable Live mode.') + '</div>';
-        return;
-    }
-    var html = '<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>EAN</th><th>Material</th><th>Rack</th><th>Qty</th><th>Packing</th><th>Box</th><th>Action</th></tr></thead><tbody>';
-    for (var i = 0; i < pivLiveItems.length; i++) {
-        var p = pivLiveItems[i];
-        html += '<tr><td>' + (i + 1) + '</td><td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(p.ean) + '</td>';
-        html += '<td>' + escapeHtml(p.material) + '</td><td><span class="badge badge-accent">' + escapeHtml(p.rack) + '</span></td>';
-        html += '<td><strong>' + p.quantity + '</strong></td><td>' + escapeHtml(p.packing) + '</td><td>' + escapeHtml(p.box) + '</td>';
-        html += '<td><button class="btn btn-danger btn-sm" onclick="removePivItem(\'' + p.id + '\')"><i class="bx bx-trash"></i></button></td></tr>';
-    }
-    html += '</tbody></table></div>';
-    container.innerHTML = html;
-}
-
-function savePivData() {
-    if (pivLiveItems.length === 0) { showToast('No PIV entries to save!', 'error'); return; }
-    for (var i = 0; i < pivLiveItems.length; i++) {
-        var item = Object.assign({}, pivLiveItems[i]);
-        delete item.id;
-        DB.add('location_master', item);
-    }
-    logAction('PIV', 'SAVE', 'Saved ' + pivLiveItems.length + ' PIV items to bin master');
-    showToast(pivLiveItems.length + ' PIV items saved to Bin Master!', 'success');
-    var count = pivLiveItems.length;
-    pivLiveItems = [];
-    renderPIV();
-    addNotification(count + ' PIV items saved by ' + (APP.currentUser ? APP.currentUser.name : 'System'), 'info');
-}
-
-function bulkUploadPIV(input) {
-    if (!input.files[0]) return;
-    var reader = new FileReader();
-    reader.onload = function(e) {
-        try {
-            var wb = XLSX.read(e.target.result, { type: 'array' });
-            var ws = wb.Sheets[wb.SheetNames[0]];
-            var data = XLSX.utils.sheet_to_json(ws, { header: 1 });
-            if (data.length === 0) { showToast('Empty file', 'error'); return; }
-            var startRow = (String(data[0][0] || '').toLowerCase().indexOf('ean') > -1 || String(data[0][0] || '').toLowerCase().indexOf('date') > -1) ? 1 : 0;
-            var count = 0;
-            for (var k = startRow; k < data.length; k++) {
-                var r = data[k]; if (!r || !r[1]) continue;
-                var ean = String(r[1] || '').trim();
-                var material = String(r[2] || '').trim();
-                var desc = String(r[3] || '').trim();
-                var qty = parseInt(r[4]) || 0;
-                var packing = String(r[5] || 'Bag').trim();
-                var box = String(r[6] || '-').trim();
-                if (ean && material && qty > 0) {
-                    DB.add('location_master', {
-                        date: String(r[0] || today()), ean: ean, material: material, description: desc,
-                        rack: 'UNASSIGNED', quantity: qty, packing: packing, box: box,
-                        action: 'PIV', user: APP.currentUser ? APP.currentUser.name : 'System',
-                        dateTime: new Date().toISOString()
-                    });
-                    count++;
-                }
-            }
-            logAction('PIV', 'BULK_UPLOAD', 'Bulk uploaded ' + count + ' PIV items');
-            showToast('PIV Bulk upload: ' + count + ' items!', 'success');
-            renderPIV();
-        } catch(err) { showToast('Error: ' + err.message, 'error'); }
-    };
-    reader.readAsArrayBuffer(input.files[0]);
-    input.value = '';
-}
-
-// ==================== LOCATION MASTER ====================
-function renderLocationMaster() {
-    var locations = DB.get('location_master');
-    var search = document.getElementById('locSearchInput') ? document.getElementById('locSearchInput').value.trim().toLowerCase() : '';
-    var filterRack = document.getElementById('locRackFilter') ? document.getElementById('locRackFilter').value : '';
-    var filterAction = document.getElementById('locActionFilter') ? document.getElementById('locActionFilter').value : '';
-
-    // Apply filters
-    var filtered = locations;
-    if (search) {
-        filtered = filtered.filter(function(l) {
-            return (l.rack || '').toLowerCase().indexOf(search) > -1 ||
-                (l.material || '').toLowerCase().indexOf(search) > -1 ||
-                (l.ean || '').toLowerCase().indexOf(search) > -1 ||
-                (l.description || '').toLowerCase().indexOf(search) > -1 ||
-                String(l.quantity || '').indexOf(search) > -1;
-        });
-    }
-    if (filterRack) {
-        filtered = filtered.filter(function(l) { return l.rack === filterRack; });
-    }
-    if (filterAction) {
-        filtered = filtered.filter(function(l) { return l.action === filterAction; });
-    }
-
-    // Sort newest first
-    filtered.sort(function(a, b) { return new Date(b.createdAt || b.dateTime || 0) - new Date(a.createdAt || a.dateTime || 0); });
-
-    var pg = paginate(filtered, APP.locPage, APP.locPerPage);
-    var racks = DB.get('rack_master');
-    var rackOptions = '<option value="">All Racks</option>';
-    for (var r = 0; r < racks.length; r++) {
-        rackOptions += '<option value="' + escapeHtml(racks[r].rack) + '"' + (filterRack === racks[r].rack ? ' selected' : '') + '>' + escapeHtml(racks[r].rack) + '</option>';
-    }
-
-    // Total quantity in warehouse
-    var totalQty = 0;
-    for (var tq = 0; tq < locations.length; tq++) {
-        totalQty += (Number(locations[tq].quantity) || 0);
-    }
-
-    var html = '<div class="section-header"><h2><i class="bx bxs-map-pin"></i> Location Master</h2>';
-    html += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
-    html += '<button class="btn btn-primary" onclick="showAddLocationForm()"><i class="bx bx-plus"></i> Add Location</button>';
-    html += '<button class="btn btn-warning" onclick="showBulkLocationUpload()"><i class="bx bx-upload"></i> Bulk Upload</button>';
-    html += '<button class="btn btn-secondary" onclick="exportLocationMaster()"><i class="bx bx-download"></i> Export Excel</button>';
-    html += '</div></div>';
-
-    // KPI row
-    html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;margin-bottom:20px">';
-    html += '<div class="kpi-card"><div class="kpi-value">' + locations.length + '</div><div class="kpi-label">Total Records</div></div>';
-    html += '<div class="kpi-card"><div class="kpi-value">' + totalQty + '</div><div class="kpi-label">Total Quantity</div></div>';
-    html += '<div class="kpi-card"><div class="kpi-value">' + (filtered.length) + '</div><div class="kpi-label">Filtered Records</div></div>';
-    html += '</div>';
-
-    // Filters
-    html += '<div class="card" style="margin-bottom:16px"><div style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">';
-    html += '<div class="form-group" style="flex:1;min-width:200px"><label>Search</label><input type="text" id="locSearchInput" class="form-input" placeholder="Rack, Material, EAN, Qty..." value="' + escapeHtml(search) + '" oninput="APP.locPage=1;renderLocationMaster()"></div>';
-    html += '<div class="form-group" style="min-width:160px"><label>Rack</label><select id="locRackFilter" class="form-input" onchange="APP.locPage=1;renderLocationMaster()">' + rackOptions + '</select></div>';
-    html += '<div class="form-group" style="min-width:130px"><label>Action</label><select id="locActionFilter" class="form-input" onchange="APP.locPage=1;renderLocationMaster()"><option value="">All</option><option value="PUTAWAY"' + (filterAction === 'PUTAWAY' ? ' selected' : '') + '>PUTAWAY</option><option value="PIV"' + (filterAction === 'PIV' ? ' selected' : '') + '>PIV</option></select></div>';
-    html += '<button class="btn btn-sm btn-secondary" onclick="APP.locPage=1;document.getElementById(\'locSearchInput\').value=\'\';document.getElementById(\'locRackFilter\').value=\'\';document.getElementById(\'locActionFilter\').value=\'\';renderLocationMaster()"><i class="bx bx-refresh"></i> Clear</button>';
-    html += '</div></div>';
-
-    // Table
-    html += '<div class="card"><div class="card-title">Location Records (' + pg.total + ')</div><div class="table-wrapper"><table class="data-table"><thead><tr>';
-    html += '<th>#</th><th>Date</th><th>Rack</th><th>EAN</th><th>Material</th><th>Description</th><th style="color:var(--accent);font-weight:800">Qty</th><th>Packing</th><th>Box</th><th>Action</th><th>User</th><th>Actions</th>';
-    html += '</tr></thead><tbody>';
-    if (pg.items.length === 0) {
-        html += '<tr><td colspan="12" style="text-align:center;color:var(--text-muted);padding:40px"><i class="bx bx-inbox" style="font-size:32px;display:block;margin-bottom:8px"></i>No location records found</td></tr>';
-    } else {
-        for (var i = 0; i < pg.items.length; i++) {
-            var l = pg.items[i];
-            var rowNum = (APP.locPage - 1) * APP.locPerPage + i + 1;
-            var qtyVal = Number(l.quantity) || 0;
-            var qtyClass = qtyVal > 0 ? 'qty-match' : 'qty-mismatch';
-            html += '<tr>';
-            html += '<td>' + rowNum + '</td>';
-            html += '<td style="font-size:12px">' + escapeHtml(l.date || '-') + '</td>';
-            html += '<td><strong style="color:var(--accent)">' + escapeHtml(l.rack || '-') + '</strong></td>';
-            html += '<td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(l.ean || '-') + '</td>';
-            html += '<td>' + escapeHtml(l.material || '-') + '</td>';
-            html += '<td style="font-size:12px;color:var(--text-secondary)">' + escapeHtml(l.description || '-') + '</td>';
-            html += '<td class="' + qtyClass + '" style="font-size:16px;font-weight:800">' + qtyVal + '</td>';
-            html += '<td>' + escapeHtml(l.packing || '-') + '</td>';
-            html += '<td>' + escapeHtml(l.box || '-') + '</td>';
-            html += '<td><span class="badge badge-' + (l.action === 'PUTAWAY' ? 'success' : 'info') + '">' + escapeHtml(l.action || '-') + '</span></td>';
-            html += '<td style="font-size:12px;color:var(--text-muted)">' + escapeHtml(l.user || '-') + '</td>';
-            html += '<td><div class="table-actions">';
-            html += '<button class="btn-icon" title="Edit" onclick="showEditLocation(\'' + l.id + '\')"><i class="bx bx-edit"></i></button>';
-            html += '<button class="btn-icon danger" title="Delete" onclick="deleteLocation(\'' + l.id + '\')"><i class="bx bx-trash"></i></button>';
-            html += '</div></td>';
-            html += '</tr>';
-        }
-    }
-    html += '</tbody></table></div>';
-    html += renderPagination(APP.locPage, pg.pages, 'goLocPage');
-    html += '</div>';
-
-    var sec = document.getElementById('section-location');
-    if (sec) sec.innerHTML = html;
-}
-
-function goLocPage(p) {
-    if (p < 1) return;
-    APP.locPage = p;
-    renderLocationMaster();
-}
-
-// --- ADD SINGLE LOCATION ---
-function showAddLocationForm() {
-    var racks = DB.get('rack_master');
-    var materials = DB.get('material_master');
-    var rackOpts = '<option value="">-- Select Rack --</option>';
-    for (var r = 0; r < racks.length; r++) {
-        rackOpts += '<option value="' + escapeHtml(racks[r].rack) + '">' + escapeHtml(racks[r].rack) + '</option>';
-    }
-    var matOpts = '<option value="">-- Select Material --</option>';
-    for (var m = 0; m < materials.length; m++) {
-        matOpts += '<option value="' + escapeHtml(materials[m].material) + '" data-ean="' + escapeHtml(materials[m].ean || '') + '" data-desc="' + escapeHtml(materials[m].description || '') + '">' + escapeHtml(materials[m].material) + ' (' + escapeHtml(materials[m].ean || 'No EAN') + ')</option>';
-    }
-    var html = '<div class="form-row">';
-    html += '<div class="form-group"><label>Date <span class="req">*</span></label><input type="date" id="locFormDate" class="form-input" value="' + today() + '"></div>';
-    html += '<div class="form-group"><label>Rack <span class="req">*</span></label><select id="locFormRack" class="form-input">' + rackOpts + '</select></div>';
-    html += '<div class="form-group"><label>Material <span class="req">*</span></label><select id="locFormMaterial" class="form-input" onchange="onLocMaterialChange()">' + matOpts + '</select></div>';
-    html += '</div>';
-    html += '<div class="form-row">';
-    html += '<div class="form-group"><label>EAN</label><input type="text" id="locFormEan" class="form-input" placeholder="Auto-filled or scan" readonly style="background:var(--bg-secondary)"></div>';
-    html += '<div class="form-group"><label>Description</label><input type="text" id="locFormDesc" class="form-input" placeholder="Auto-filled" readonly style="background:var(--bg-secondary)"></div>';
-    html += '<div class="form-group"><label>Quantity <span class="req">*</span></label><input type="number" id="locFormQty" class="form-input" placeholder="Enter quantity" min="0" style="font-size:18px;font-weight:800;color:var(--accent)"></div>';
-    html += '</div>';
-    html += '<div class="form-row">';
-    html += '<div class="form-group"><label>Packing</label><input type="text" id="locFormPacking" class="form-input" placeholder="e.g. Bag, Box, Bottle"></div>';
-    html += '<div class="form-group"><label>Box No</label><input type="text" id="locFormBox" class="form-input" placeholder="e.g. B001"></div>';
-    html += '<div class="form-group"><label>Action <span class="req">*</span></label><select id="locFormAction" class="form-input"><option value="PUTAWAY">PUTAWAY</option><option value="PIV">PIV</option></select></div>';
-    html += '</div>';
-    showModal('<i class="bx bx-plus-circle"></i> Add Location', html, 'lg',
-        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-        '<button class="btn btn-primary" onclick="saveLocation()"><i class="bx bx-check-circle"></i> Save Location</button>');
-}
-
-function onLocMaterialChange() {
-    var sel = document.getElementById('locFormMaterial');
-    if (sel && sel.selectedOptions[0]) {
-        var opt = sel.selectedOptions[0];
-        document.getElementById('locFormEan').value = opt.getAttribute('data-ean') || '';
-        document.getElementById('locFormDesc').value = opt.getAttribute('data-desc') || '';
-    }
-}
-
-function saveLocation() {
-    var date = document.getElementById('locFormDate').value;
-    var rack = document.getElementById('locFormRack').value;
-    var material = document.getElementById('locFormMaterial').value;
-    var ean = document.getElementById('locFormEan').value.trim();
-    var desc = document.getElementById('locFormDesc').value.trim();
-    var qtyRaw = document.getElementById('locFormQty').value;
-    var packing = document.getElementById('locFormPacking').value.trim();
-    var box = document.getElementById('locFormBox').value.trim();
-    var action = document.getElementById('locFormAction').value;
-
-    if (!date || !rack || !material) { showToast('Date, Rack and Material are required', 'error'); return; }
-
-    // FIX: Robust quantity parsing
-    var qty = Number(qtyRaw);
-    if (isNaN(qty) || qtyRaw === '') { showToast('Enter a valid quantity', 'error'); return; }
-    if (qty < 0) { showToast('Quantity cannot be negative', 'error'); return; }
-
-    // Check if same rack+ean already exists — if yes, add to quantity
-    var existing = DB.filter('location_master', function(l) {
-        return l.rack === rack && l.ean === ean && ean !== '';
-    });
-
-    if (existing.length > 0) {
-        var oldQty = Number(existing[0].quantity) || 0;
-        DB.update('location_master', existing[0].id, { quantity: oldQty + qty, date: date, packing: packing, box: box, action: action, user: APP.currentUser ? APP.currentUser.name : 'Admin' });
-        logAction('Location Master', 'UPDATE_QTY', 'Added ' + qty + ' to ' + rack + ' / ' + material + '. New qty: ' + (oldQty + qty));
-        showToast('Quantity updated! ' + rack + ' now has ' + (oldQty + qty) + ' units', 'success');
-    } else {
-        DB.add('location_master', {
-            date: date, rack: rack, ean: ean, material: material, description: desc,
-            quantity: qty, packing: packing, box: box, action: action,
-            user: APP.currentUser ? APP.currentUser.name : 'Admin',
-            dateTime: new Date().toISOString()
-        });
-        logAction('Location Master', 'ADD', 'Added ' + material + ' at ' + rack + ', Qty: ' + qty);
-        showToast('Location added successfully! Qty: ' + qty, 'success');
-    }
-    closeModal();
-    renderLocationMaster();
-}
-
-// --- EDIT LOCATION ---
-function showEditLocation(id) {
-    var l = DB.find('location_master', id);
-    if (!l) { showToast('Record not found', 'error'); return; }
-    var racks = DB.get('rack_master');
-    var rackOpts = '<option value="">-- Select Rack --</option>';
-    for (var r = 0; r < racks.length; r++) {
-        rackOpts += '<option value="' + escapeHtml(racks[r].rack) + '"' + (l.rack === racks[r].rack ? ' selected' : '') + '>' + escapeHtml(racks[r].rack) + '</option>';
-    }
-    var html = '<div class="form-row">';
-    html += '<div class="form-group"><label>Date</label><input type="date" id="editLocDate" class="form-input" value="' + escapeHtml(l.date || '') + '"></div>';
-    html += '<div class="form-group"><label>Rack</label><select id="editLocRack" class="form-input">' + rackOpts + '</select></div>';
-    html += '<div class="form-group"><label>EAN</label><input type="text" id="editLocEan" class="form-input" value="' + escapeHtml(l.ean || '') + '"></div>';
-    html += '</div>';
-    html += '<div class="form-row">';
-    html += '<div class="form-group"><label>Material</label><input type="text" id="editLocMaterial" class="form-input" value="' + escapeHtml(l.material || '') + '"></div>';
-    html += '<div class="form-group"><label>Description</label><input type="text" id="editLocDesc" class="form-input" value="' + escapeHtml(l.description || '') + '"></div>';
-    html += '<div class="form-group"><label>Quantity <span class="req">*</span></label><input type="number" id="editLocQty" class="form-input" value="' + (Number(l.quantity) || 0) + '" min="0" style="font-size:18px;font-weight:800;color:var(--accent)"></div>';
-    html += '</div>';
-    html += '<div class="form-row">';
-    html += '<div class="form-group"><label>Packing</label><input type="text" id="editLocPacking" class="form-input" value="' + escapeHtml(l.packing || '') + '"></div>';
-    html += '<div class="form-group"><label>Box No</label><input type="text" id="editLocBox" class="form-input" value="' + escapeHtml(l.box || '') + '"></div>';
-    html += '<div class="form-group"><label>Action</label><select id="editLocAction" class="form-input"><option value="PUTAWAY"' + (l.action === 'PUTAWAY' ? ' selected' : '') + '>PUTAWAY</option><option value="PIV"' + (l.action === 'PIV' ? ' selected' : '') + '>PIV</option></select></div>';
-    html += '</div>';
-    showModal('<i class="bx bx-edit"></i> Edit Location', html, 'lg',
-        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-        '<button class="btn btn-primary" onclick="updateLocation(\'' + id + '\')"><i class="bx bx-check-circle"></i> Update</button>');
-}
-
-function updateLocation(id) {
-    var qtyRaw = document.getElementById('editLocQty').value;
-    var qty = Number(qtyRaw);
-    if (isNaN(qty) || qtyRaw === '') { showToast('Enter a valid quantity', 'error'); return; }
-    if (qty < 0) { showToast('Quantity cannot be negative', 'error'); return; }
-
-    DB.update('location_master', id, {
-        date: document.getElementById('editLocDate').value,
-        rack: document.getElementById('editLocRack').value,
-        ean: document.getElementById('editLocEan').value.trim(),
-        material: document.getElementById('editLocMaterial').value.trim(),
-        description: document.getElementById('editLocDesc').value.trim(),
-        quantity: qty,
-        packing: document.getElementById('editLocPacking').value.trim(),
-        box: document.getElementById('editLocBox').value.trim(),
-        action: document.getElementById('editLocAction').value,
-        user: APP.currentUser ? APP.currentUser.name : 'Admin'
-    });
-    logAction('Location Master', 'EDIT', 'Updated location id=' + id + ', Qty set to: ' + qty);
-    showToast('Location updated! Qty: ' + qty, 'success');
-    closeModal();
-    renderLocationMaster();
-}
-
-// --- DELETE LOCATION ---
-function deleteLocation(id) {
-    var l = DB.find('location_master', id);
-    if (!l) return;
-    showModal('<i class="bx bx-trash" style="color:var(--danger)"></i> Delete Location',
-        '<p>Are you sure you want to delete this location record?</p>' +
-        '<div style="background:var(--bg-secondary);padding:12px;border-radius:8px;margin-top:12px;font-size:13px">' +
-        '<strong>Rack:</strong> ' + escapeHtml(l.rack) + '<br>' +
-        '<strong>Material:</strong> ' + escapeHtml(l.material) + '<br>' +
-        '<strong>Qty:</strong> <span style="color:var(--danger);font-weight:800">' + (Number(l.quantity) || 0) + '</span></div>',
-        'sm',
-        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-        '<button class="btn btn-danger" onclick="confirmDeleteLocation(\'' + id + '\')"><i class="bx bx-trash"></i> Delete</button>');
-}
-
-function confirmDeleteLocation(id) {
-    DB.remove('location_master', id);
-    logAction('Location Master', 'DELETE', 'Deleted location id=' + id);
-    showToast('Location deleted', 'success');
-    closeModal();
-    renderLocationMaster();
-}
-
-// ==================== BULK UPLOAD — FIXED QTY ISSUE ====================
-function showBulkLocationUpload() {
-    var html = '<div style="margin-bottom:16px">';
-    html += '<div class="form-group"><label>Upload Bulk Data (Excel) <span class="req">*</span></label>';
-    html += '<label class="btn btn-warning btn-sm" style="cursor:pointer"><i class="bx bx-upload"></i> Choose File';
-    html += '<input type="file" id="bulkLocFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="document.getElementById(\'bulkLocName\').innerText=this.files[0].name;document.getElementById(\'bulkLocPreviewBtn\').disabled=false"></label>';
-    html += '<div id="bulkLocName" style="font-size:12px;color:var(--text-muted);margin-top:5px">No file chosen</div></div>';
-    html += '<button id="bulkLocPreviewBtn" class="btn btn-secondary btn-sm" disabled onclick="previewBulkLocation()"><i class="bx bx-eye"></i> Preview Data</button>';
-    html += '</div>';
-
-    html += '<div style="background:var(--bg-secondary);padding:14px;border-radius:8px;font-size:12px;color:var(--text-muted);border:1px dashed var(--warning);margin-bottom:16px">';
-    html += '<strong style="color:var(--warning)"><i class="bx bx-info-circle"></i> Excel Format (Row 1 = Header):</strong><br>';
-    html += '<code style="display:block;margin-top:6px;padding:8px;background:var(--bg-input);border-radius:4px;font-size:11px;color:var(--accent)">';
-    html += 'Date | Rack | EAN | Material | Description | Quantity | Packing | Box | Action';
-    html += '</code><br>';
-    html += '<strong>Important:</strong> Column names must match exactly (case-insensitive).<br>';
-    html += 'Quantity column must contain numbers only (no text/spaces).<br>';
-    html += 'If same Rack+EAN exists, quantities will be ADDED to existing record.';
-    html += '</div>';
-
-    html += '<div id="bulkLocPreviewArea"></div>';
-
-    showModal('<i class="bx bx-upload"></i> Bulk Upload Location Master', html, 'lg',
-        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-        '<button id="bulkLocConfirmBtn" class="btn btn-primary" disabled onclick="confirmBulkLocationUpload()"><i class="bx bx-check-double"></i> Confirm Upload</button>');
-}
-
-// Store parsed bulk data globally for confirm step
-var _bulkLocParsedData = [];
-
-function previewBulkLocation() {
-    var fileInput = document.getElementById('bulkLocFile');
-    if (!fileInput || !fileInput.files[0]) { showToast('Select a file first', 'error'); return; }
-
-    var reader = new FileReader();
-    reader.onload = function(e) {
-        try {
-            var wb = XLSX.read(e.target.result, { type: 'array' });
-            var ws = wb.Sheets[wb.SheetNames[0]];
-            var rawData = XLSX.utils.sheet_to_json(ws, { header: 1 });
-
-            if (rawData.length < 2) { showToast('File has no data rows (need header + at least 1 row)', 'error'); return; }
-
-            // ===== FIX: Dynamic column mapping from header =====
-            var headerRow = rawData[0].map(function(h) { return String(h || '').trim().toLowerCase().replace(/[^a-z0-9]/g, ''); });
-            var colMap = {};
-            var possibleColumns = {
-                date: ['date', 'dt', 'datee'],
-                rack: ['rack', 'rackno', 'rackno', 'racknumber'],
-                ean: ['ean', 'eancode', 'barcode', 'bar-code', 'scancode'],
-                material: ['material', 'materialcode', 'materialcode', 'matcode', 'materialname', 'item', 'itemcode', 'product'],
-                description: ['description', 'desc', 'description', 'materialdesc', 'itemdesc', 'productdesc'],
-                quantity: ['quantity', 'qty', 'quantity', 'qty', 'quant', 'amount', 'units', 'stock', 'balance', 'qty', 'qty'],
-                packing: ['packing', 'pack', 'packingtype', 'uom', 'unit'],
-                box: ['box', 'boxno', 'boxnumber', 'boxno', 'carton', 'cartonno'],
-                action: ['action', 'actiontype', 'type', 'transactiontype']
-            };
-
-            // Map each field to the first matching column index
-            for (var field in possibleColumns) {
-                var aliases = possibleColumns[field];
-                for (var a = 0; a < aliases.length; a++) {
-                    var idx = headerRow.indexOf(aliases[a]);
-                    if (idx > -1) {
-                        colMap[field] = idx;
-                        break;
-                    }
-                }
-            }
-
-            // Log mapping for debugging
-            console.log('=== BULK LOCATION COLUMN MAPPING ===');
-            console.log('Header row:', rawData[0]);
-            console.log('Normalized:', headerRow);
-            console.log('Column map:', colMap);
-
-            // Check critical columns
-            if (colMap.rack === undefined) {
-                showToast('ERROR: "Rack" column not found in header! Found columns: ' + rawData[0].join(', '), 'error');
-                return;
-            }
-
-            // Parse data rows
-            _bulkLocParsedData = [];
-            var errors = [];
-            for (var k = 1; k < rawData.length; k++) {
-                var r = rawData[k];
-                if (!r || r.length === 0) continue;
-
-                // Skip completely empty rows
-                var hasData = false;
-                for (var ci = 0; ci < r.length; ci++) {
-                    if (r[ci] !== null && r[ci] !== undefined && String(r[ci]).trim() !== '') { hasData = true; break; }
-                }
-                if (!hasData) continue;
-
-                // ===== FIX: Robust quantity parsing =====
-                var rawQty = (colMap.quantity !== undefined) ? r[colMap.quantity] : 0;
-                var parsedQty = 0;
-
-                if (rawQty !== null && rawQty !== undefined && String(rawQty).trim() !== '') {
-                    // Remove any non-numeric characters except dot and minus
-                    var cleanQtyStr = String(rawQty).replace(/[^\d.\-]/g, '').trim();
-                    parsedQty = Number(cleanQtyStr);
-                    if (isNaN(parsedQty)) parsedQty = 0;
-                    // Ensure non-negative
-                    if (parsedQty < 0) parsedQty = 0;
-                }
-
-                var row = {
-                    date: colMap.date !== undefined ? String(r[colMap.date] || '').trim() : today(),
-                    rack: colMap.rack !== undefined ? String(r[colMap.rack] || '').trim() : '',
-                    ean: colMap.ean !== undefined ? String(r[colMap.ean] || '').trim() : '',
-                    material: colMap.material !== undefined ? String(r[colMap.material] || '').trim() : '',
-                    description: colMap.description !== undefined ? String(r[colMap.description] || '').trim() : '',
-                    quantity: parsedQty,
-                    packing: colMap.packing !== undefined ? String(r[colMap.packing] || '').trim() : '',
-                    box: colMap.box !== undefined ? String(r[colMap.box] || '').trim() : '',
-                    action: colMap.action !== undefined ? String(r[colMap.action] || '').trim().toUpperCase() : 'PUTAWAY'
-                };
-
-                // Validate action
-                if (row.action !== 'PUTAWAY' && row.action !== 'PIV') row.action = 'PUTAWAY';
-
-                // Validate date format
-                if (row.date && row.date.indexOf('/') > -1) {
-                    var parts = row.date.split('/');
-                    if (parts.length === 3) {
-                        // Try DD/MM/YYYY
-                        var tryDate = new Date(parts[2], parts[1] - 1, parts[0]);
-                        if (!isNaN(tryDate.getTime())) {
-                            row.date = tryDate.toISOString().split('T')[0];
-                        }
-                    }
-                } else if (row.date && row.date.indexOf('-') === -1) {
-                    // Might be Excel serial date
-                    var excelDate = Number(row.date);
-                    if (!isNaN(excelDate) && excelDate > 40000 && excelDate < 60000) {
-                        var jsDate = new Date((excelDate - 25569) * 86400 * 1000);
-                        row.date = jsDate.toISOString().split('T')[0];
-                    }
-                }
-                if (!row.date || row.date === 'undefined' || row.date === 'NaN-NaN-NaN') row.date = today();
-
-                if (!row.rack) {
-                    errors.push('Row ' + (k + 1) + ': Rack is empty — skipped');
-                    continue;
-                }
-
-                _bulkLocParsedData.push(row);
-            }
-
-            if (_bulkLocParsedData.length === 0) {
-                showToast('No valid data rows found! ' + (errors.length > 0 ? 'Errors: ' + errors[0] : 'Check your Excel format.'), 'error');
-                return;
-            }
-
-            // Show preview table
-            var previewHtml = '<div style="margin-top:12px">';
-            previewHtml += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
-            previewHtml += '<strong style="color:var(--accent)"><i class="bx bx-check-circle"></i> Preview: ' + _bulkLocParsedData.length + ' rows parsed</strong>';
-            previewHtml += '<span style="font-size:12px;color:var(--text-muted)">Column Map: ' + JSON.stringify(colMap) + '</span>';
-            previewHtml += '</div>';
-
-            if (errors.length > 0) {
-                previewHtml += '<div style="background:var(--warning-dim);padding:8px 12px;border-radius:6px;margin-bottom:8px;font-size:11px;color:var(--warning)">';
-                previewHtml += '<strong>Warnings:</strong><br>';
-                for (var ei = 0; ei < Math.min(errors.length, 5); ei++) {
-                    previewHtml += '• ' + escapeHtml(errors[ei]) + '<br>';
-                }
-                if (errors.length > 5) previewHtml += '• ...and ' + (errors.length - 5) + ' more';
-                previewHtml += '</div>';
-            }
-
-            previewHtml += '<div class="table-wrapper" style="max-height:300px;overflow-y:auto"><table class="data-table"><thead><tr>';
-            previewHtml += '<th>#</th><th>Date</th><th>Rack</th><th>EAN</th><th>Material</th><th style="color:var(--accent)">Qty</th><th>Packing</th><th>Box</th><th>Action</th>';
-            previewHtml += '</tr></thead><tbody>';
-            for (var pi = 0; pi < _bulkLocParsedData.length; pi++) {
-                var pr = _bulkLocParsedData[pi];
-                var qClass = pr.quantity > 0 ? 'qty-match' : 'qty-mismatch';
-                previewHtml += '<tr>';
-                previewHtml += '<td>' + (pi + 1) + '</td>';
-                previewHtml += '<td style="font-size:11px">' + escapeHtml(pr.date) + '</td>';
-                previewHtml += '<td><strong>' + escapeHtml(pr.rack) + '</strong></td>';
-                previewHtml += '<td style="font-size:11px">' + escapeHtml(pr.ean) + '</td>';
-                previewHtml += '<td>' + escapeHtml(pr.material) + '</td>';
-                previewHtml += '<td class="' + qClass + '" style="font-weight:800;font-size:15px">' + pr.quantity + '</td>';
-                previewHtml += '<td>' + escapeHtml(pr.packing) + '</td>';
-                previewHtml += '<td>' + escapeHtml(pr.box) + '</td>';
-                previewHtml += '<td><span class="badge badge-' + (pr.action === 'PUTAWAY' ? 'success' : 'info') + '">' + escapeHtml(pr.action) + '</span></td>';
-                previewHtml += '</tr>';
-            }
-            previewHtml += '</tbody></table></div></div>';
-
-            document.getElementById('bulkLocPreviewArea').innerHTML = previewHtml;
-            document.getElementById('bulkLocConfirmBtn').disabled = false;
-
-            // Log the mapping
-            console.log('Parsed ' + _bulkLocParsedData.length + ' rows. Sample:', _bulkLocParsedData[0]);
-
-        } catch (err) {
-            showToast('Error reading Excel: ' + err.message, 'error');
-            console.error('Bulk location upload error:', err);
-        }
-    };
-    reader.readAsArrayBuffer(fileInput.files[0]);
-}
-
-function confirmBulkLocationUpload() {
-    if (_bulkLocParsedData.length === 0) { showToast('No data to upload', 'error'); return; }
-
-    var addedCount = 0, updatedCount = 0, totalQtyAdded = 0;
-    var allLocations = DB.get('location_master');
-
-    for (var i = 0; i < _bulkLocParsedData.length; i++) {
-        var row = _bulkLocParsedData[i];
-        var qty = Number(row.quantity) || 0;  // ===== FIX: Extra safety =====
-        totalQtyAdded += qty;
-
-        // Check duplicate: same rack + ean
-        var foundIdx = -1;
-        for (var j = 0; j < allLocations.length; j++) {
-            if (allLocations[j].rack === row.rack && allLocations[j].ean === row.ean && row.ean !== '') {
-                foundIdx = j;
-                break;
-            }
-        }
-
-        if (foundIdx > -1) {
-            // Update existing — add quantity
-            var oldQty = Number(allLocations[foundIdx].quantity) || 0;
-            allLocations[foundIdx].quantity = oldQty + qty;
-            allLocations[foundIdx].date = row.date;
-            allLocations[foundIdx].material = row.material;
-            allLocations[foundIdx].description = row.description;
-            allLocations[foundIdx].packing = row.packing;
-            allLocations[foundIdx].box = row.box;
-            allLocations[foundIdx].action = row.action;
-            allLocations[foundIdx].user = APP.currentUser ? APP.currentUser.name : 'Admin';
-            allLocations[foundIdx].updatedAt = new Date().toISOString();
-            updatedCount++;
-        } else {
-            // Add new
-            allLocations.push({
-                id: DB.uid(),
-                date: row.date,
-                rack: row.rack,
-                ean: row.ean,
-                material: row.material,
-                description: row.description,
-                quantity: qty,  // ===== FIX: Using parsed qty, not raw string =====
-                packing: row.packing,
-                box: row.box,
-                action: row.action,
-                user: APP.currentUser ? APP.currentUser.name : 'Admin',
-                dateTime: new Date().toISOString(),
-                createdAt: new Date().toISOString()
-            });
-            addedCount++;
-        }
-    }
-
-    // Save all at once
-    DB.set('location_master', allLocations);
-
-    logAction('Location Master', 'BULK_UPLOAD', 'Uploaded ' + _bulkLocParsedData.length + ' rows (' + addedCount + ' new, ' + updatedCount + ' updated). Total Qty: ' + totalQtyAdded);
-    showToast('Success! ' + addedCount + ' added, ' + updatedCount + ' updated. Total Qty uploaded: ' + totalQtyAdded, 'success');
-    _bulkLocParsedData = [];
-    closeModal();
-    renderLocationMaster();
-}
-
-// ==================== EXPORT LOCATION MASTER ====================
-function exportLocationMaster() {
-    var locations = DB.get('location_master');
-    if (locations.length === 0) { showToast('No data to export', 'warning'); return; }
-
-    var exportData = [];
-    for (var i = 0; i < locations.length; i++) {
-        var l = locations[i];
-        exportData.push({
-            Date: l.date || '',
-            Rack: l.rack || '',
-            EAN: l.ean || '',
-            Material: l.material || '',
-            Description: l.description || '',
-            Quantity: Number(l.quantity) || 0,
-            Packing: l.packing || '',
-            Box: l.box || '',
-            Action: l.action || '',
-            User: l.user || '',
-            'Created At': formatDateTime(l.createdAt || l.dateTime)
-        });
-    }
-
-    var ws = XLSX.utils.json_to_sheet(exportData);
-    var wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Location Master');
-    XLSX.writeFile(wb, 'Location_Master_' + today() + '.xlsx');
-    logAction('Location Master', 'EXPORT', 'Exported ' + locations.length + ' records');
-    showToast('Exported ' + locations.length + ' records!', 'success');
-}
-// ==================== RACK MASTER ====================
-function renderRackMaster() {
-    var racks = DB.get('rack_master');
-    var locations = DB.get('location_master');
-
-    // Build rack occupancy map
-    var rackOccupancy = {};
-    for (var i = 0; i < locations.length; i++) {
-        var r = locations[i].rack;
-        if (!rackOccupancy[r]) rackOccupancy[r] = { items: 0, qty: 0, materials: [] };
-        rackOccupancy[r].items++;
-        rackOccupancy[r].qty += (locations[i].quantity || 0);
-        if (rackOccupancy[r].materials.indexOf(locations[i].material) < 0) {
-            rackOccupancy[r].materials.push(locations[i].material);
-        }
-    }
-
-    var occupiedCount = 0;
-    for (var j = 0; j < racks.length; j++) {
-        if (rackOccupancy[racks[j].rack]) occupiedCount++;
-    }
-
-    var html = '<div class="section-header"><h2><i class="bx bxs-grid-alt"></i> Rack Master</h2>';
-    html += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
-    html += '<button class="btn btn-primary btn-sm" onclick="showAddRackModal()"><i class="bx bx-plus"></i> Add Rack</button>';
-    html += '<label class="btn btn-warning btn-sm" style="cursor:pointer"><i class="bx bx-upload"></i> Bulk Upload<input type="file" accept=".xlsx,.xls,.csv" style="display:none" onchange="bulkUploadRacks(this)"></label>';
-    html += '</div></div>';
-
-    // KPIs
-    html += '<div class="kpi-grid" style="margin-bottom:20px">';
-    html += kpiCard('bxs-grid-alt', racks.length, 'Total Racks');
-    html += kpiCard('bx-check-circle', occupiedCount, 'Occupied');
-    html += kpiCard('bx-x-circle', racks.length - occupiedCount, 'Empty');
-    html += '</div>';
-
-    // Visual Grid
-    html += '<div class="card"><div class="card-title">Visual Rack Grid</div>';
-    html += '<div class="rack-grid">';
-    for (var k = 0; k < racks.length; k++) {
-        var rk = racks[k];
-        var isOccupied = !!rackOccupancy[rk.rack];
-        html += '<div class="rack-cell ' + (isOccupied ? 'occupied' : 'empty') + '" onclick="showRackDetail(\'' + escapeHtml(rk.rack) + '\')" title="' + escapeHtml(rk.rack) + ' — ' + (isOccupied ? 'Occupied' : 'Empty') + '">';
-        html += escapeHtml(rk.rack.replace('RACK-', ''));
-        html += '</div>';
-    }
-    html += '</div>';
-    html += '<div style="display:flex;gap:16px;margin-top:12px;font-size:12px;color:var(--text-muted)">';
-    html += '<span><span class="status-dot green"></span> Occupied</span>';
-    html += '<span><span class="status-dot red"></span> Empty</span>';
-    html += '</div></div>';
-
-    // Rack list table
-    html += '<div class="card" style="margin-top:20px"><div class="card-title">Rack Details</div>';
-    html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>Rack</th><th>Status</th><th>Items</th><th>Total Qty</th><th>Materials</th><th>Action</th></tr></thead><tbody>';
-    for (var m = 0; m < racks.length; m++) {
-        var rack = racks[m];
-        var occ = rackOccupancy[rack.rack];
-        html += '<tr><td><strong style="font-family:var(--font-display)">' + escapeHtml(rack.rack) + '</strong></td>';
-        html += '<td>' + (occ ? '<span class="status-dot green"></span> Occupied' : '<span class="status-dot red"></span> Empty') + '</td>';
-        html += '<td>' + (occ ? occ.items : 0) + '</td>';
-        html += '<td>' + (occ ? occ.qty : 0) + '</td>';
-        html += '<td style="font-size:11px;color:var(--text-secondary)">' + (occ ? occ.materials.slice(0, 3).join(', ') + (occ.materials.length > 3 ? '...' : '') : '-') + '</td>';
-        html += '<td><div class="table-actions">';
-        html += '<button class="btn btn-secondary btn-sm" onclick="showRackDetail(\'' + escapeHtml(rack.rack) + '\')"><i class="bx bx-show"></i></button>';
-        html += '<button class="btn-icon danger" onclick="deleteRack(\'' + rack.id + '\')"><i class="bx bx-trash"></i></button>';
-        html += '</div></td></tr>';
-    }
-    html += '</tbody></table></div></div>';
-
-    document.getElementById('section-rack').innerHTML = html;
-}
-
-function showAddRackModal() {
-    var html = '<div class="form-group"><label>Rack Name <span class="req">*</span></label><input type="text" id="newRackName" class="form-input" placeholder="e.g. RACK-031"></div>';
-    html += '<div style="font-size:12px;color:var(--text-muted)">Or bulk add multiple racks</div>';
-    html += '<div class="form-group" style="margin-top:10px"><label>Bulk Add (comma separated)</label><input type="text" id="bulkRackNames" class="form-input" placeholder="e.g. RACK-031,RACK-032,RACK-033"></div>';
-    showModal('Add Rack', html, 'sm',
-        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-        '<button class="btn btn-primary" onclick="addRack()"><i class="bx bx-check"></i> Add</button>');
-}
-
-function addRack() {
-    var single = document.getElementById('newRackName').value.trim().toUpperCase();
-    var bulk = document.getElementById('bulkRackNames').value.trim().toUpperCase();
-    var count = 0;
-
-    if (bulk) {
-        var names = bulk.split(',').map(function(n) { return n.trim(); }).filter(function(n) { return n; });
-        for (var i = 0; i < names.length; i++) {
-            var exists = DB.filter('rack_master', function(r) { return r.rack === names[i]; });
-            if (exists.length === 0) { DB.add('rack_master', { rack: names[i] }); count++; }
-        }
-    } else if (single) {
-        var exists2 = DB.filter('rack_master', function(r) { return r.rack === single; });
-        if (exists2.length > 0) { showToast('Rack already exists!', 'error'); return; }
-        DB.add('rack_master', { rack: single });
-        count = 1;
-    } else {
-        showToast('Enter rack name!', 'error'); return;
-    }
-
-    logAction('Rack', 'ADD', 'Added ' + count + ' racks');
-    showToast(count + ' rack(s) added!', 'success');
-    closeModal();
-    renderRackMaster();
-}
-
-function deleteRack(id) {
-    if (!confirm('Delete this rack?')) return;
-    DB.remove('rack_master', id);
-    logAction('Rack', 'DELETE', 'Deleted rack');
-    showToast('Rack deleted', 'info');
-    renderRackMaster();
-}
-
-function showRackDetail(rackName) {
-    var locs = DB.filter('location_master', function(l) { return l.rack === rackName; });
-    var totalQty = 0;
-    for (var i = 0; i < locs.length; i++) { totalQty += (locs[i].quantity || 0); }
-
-    var html = '<div style="background:var(--accent-dim);padding:12px;border-radius:8px;margin-bottom:16px;border-left:4px solid var(--accent)">';
-    html += '<strong style="font-family:var(--font-display);font-size:16px;color:var(--accent)">' + escapeHtml(rackName) + '</strong><br>';
-    html += '<span style="color:var(--text-muted)">Total Items: ' + locs.length + ' | Total Qty: ' + totalQty + '</span></div>';
-
-    if (locs.length === 0) {
-        html += '<div style="text-align:center;color:var(--text-muted);padding:30px"><i class="bx bx-box" style="font-size:36px;display:block;margin-bottom:8px"></i>This rack is empty</div>';
-    } else {
-        html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>Date</th><th>EAN</th><th>Material</th><th>Qty</th><th>Packing</th><th>Box</th><th>Action</th><th>User</th></tr></thead><tbody>';
-        for (var j = 0; j < locs.length; j++) {
-            var l = locs[j];
-            html += '<tr><td style="font-size:11px">' + escapeHtml(l.date) + '</td>';
-            html += '<td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(l.ean) + '</td>';
-            html += '<td>' + escapeHtml(l.material) + '</td><td><strong>' + l.quantity + '</strong></td>';
-            html += '<td>' + escapeHtml(l.packing) + '</td><td>' + escapeHtml(l.box) + '</td>';
-            html += '<td><span class="badge ' + (l.action === 'PUTAWAY' ? 'badge-success' : 'badge-info') + '">' + escapeHtml(l.action) + '</span></td>';
-            html += '<td style="font-size:11px">' + escapeHtml(l.user) + '</td></tr>';
-        }
-        html += '</tbody></table></div>';
-    }
-    showModal('Rack Detail: ' + rackName, html, 'lg', '<button class="btn btn-secondary" onclick="closeModal()">Close</button>');
-}
-
-function bulkUploadRacks(input) {
-    if (!input.files[0]) return;
-    var reader = new FileReader();
-    reader.onload = function(e) {
-        try {
-            var wb = XLSX.read(e.target.result, { type: 'array' });
-            var ws = wb.Sheets[wb.SheetNames[0]];
-            var data = XLSX.utils.sheet_to_json(ws, { header: 1 });
-            if (data.length === 0) { showToast('Empty file', 'error'); return; }
-            var startRow = (String(data[0][0] || '').toLowerCase().indexOf('rack') > -1) ? 1 : 0;
-            var count = 0;
-            for (var k = startRow; k < data.length; k++) {
-                var r = data[k]; if (!r || !r[0]) continue;
-                var rackName = String(r[0]).trim().toUpperCase();
-                if (rackName) {
-                    var exists = DB.filter('rack_master', function(rk) { return rk.rack === rackName; });
-                    if (exists.length === 0) { DB.add('rack_master', { rack: rackName }); count++; }
-                }
-            }
-            logAction('Rack', 'BULK_UPLOAD', 'Bulk uploaded ' + count + ' racks');
-            showToast('Bulk upload: ' + count + ' racks!', 'success');
-            renderRackMaster();
-        } catch(err) { showToast('Error: ' + err.message, 'error'); }
-    };
-    reader.readAsArrayBuffer(input.files[0]);
-    input.value = '';
-}
-
-// ==================== MATERIAL MASTER ====================
-function renderMaterialMaster() {
-    var allMats = DB.get('material_master');
-
-    // Filters
-    var filterSearch = '', filterDivision = '';
-    var fSearchEl = document.getElementById('matFilterSearch');
-    var fDivEl = document.getElementById('matFilterDivision');
-    if (fSearchEl) filterSearch = fSearchEl.value.trim().toLowerCase();
-    if (fDivEl) filterDivision = fDivEl.value;
-
-    var filtered = allMats;
-    if (filterSearch) filtered = filtered.filter(function(m) {
-        return (m.material || '').toLowerCase().indexOf(filterSearch) > -1 ||
-               (m.ean || '').toLowerCase().indexOf(filterSearch) > -1 ||
-               (m.description || '').toLowerCase().indexOf(filterSearch) > -1;
-    });
-    if (filterDivision) filtered = filtered.filter(function(m) { return m.division === filterDivision; });
-
-    var pg = paginate(filtered, APP.matPage, APP.matPerPage);
-
-    // Divisions
-    var divSet = {};
-    for (var i = 0; i < allMats.length; i++) { if (allMats[i].division) divSet[allMats[i].division] = true; }
-    var divisions = Object.keys(divSet).sort();
-
-    var html = '<div class="section-header"><h2><i class="bx bxs-label"></i> Material Master</h2>';
-    html += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
-    html += '<button class="btn btn-primary btn-sm" onclick="showAddMaterialModal()"><i class="bx bx-plus"></i> Add Material</button>';
-    html += '<label class="btn btn-warning btn-sm" style="cursor:pointer"><i class="bx bx-upload"></i> Bulk Upload<input type="file" accept=".xlsx,.xls,.csv" style="display:none" onchange="bulkUploadMaterials(this)"></label>';
-    html += '<button class="btn btn-secondary btn-sm" onclick="exportMaterialExcel()"><i class="bx bx-download"></i> Export Excel</button>';
-    html += '</div></div>';
-
-    // Filter bar
-    html += '<div class="card" style="margin-bottom:16px"><div class="form-row">';
-    html += '<div class="form-group"><label>Search (Material / EAN / Desc)</label><input type="text" id="matFilterSearch" class="form-input" placeholder="Search..." value="' + escapeHtml(filterSearch) + '" onkeydown="if(event.key===\'Enter\'){APP.matPage=1;renderMaterialMaster()}"></div>';
-    html += '<div class="form-group"><label>Division</label><select id="matFilterDivision" class="form-input" onchange="APP.matPage=1;renderMaterialMaster()"><option value="">All</option>';
-    for (var d = 0; d < divisions.length; d++) {
-        html += '<option value="' + escapeHtml(divisions[d]) + '"' + (filterDivision === divisions[d] ? ' selected' : '') + '>' + escapeHtml(divisions[d]) + '</option>';
-    }
-    html += '</select></div>';
-    html += '</div></div>';
-
-    // KPI
-    html += '<div class="kpi-grid" style="margin-bottom:16px">';
-    html += kpiCard('bxs-label', allMats.length, 'Total Materials');
-    html += kpiCard('bx-category', divisions.length, 'Divisions');
-    html += kpiCard('bx-filter', filtered.length, 'Showing');
-    html += '</div>';
-
-    // Table
-    html += '<div class="card"><div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>Material Code</th><th>Description</th><th>EAN</th><th>Division</th><th>Brand</th><th>Action</th></tr></thead><tbody>';
-    if (pg.items.length === 0) {
-        html += '<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:30px">No materials found</td></tr>';
-    } else {
-        for (var j = 0; j < pg.items.length; j++) {
-            var mat = pg.items[j];
-            var globalIdx = (APP.matPage - 1) * APP.matPerPage + j + 1;
-            html += '<tr><td>' + globalIdx + '</td>';
-            html += '<td><strong>' + escapeHtml(mat.material) + '</strong></td>';
-            html += '<td style="font-size:12px;color:var(--text-secondary)">' + escapeHtml(mat.description) + '</td>';
-            html += '<td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">' + escapeHtml(mat.ean) + '</td>';
-            html += '<td><span class="badge badge-info">' + escapeHtml(mat.division || '-') + '</span></td>';
-            html += '<td>' + escapeHtml(mat.brand || '-') + '</td>';
-            html += '<td><div class="table-actions">';
-            html += '<button class="btn-icon" onclick="showEditMaterialModal(\'' + mat.id + '\')"><i class="bx bx-pencil"></i></button>';
-            html += '<button class="btn-icon danger" onclick="deleteMaterial(\'' + mat.id + '\')"><i class="bx bx-trash"></i></button>';
-            html += '</div></td></tr>';
-        }
-    }
-    html += '</tbody></table></div>';
-    html += renderPagination(pg.pages, APP.matPage, 'goMatPage');
-    html += '</div>';
-
-    // Bulk upload format
-    html += '<div class="card" style="margin-top:16px"><div class="card-title">Bulk Upload Format (Excel)</div>';
-    html += '<div style="background:var(--bg-secondary);padding:12px;border-radius:6px;font-size:12px;color:var(--text-muted);border:1px dashed var(--warning)">';
-    html += '<strong style="color:var(--warning)">Column Order:</strong> Material Code | Description | EAN | Division | Brand</div></div>';
-
-    document.getElementById('section-material').innerHTML = html;
-}
-
-function goMatPage(p) { APP.matPage = p; renderMaterialMaster(); }
-
-function showAddMaterialModal() {
-    var html = '<div class="form-group"><label>Material Code <span class="req">*</span></label><input type="text" id="matCode" class="form-input" placeholder="e.g. VIP PREMIUM RICE 5KG"></div>';
-    html += '<div class="form-group"><label>Description</label><input type="text" id="matDesc" class="form-input" placeholder="Product description"></div>';
-    html += '<div class="form-group"><label>EAN / Barcode</label><input type="text" id="matEan" class="form-input" placeholder="e.g. 8901234567001"></div>';
-    html += '<div class="form-group"><label>Division</label><input type="text" id="matDivision" class="form-input" placeholder="e.g. Rice, Flour, Sugar"></div>';
-    html += '<div class="form-group"><label>Brand</label><input type="text" id="matBrand" class="form-input" placeholder="e.g. VIP"></div>';
-    showModal('Add Material', html, 'sm',
-        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-        '<button class="btn btn-primary" onclick="addMaterial()"><i class="bx bx-check"></i> Add</button>');
-}
-
-function addMaterial() {
-    var code = document.getElementById('matCode').value.trim();
-    if (!code) { showToast('Material code is required', 'error'); return; }
-    var exists = DB.filter('material_master', function(m) { return m.material.toUpperCase() === code.toUpperCase(); });
-    if (exists.length > 0) { showToast('Material already exists!', 'error'); return; }
-    DB.add('material_master', {
-        material: code,
-        description: document.getElementById('matDesc').value.trim(),
-        ean: document.getElementById('matEan').value.trim(),
-        division: document.getElementById('matDivision').value.trim(),
-        brand: document.getElementById('matBrand').value.trim()
-    });
-    logAction('Material', 'ADD', 'Added material: ' + code);
-    showToast('Material added!', 'success');
-    closeModal();
-    renderMaterialMaster();
-}
-
-function showEditMaterialModal(id) {
-    var mat = DB.find('material_master', id);
-    if (!mat) return;
-    var html = '<div class="form-group"><label>Material Code</label><input type="text" id="editMatCode" class="form-input" value="' + escapeHtml(mat.material) + '" readonly style="background:var(--bg-secondary)"></div>';
-    html += '<div class="form-group"><label>Description</label><input type="text" id="editMatDesc" class="form-input" value="' + escapeHtml(mat.description) + '"></div>';
-    html += '<div class="form-group"><label>EAN / Barcode</label><input type="text" id="editMatEan" class="form-input" value="' + escapeHtml(mat.ean) + '"></div>';
-    html += '<div class="form-group"><label>Division</label><input type="text" id="editMatDiv" class="form-input" value="' + escapeHtml(mat.division) + '"></div>';
-    html += '<div class="form-group"><label>Brand</label><input type="text" id="editMatBrand" class="form-input" value="' + escapeHtml(mat.brand) + '"></div>';
-    showModal('Edit Material', html, 'sm',
-        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-        '<button class="btn btn-primary" onclick="updateMaterial(\'' + id + '\')"><i class="bx bx-check"></i> Update</button>');
-}
-
-function updateMaterial(id) {
-    DB.update('material_master', id, {
-        description: document.getElementById('editMatDesc').value.trim(),
-        ean: document.getElementById('editMatEan').value.trim(),
-        division: document.getElementById('editMatDiv').value.trim(),
-        brand: document.getElementById('editMatBrand').value.trim()
-    });
-    logAction('Material', 'UPDATE', 'Updated material');
-    showToast('Material updated!', 'success');
-    closeModal();
-    renderMaterialMaster();
-}
-
-function deleteMaterial(id) {
-    if (!confirm('Delete this material?')) return;
-    DB.remove('material_master', id);
-    logAction('Material', 'DELETE', 'Deleted material');
-    showToast('Material deleted', 'info');
-    renderMaterialMaster();
-}
-
-function bulkUploadMaterials(input) {
-    if (!input.files[0]) return;
-    var reader = new FileReader();
-    reader.onload = function(e) {
-        try {
-            var wb = XLSX.read(e.target.result, { type: 'array' });
-            var ws = wb.Sheets[wb.SheetNames[0]];
-            var data = XLSX.utils.sheet_to_json(ws, { header: 1 });
-            if (data.length === 0) { showToast('Empty file', 'error'); return; }
-            var startRow = (String(data[0][0] || '').toLowerCase().indexOf('material') > -1) ? 1 : 0;
-            var count = 0;
-            for (var k = startRow; k < data.length; k++) {
-                var r = data[k]; if (!r || !r[0]) continue;
-                var code = String(r[0]).trim();
-                var exists = DB.filter('material_master', function(m) { return m.material.toUpperCase() === code.toUpperCase(); });
-                if (exists.length === 0) {
-                    DB.add('material_master', {
-                        material: code, description: String(r[1] || '').trim(),
-                        ean: String(r[2] || '').trim(), division: String(r[3] || '').trim(),
-                        brand: String(r[4] || '').trim()
-                    });
-                    count++;
-                }
-            }
-            logAction('Material', 'BULK_UPLOAD', 'Bulk uploaded ' + count + ' materials');
-            showToast('Bulk upload: ' + count + ' materials!', 'success');
-            renderMaterialMaster();
-        } catch(err) { showToast('Error: ' + err.message, 'error'); }
-    };
-    reader.readAsArrayBuffer(input.files[0]);
-    input.value = '';
-}
-
-function exportMaterialExcel() {
-    try {
-        var mats = DB.get('material_master');
-        var wsData = [['Material Code', 'Description', 'EAN', 'Division', 'Brand']];
-        for (var i = 0; i < mats.length; i++) {
-            var m = mats[i];
-            wsData.push([m.material, m.description, m.ean, m.division, m.brand]);
-        }
-        var wb = XLSX.utils.book_new();
-        var ws = XLSX.utils.aoa_to_sheet(wsData);
-        XLSX.utils.book_append_sheet(wb, ws, 'Materials');
-        XLSX.writeFile(wb, 'Material_Master_' + today() + '.xlsx');
-        showToast('Excel exported!', 'success');
-    } catch(e) { showToast('Export failed: ' + e.message, 'error'); }
-}
-/* ============================================================
-   PICKING MODULE — Complete Replacement
-   No dropdowns for OBD, Material, or Location
-   Excel format: OBD No | Material | Material Description | EAN | Order Qty | Pick Qty | Customer
-   ============================================================ */
-
-// Backward-compatible qty helper
-function getMatQty(mat) {
-    return {
-        orderQty: mat.orderQty || mat.requiredQty || 0,
-        pickQty: mat.pickQty || mat.orderQty || mat.requiredQty || 0
-    };
-}
-
-function generateOBDNo() {
-    return 'OBD-' + new Date().getFullYear() + '-' + String(DB.count('obd_data') + 1).padStart(4, '0');
-}
-
-// Location lock check
-function isLocationLocked(locationId, excludeAssignmentId) {
-    var active = DB.filter('picking_done', function(p) {
-        return p.locationId === locationId &&
-            p.status !== 'Done' && p.status !== 'Not Found' && p.status !== 'Replaced' &&
-            (!excludeAssignmentId || p.assignmentId !== excludeAssignmentId);
-    });
-    return active.length > 0;
-}
-
-// Smart Location Allocation — minimum locations to fulfill required qty
-function getSmartLocations(material, requiredQty, excludeAssignmentId) {
-    var locations = DB.filter('location_master', function(loc) {
-        return loc.material === material && loc.quantity > 0;
-    });
-    locations.sort(function(a, b) { return b.quantity - a.quantity; });
-
-    var allocated = [];
-    var remaining = requiredQty;
-
-    for (var i = 0; i < locations.length && remaining > 0; i++) {
-        if (isLocationLocked(locations[i].id, excludeAssignmentId)) continue;
-        var take = Math.min(locations[i].quantity, remaining);
-        allocated.push({
-            locationId: locations[i].id,
-            rack: locations[i].rack,
-            availableQty: locations[i].quantity,
-            assignedQty: take
-        });
-        remaining -= take;
-    }
-
-    return { allocated: allocated, shortfall: remaining };
-}
-
-// Validate assigned qty never exceeds required
-function validateAssignmentQty(obdMaterials, allocationMap) {
-    for (var m = 0; m < obdMaterials.length; m++) {
-        var mat = obdMaterials[m];
-        var qty = getMatQty(mat);
-        var locs = allocationMap[mat.material] || [];
-        var totalAssigned = 0;
-        for (var l = 0; l < locs.length; l++) { totalAssigned += locs[l].assignedQty; }
-        if (totalAssigned > qty.pickQty) return false;
-    }
-    return true;
-}
-
-// ==================== ROUTER ====================
-function renderPicking(sub) {
-    var sec = document.getElementById('section-picking');
-    if (!sec) {
-        sec = document.createElement('section');
-        sec.id = 'section-picking';
-        sec.className = 'content-section';
-        document.getElementById('contentArea').appendChild(sec);
-    }
-    switch (sub) {
-        case 'obd-upload': renderOBDUpload(); break;
-        case 'picking-assign': renderPickingAssign(); break;
-        case 'start-picking': renderStartPicking(); break;
-        case 'picking-done': renderPickingDone(); break;
-        default:
-            sec.innerHTML = '<div class="section-header"><h2><i class="bx bxs-box"></i> Picking Module</h2></div>' +
-                '<div class="card"><div class="empty-state"><i class="bx bxs-box"></i><p>Select a sub-module from sidebar</p></div></div>';
-    }
-}
-
-// ==================== OBD UPLOAD ====================
-var _obdTempMaterials = [];
-
-function renderOBDUpload() {
-    _obdTempMaterials = [];
-    var html = '<div class="section-header"><h2><i class="bx bxs-file-doc"></i> OBD Upload</h2>' +
-        '<button class="btn btn-warning" onclick="showOBDExcelUpload()"><i class="bx bx-upload"></i> Bulk Upload Excel</button></div>';
-
-    // Create OBD form — all text inputs, zero dropdowns
-    html += '<div class="card"><div class="card-title">Create New OBD</div>';
-    html += '<div class="form-row">';
-    html += '<div class="form-group"><label>OBD Number</label><input type="text" id="obdNo" class="form-input" value="' + generateOBDNo() + '" readonly style="color:var(--accent);font-weight:700"></div>';
-    html += '<div class="form-group"><label>Customer</label><input type="text" id="obdCustomer" class="form-input" placeholder="Enter customer name"></div>';
-    html += '<div class="form-group"><label>Date</label><input type="date" id="obdDate" class="form-input" value="' + today() + '"></div>';
-    html += '</div>';
-
-    // Material entry — text inputs only
-    html += '<div style="margin:16px 0"><div class="card-title" style="margin-bottom:8px">Add Materials</div>';
-    html += '<div class="form-row">';
-    html += '<div class="form-group"><label>Material <span class="req">*</span></label><input type="text" id="obdMatName" class="form-input" placeholder="Enter material name"></div>';
-    html += '<div class="form-group"><label>Material Description</label><input type="text" id="obdMatDesc" class="form-input" placeholder="Enter description"></div>';
-    html += '<div class="form-group"><label>EAN</label><input type="text" id="obdMatEan" class="form-input" placeholder="Enter EAN code"></div>';
-    html += '</div>';
-    html += '<div class="form-row">';
-    html += '<div class="form-group"><label>Order Qty <span class="req">*</span></label><input type="number" id="obdMatOrderQty" class="form-input" placeholder="0" min="1"></div>';
-    html += '<div class="form-group"><label>Pick Qty <span class="req">*</span></label><input type="number" id="obdMatPickQty" class="form-input" placeholder="0" min="1"></div>';
-    html += '<div class="form-group" style="display:flex;align-items:flex-end"><button class="btn btn-secondary" onclick="addOBDTempMaterial()"><i class="bx bx-plus"></i> Add Material</button></div>';
-    html += '</div></div>';
-
-    html += '<div id="obdMatList"></div>';
-    html += '<div class="form-actions"><button class="btn btn-primary" onclick="submitOBD()"><i class="bx bx-check-circle"></i> Save OBD</button></div>';
-    html += '</div>';
-
-    // Recent OBDs table
-    var obds = DB.get('obd_data').slice().reverse();
-    html += '<div class="card" style="margin-top:20px"><div class="card-title">Recent OBDs (' + obds.length + ')</div>';
-    html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Customer</th><th>Materials</th><th>Total Pick Qty</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
-    if (obds.length === 0) {
-        html += '<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:30px">No OBDs created yet</td></tr>';
-    } else {
-        for (var j = 0; j < obds.length; j++) {
-            var o = obds[j];
-            var totalPickQty = 0;
-            var matCount = (o.materials || []).length;
-            for (var mq = 0; mq < (o.materials || []).length; mq++) {
-                totalPickQty += getMatQty(o.materials[mq]).pickQty;
-            }
-            var statusClass = o.status === 'Open' ? 'badge-accent' : o.status === 'Completed' ? 'badge-success' : o.status === 'Cancelled' ? 'badge-danger' : 'badge-warning';
-            html += '<tr><td><strong style="color:var(--accent)">' + escapeHtml(o.obdNo) + '</strong></td>';
-            html += '<td>' + escapeHtml(o.customer || '-') + '</td>';
-            html += '<td>' + matCount + '</td><td>' + totalPickQty + '</td>';
-            html += '<td><span class="badge ' + statusClass + '">' + escapeHtml(o.status || 'Open') + '</span></td>';
-            html += '<td style="font-size:12px;color:var(--text-muted)">' + formatDateTime(o.createdAt) + '</td>';
-            html += '<td class="table-actions">';
-            html += '<button class="btn-icon" title="View" onclick="viewOBDDetail(\'' + o.id + '\')"><i class="bx bx-show"></i></button>';
-            if (o.status === 'Open') {
-                html += '<button class="btn-icon danger" title="Delete" onclick="deleteOBD(\'' + o.id + '\')"><i class="bx bx-trash"></i></button>';
-            }
-            html += '</td></tr>';
-        }
-    }
-    html += '</tbody></table></div></div>';
-
-    document.getElementById('section-picking').innerHTML = html;
-}
-
-function addOBDTempMaterial() {
-    var material = document.getElementById('obdMatName').value.trim();
-    var description = document.getElementById('obdMatDesc').value.trim();
-    var ean = document.getElementById('obdMatEan').value.trim();
-    var orderQty = parseInt(document.getElementById('obdMatOrderQty').value) || 0;
-    var pickQty = parseInt(document.getElementById('obdMatPickQty').value) || 0;
-
-    if (!material) { showToast('Enter material name', 'error'); return; }
-    if (orderQty <= 0) { showToast('Enter valid Order Qty', 'error'); return; }
-    if (pickQty <= 0) { showToast('Enter valid Pick Qty', 'error'); return; }
-
-    for (var i = 0; i < _obdTempMaterials.length; i++) {
-        if (_obdTempMaterials[i].material.toLowerCase() === material.toLowerCase()) {
-            showToast('Material already added', 'warning'); return;
-        }
-    }
-
-    _obdTempMaterials.push({ material: material, description: description, ean: ean, orderQty: orderQty, pickQty: pickQty });
-
-    document.getElementById('obdMatName').value = '';
-    document.getElementById('obdMatDesc').value = '';
-    document.getElementById('obdMatEan').value = '';
-    document.getElementById('obdMatOrderQty').value = '';
-    document.getElementById('obdMatPickQty').value = '';
-    document.getElementById('obdMatName').focus();
-
-    renderOBDTempMaterials();
-}
-
-function removeOBDTempMaterial(idx) {
-    _obdTempMaterials.splice(idx, 1);
-    renderOBDTempMaterials();
-}
-
-function renderOBDTempMaterials() {
-    var el = document.getElementById('obdMatList');
-    if (!el) return;
-    if (_obdTempMaterials.length === 0) { el.innerHTML = ''; return; }
-    var h = '<div class="table-wrapper" style="margin-bottom:12px"><table class="data-table"><thead><tr><th>#</th><th>Material</th><th>Description</th><th>EAN</th><th>Order Qty</th><th>Pick Qty</th><th></th></tr></thead><tbody>';
-    for (var i = 0; i < _obdTempMaterials.length; i++) {
-        var m = _obdTempMaterials[i];
-        h += '<tr><td>' + (i + 1) + '</td><td>' + escapeHtml(m.material) + '</td><td>' + escapeHtml(m.description || '-') + '</td>';
-        h += '<td>' + escapeHtml(m.ean || '-') + '</td><td>' + m.orderQty + '</td><td>' + m.pickQty + '</td>';
-        h += '<td><button class="btn-icon danger" onclick="removeOBDTempMaterial(' + i + ')"><i class="bx bx-trash"></i></button></td></tr>';
-    }
-    h += '</tbody></table></div>';
-    el.innerHTML = h;
-}
-
-function submitOBD() {
-    var obdNo = document.getElementById('obdNo').value.trim();
-    var customer = document.getElementById('obdCustomer').value.trim();
-    var date = document.getElementById('obdDate').value;
-    if (!obdNo || !customer) { showToast('OBD No and Customer are required', 'error'); return; }
-    if (_obdTempMaterials.length === 0) { showToast('Add at least one material', 'error'); return; }
-
-    DB.add('obd_data', {
-        obdNo: obdNo, customer: customer, date: date, status: 'Open',
-        materials: JSON.parse(JSON.stringify(_obdTempMaterials))
-    });
-
-    logAction('Picking', 'OBD_CREATED', 'OBD ' + obdNo + ' created with ' + _obdTempMaterials.length + ' materials');
-    showToast('OBD ' + obdNo + ' created successfully!', 'success');
-    _obdTempMaterials = [];
-    renderOBDUpload();
-}
-
-// Excel Upload — exact 7-column format, no Location column
-function showOBDExcelUpload() {
-    var h = '<div class="form-group"><label>Upload OBD Excel</label>' +
-        '<label class="btn btn-warning btn-sm" style="cursor:pointer"><i class="bx bx-upload"></i> Choose File' +
-        '<input type="file" id="obdExcelFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="document.getElementById(\'obdExcelName\').innerText=this.files[0].name"></label>' +
-        '<div id="obdExcelName" style="font-size:12px;color:var(--text-muted);margin-top:5px">No file chosen</div></div>' +
-        '<div style="background:var(--bg-secondary);padding:12px;border-radius:6px;font-size:12px;color:var(--text-muted);border:1px dashed var(--warning)">' +
-        '<strong style="color:var(--warning)">Exact Column Order (Row 1 = Header):</strong><br>' +
-        'OBD No | Material | Material Description | EAN | Order Qty | Pick Qty | Customer<br>' +
-        '<span style="color:var(--danger)">Do NOT include a Location column.</span></div>';
-    showModal('Bulk OBD Upload', h, 'sm',
-        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-        '<button class="btn btn-primary" onclick="processOBDExcelUpload()"><i class="bx bx-check-double"></i> Upload</button>');
-}
-
-function processOBDExcelUpload() {
-    var fileInput = document.getElementById('obdExcelFile');
-    if (!fileInput || !fileInput.files[0]) { showToast('Select a file', 'error'); return; }
-    var reader = new FileReader();
-    reader.onload = function(e) {
-        try {
-            var wb = XLSX.read(e.target.result, { type: 'array' });
-            var ws = wb.Sheets[wb.SheetNames[0]];
-            var data = XLSX.utils.sheet_to_json(ws, { header: 1 });
-            if (data.length === 0) { showToast('Empty file', 'error'); return; }
-
-            var startRow = 0;
-            var firstCell = String(data[0][0] || '').toLowerCase();
-            if (firstCell.indexOf('obd') > -1) startRow = 1;
-
-            var obdMap = {};
-            var rowCount = 0;
-            for (var k = startRow; k < data.length; k++) {
-                var r = data[k];
-                if (!r || !r[0]) continue;
-
-                var obdNo = String(r[0] || '').trim();
-                var material = String(r[1] || '').trim();
-                var description = String(r[2] || '').trim();
-                var ean = String(r[3] || '').trim();
-                var orderQty = parseInt(r[4]) || 0;
-                var pickQty = parseInt(r[5]) || 0;
-                var customer = String(r[6] || '').trim();
-
-                if (!obdNo || !material) continue;
-                if (orderQty <= 0) orderQty = pickQty > 0 ? 0 : 0;
-                if (pickQty <= 0) pickQty = orderQty;
-                if (pickQty <= 0 && orderQty <= 0) continue;
-                if (pickQty <= 0) pickQty = orderQty;
-
-                if (!obdMap[obdNo]) { obdMap[obdNo] = { customer: customer, materials: [] }; }
-                obdMap[obdNo].materials.push({
-                    material: material, description: description, ean: ean,
-                    orderQty: orderQty, pickQty: pickQty
-                });
-                rowCount++;
-            }
-
-            var keys = Object.keys(obdMap);
-            if (keys.length === 0) { showToast('No valid data found in file', 'error'); return; }
-
-            for (var i = 0; i < keys.length; i++) {
-                DB.add('obd_data', {
-                    obdNo: keys[i], customer: obdMap[keys[i]].customer, date: today(), status: 'Open',
-                    materials: obdMap[keys[i]].materials
-                });
-            }
-
-            var totalMats = 0;
-            for (var m = 0; m < keys.length; m++) { totalMats += obdMap[keys[m]].materials.length; }
-            logAction('Picking', 'OBD_BULK_UPLOAD', keys.length + ' OBDs, ' + totalMats + ' materials uploaded');
-            showToast(keys.length + ' OBDs uploaded with ' + totalMats + ' materials!', 'success');
-            closeModal();
-            renderOBDUpload();
-        } catch (err) { showToast('Error reading file: ' + err.message, 'error'); }
-    };
-    reader.readAsArrayBuffer(fileInput.files[0]);
-}
-
-function viewOBDDetail(obdId) {
-    var obd = DB.find('obd_data', obdId);
-    if (!obd) return;
-    var h = '<div class="form-row"><div class="form-group"><label>OBD No</label><div class="form-input" style="color:var(--accent);font-weight:700">' + escapeHtml(obd.obdNo) + '</div></div>';
-    h += '<div class="form-group"><label>Customer</label><div class="form-input">' + escapeHtml(obd.customer || '-') + '</div></div>';
-    h += '<div class="form-group"><label>Status</label><div class="form-input"><span class="badge badge-accent">' + escapeHtml(obd.status) + '</span></div></div></div>';
-    h += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>Material</th><th>Description</th><th>EAN</th><th>Order Qty</th><th>Pick Qty</th></tr></thead><tbody>';
-    var mats = obd.materials || [];
-    for (var i = 0; i < mats.length; i++) {
-        var qty = getMatQty(mats[i]);
-        h += '<tr><td>' + (i + 1) + '</td><td>' + escapeHtml(mats[i].material) + '</td>';
-        h += '<td>' + escapeHtml(mats[i].description || '-') + '</td><td>' + escapeHtml(mats[i].ean || '-') + '</td>';
-        h += '<td>' + qty.orderQty + '</td><td>' + qty.pickQty + '</td></tr>';
-    }
-    h += '</tbody></table></div>';
-    showModal('OBD Detail — ' + obd.obdNo, h, 'lg');
-}
-
-function deleteOBD(obdId) {
-    var obd = DB.find('obd_data', obdId);
-    if (!obd || obd.status !== 'Open') { showToast('Cannot delete this OBD', 'error'); return; }
-    showModal('Confirm Delete', '<p>Are you sure you want to delete <strong>' + escapeHtml(obd.obdNo) + '</strong>?</p>', 'sm',
-        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-        '<button class="btn btn-danger" onclick="confirmDeleteOBD(\'' + obdId + '\')"><i class="bx bx-trash"></i> Delete</button>');
-}
-
-function confirmDeleteOBD(obdId) {
-    DB.remove('obd_data', obdId);
-    logAction('Picking', 'OBD_DELETED', 'OBD deleted');
-    showToast('OBD deleted', 'success');
-    closeModal();
-    renderOBDUpload();
-}
-
-// ==================== PICKING ASSIGN ====================
-function renderPickingAssign() {
-    var sec = document.getElementById('section-picking');
-    var pendingReqs = DB.filter('location_requests', function(r) { return r.status === 'Pending'; });
-
-    var html = '<div class="section-header"><h2><i class="bx bxs-user-check"></i> Picking Assignment</h2></div>';
-    html += '<div class="tab-bar">';
-    html += '<button class="tab-btn active" onclick="switchPickingAssignTab(\'assign\',this)">Assign OBD</button>';
-    html += '<button class="tab-btn" onclick="switchPickingAssignTab(\'requests\',this)">Location Requests ' + (pendingReqs.length > 0 ? '<span class="badge badge-danger" style="margin-left:6px">' + pendingReqs.length + '</span>' : '') + '</button>';
-    html += '</div>';
-    html += '<div id="pickingAssignTabContent"></div>';
-    sec.innerHTML = html;
-    switchPickingAssignTab('assign');
-}
-
-function switchPickingAssignTab(tab, btn) {
-    if (btn) {
-        var tabs = btn.parentElement.querySelectorAll('.tab-btn');
-        for (var i = 0; i < tabs.length; i++) tabs[i].classList.remove('active');
-        btn.classList.add('active');
-    }
-    var el = document.getElementById('pickingAssignTabContent');
-    if (!el) return;
-    if (tab === 'assign') renderPickingAssignTab(el);
-    else renderLocationRequestsTab(el);
-}
-
-// OBD Search — input only, no dropdown, results shown only after search
-function renderPickingAssignTab(container) {
-    var h = '<div class="card"><div class="card-title">Search OBD to Assign</div>';
-    h += '<div style="display:flex;gap:10px;max-width:500px;margin-bottom:16px">';
-    h += '<input type="text" id="obdSearchInput" class="form-input" placeholder="Type OBD Number..." onkeydown="if(event.key===\'Enter\')searchOBDForAssign()" style="flex:1">';
-    h += '<button class="btn btn-primary" onclick="searchOBDForAssign()"><i class="bx bx-search"></i> Search</button>';
-    h += '</div>';
-    h += '<div id="obdSearchResults"><div style="color:var(--text-muted);font-size:13px;padding:8px">Type an OBD number and click Search to find it.</div></div>';
-    h += '<div id="obdAssignDetail" style="margin-top:20px"></div>';
-    h += '</div>';
-    container.innerHTML = h;
-}
-
-function searchOBDForAssign() {
-    var q = (document.getElementById('obdSearchInput').value || '').trim().toLowerCase();
-    var resultsEl = document.getElementById('obdSearchResults');
-    var detailEl = document.getElementById('obdAssignDetail');
-    detailEl.innerHTML = '';
-
-    if (!q) {
-        resultsEl.innerHTML = '<div style="color:var(--text-muted);font-size:13px;padding:8px">Type an OBD number to search.</div>';
-        return;
-    }
-
-    var obds = DB.filter('obd_data', function(o) {
-        return o.status === 'Open' && o.obdNo.toLowerCase().indexOf(q) > -1;
-    });
-
-    if (obds.length === 0) {
-        resultsEl.innerHTML = '<div style="color:var(--danger);font-size:13px;padding:12px"><i class="bx bx-error-circle"></i> No open OBD found matching "' + escapeHtml(q) + '"</div>';
-        return;
-    }
-
-    var h = '<div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Customer</th><th>Materials</th><th>Total Pick Qty</th><th>Created</th><th>Action</th></tr></thead><tbody>';
-    for (var j = 0; j < obds.length; j++) {
-        var o = obds[j];
-        var totalPickQty = 0;
-        var mats = o.materials || [];
-        for (var mq = 0; mq < mats.length; mq++) {
-            totalPickQty += getMatQty(mats[mq]).pickQty;
-        }
-        h += '<tr><td><strong style="color:var(--accent)">' + escapeHtml(o.obdNo) + '</strong></td>';
-        h += '<td>' + escapeHtml(o.customer || '-') + '</td>';
-        h += '<td>' + mats.length + '</td><td>' + totalPickQty + '</td>';
-        h += '<td style="font-size:12px;color:var(--text-muted)">' + formatDateTime(o.createdAt) + '</td>';
-        h += '<td><button class="btn btn-sm btn-primary" onclick="selectOBDForAssign(\'' + o.id + '\')"><i class="bx bx-target-lock"></i> Select</button></td></tr>';
-    }
-    h += '</tbody></table></div>';
-    resultsEl.innerHTML = h;
-}
-
-function selectOBDForAssign(obdId) {
-    var obd = DB.find('obd_data', obdId);
-    if (!obd) return;
-
-    var pickers = DB.filter('users', function(u) {
-        return u.permissions && u.permissions.actions && u.permissions.actions.canPick === true;
-    });
-    var mats = obd.materials || [];
-
-    // Smart allocation — only minimum locations needed
-    var allocationMap = {};
-    var canFulfill = true;
-    for (var m = 0; m < mats.length; m++) {
-        var qty = getMatQty(mats[m]);
-        var result = getSmartLocations(mats[m].material, qty.pickQty, null);
-        allocationMap[mats[m].material] = result;
-        if (result.shortfall > 0) canFulfill = false;
-    }
-
-    var h = '<div class="card" style="border-color:var(--accent);box-shadow:var(--glow)">';
-    h += '<div class="card-title" style="color:var(--accent)">OBD: ' + escapeHtml(obd.obdNo) + ' — ' + escapeHtml(obd.customer || '') + '</div>';
-
-    // Picker select
-    h += '<div class="form-group" style="max-width:300px;margin-bottom:16px"><label>Select Picker <span class="req">*</span></label>';
-    h += '<select id="assignPickerSelect" class="form-input"><option value="">-- Choose Picker --</option>';
-    for (var p = 0; p < pickers.length; p++) {
-        h += '<option value="' + pickers[p].id + '">' + escapeHtml(pickers[p].name) + ' (' + escapeHtml(pickers[p].username) + ')</option>';
-    }
-    h += '</select></div>';
-
-    // Materials — text display, no dropdowns
-    h += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>Description</th><th>EAN</th><th>Order Qty</th><th>Pick Qty</th><th>Required Locations</th><th>Allocated Qty</th><th>Status</th></tr></thead><tbody>';
-    for (var m2 = 0; m2 < mats.length; m2++) {
-        var mat = mats[m2];
-        var qty = getMatQty(mat);
-        var alloc = allocationMap[mat.material];
-        var totalAlloc = 0;
-        var locNames = [];
-        for (var l = 0; l < alloc.allocated.length; l++) {
-            totalAlloc += alloc.allocated[l].assignedQty;
-            locNames.push(alloc.allocated[l].rack + '(' + alloc.allocated[l].assignedQty + ')');
-        }
-        var statusBadge = alloc.shortfall > 0
-            ? '<span class="badge badge-danger">Short ' + alloc.shortfall + '</span>'
-            : '<span class="badge badge-success">Fulfilled</span>';
-        h += '<tr><td>' + escapeHtml(mat.material) + '</td>';
-        h += '<td style="font-size:12px">' + escapeHtml(mat.description || '-') + '</td>';
-        h += '<td>' + escapeHtml(mat.ean || '-') + '</td>';
-        h += '<td>' + qty.orderQty + '</td><td>' + qty.pickQty + '</td>';
-        h += '<td style="font-size:12px">' + (locNames.length > 0 ? escapeHtml(locNames.join(', ')) : '<span style="color:var(--text-muted)">None</span>') + '</td>';
-        h += '<td>' + totalAlloc + '</td><td>' + statusBadge + '</td></tr>';
-    }
-    h += '</tbody></table></div>';
-
-    h += '<div class="form-actions" style="margin-top:16px">';
-    h += '<button class="btn btn-primary" onclick="confirmPickingAssignment(\'' + obdId + '\')"><i class="bx bx-check-circle"></i> Confirm Assignment</button>';
-    h += '<button class="btn btn-secondary" onclick="document.getElementById(\'obdAssignDetail\').innerHTML=\'\'"><i class="bx bx-x"></i> Cancel</button>';
-    if (!canFulfill) {
-        h += '<span style="color:var(--warning);font-size:12px;margin-left:12px"><i class="bx bx-error"></i> Some materials have insufficient stock.</span>';
-    }
-    h += '</div></div>';
-
-    document.getElementById('obdAssignDetail').innerHTML = h;
-}
-
-function confirmPickingAssignment(obdId) {
-    var obd = DB.find('obd_data', obdId);
-    if (!obd) return;
-    var pickerId = document.getElementById('assignPickerSelect').value;
-    if (!pickerId) { showToast('Select a picker', 'error'); return; }
-    var picker = DB.find('users', pickerId);
-    if (!picker) return;
-
-    var mats = obd.materials || [];
-    var allocationMap = {};
-    for (var m = 0; m < mats.length; m++) {
-        var qty = getMatQty(mats[m]);
-        allocationMap[mats[m].material] = getSmartLocations(mats[m].material, qty.pickQty, null);
-    }
-
-    if (!validateAssignmentQty(mats, allocationMap)) {
-        showToast('Quantity validation failed!', 'error'); return;
-    }
-
-    var assignment = DB.add('picking_assignments', {
-        obdNo: obd.obdNo, obdId: obdId, pickerId: pickerId, pickerName: picker.name, status: 'Assigned'
-    });
-
-    for (var m2 = 0; m2 < mats.length; m2++) {
-        var mat = mats[m2];
-        var qty = getMatQty(mat);
-        var alloc = allocationMap[mat.material];
-        var totalAssigned = 0;
-        for (var l = 0; l < alloc.allocated.length; l++) { totalAssigned += alloc.allocated[l].assignedQty; }
-
-        var report = DB.add('picking_reports', {
-            assignmentId: assignment.id, obdNo: obd.obdNo, pickerId: pickerId, pickerName: picker.name,
-            material: mat.material, ean: mat.ean || '', description: mat.description || '',
-            orderQty: qty.orderQty, pickQty: qty.pickQty,
-            totalAssigned: totalAssigned, totalPicked: 0, status: 'Pending'
-        });
-
-        for (var l2 = 0; l2 < alloc.allocated.length; l2++) {
-            var loc = alloc.allocated[l2];
-            DB.add('picking_done', {
-                reportId: report.id, assignmentId: assignment.id, obdNo: obd.obdNo,
-                pickerId: pickerId, pickerName: picker.name,
-                material: mat.material, ean: mat.ean || '', description: mat.description || '',
-                locationId: loc.locationId, rack: loc.rack,
-                assignedQty: loc.assignedQty, availableQty: loc.availableQty, pickedQty: 0,
-                status: 'Pending'
-            });
-        }
-    }
-
-    DB.update('obd_data', obdId, { status: 'Assigned' });
-    addNotification('OBD ' + obd.obdNo + ' assigned to ' + picker.name, 'info', pickerId);
-    logAction('Picking', 'ASSIGNED', 'OBD ' + obd.obdNo + ' assigned to ' + picker.name);
-    showToast('OBD ' + obd.obdNo + ' assigned to ' + picker.name + '!', 'success');
-    renderPickingAssign();
-}
-
-// ==================== LOCATION REQUESTS (Admin) ====================
-function renderLocationRequestsTab(container) {
-    var requests = DB.filter('location_requests', function(r) { return r.status === 'Pending'; }).slice().reverse();
-    var resolved = DB.filter('location_requests', function(r) { return r.status !== 'Pending'; }).slice().reverse().slice(0, 20);
-
-    var h = '';
-    if (requests.length === 0 && resolved.length === 0) {
-        h = '<div class="card"><div class="empty-state"><i class="bx bx-check-circle"></i><p>No location requests</p></div></div>';
-    } else {
-        if (requests.length > 0) {
-            h += '<div class="card" style="margin-bottom:20px"><div class="card-title" style="color:var(--warning)">Pending Requests (' + requests.length + ')</div>';
-            h += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD</th><th>Material</th><th>Old Location</th><th>Reason</th><th>Picker</th><th>Time</th><th>Action</th></tr></thead><tbody>';
-            for (var i = 0; i < requests.length; i++) {
-                var r = requests[i];
-                h += '<tr><td><strong style="color:var(--accent)">' + escapeHtml(r.obdNo) + '</strong></td>';
-                h += '<td>' + escapeHtml(r.material) + '</td>';
-                h += '<td>' + escapeHtml(r.oldRack || '-') + '</td>';
-                h += '<td>' + escapeHtml(r.reason || '-') + '</td>';
-                h += '<td>' + escapeHtml(r.pickerName) + '</td>';
-                h += '<td style="font-size:12px;color:var(--text-muted)">' + formatDateTime(r.requestedAt) + '</td>';
-                h += '<td><button class="btn btn-sm btn-primary" onclick="showAdminAssignLocation(\'' + r.id + '\')"><i class="bx bx-map-pin"></i> Assign</button> ';
-                h += '<button class="btn btn-sm btn-danger" onclick="rejectLocationRequest(\'' + r.id + '\')"><i class="bx bx-x"></i></button></td></tr>';
-            }
-            h += '</tbody></table></div></div>';
-        }
-        if (resolved.length > 0) {
-            h += '<div class="card"><div class="card-title">Resolved Requests</div>';
-            h += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD</th><th>Material</th><th>Old Loc</th><th>New Loc</th><th>Status</th><th>Time</th></tr></thead><tbody>';
-            for (var j = 0; j < resolved.length; j++) {
-                var rr = resolved[j];
-                var sBadge = rr.status === 'Assigned' ? 'badge-success' : 'badge-danger';
-                h += '<tr><td>' + escapeHtml(rr.obdNo) + '</td><td>' + escapeHtml(rr.material) + '</td>';
-                h += '<td>' + escapeHtml(rr.oldRack || '-') + '</td><td>' + escapeHtml(rr.newRack || '-') + '</td>';
-                h += '<td><span class="badge ' + sBadge + '">' + escapeHtml(rr.status) + '</span></td>';
-                h += '<td style="font-size:12px;color:var(--text-muted)">' + formatDateTime(rr.resolvedAt) + '</td></tr>';
-            }
-            h += '</tbody></table></div></div>';
-        }
-    }
-    container.innerHTML = h;
-}
-
-function showAdminAssignLocation(reqId) {
-    var req = DB.find('location_requests', reqId);
-    if (!req) return;
-
-    var reports = DB.filter('picking_reports', function(r) {
-        return r.assignmentId === req.assignmentId && r.material === req.material;
-    });
-    var remaining = 0;
-    for (var i = 0; i < reports.length; i++) {
-        remaining = (reports[i].pickQty || reports[i].requiredQty || 0) - (reports[i].totalPicked || 0);
-        break;
-    }
-
-    var availableLocs = DB.filter('location_master', function(loc) {
-        if (loc.material !== req.material || loc.quantity <= 0) return false;
-        if (isLocationLocked(loc.id, req.assignmentId)) return false;
-        var already = DB.filter('picking_done', function(p) {
-            return p.assignmentId === req.assignmentId && p.locationId === loc.id && p.status !== 'Not Found' && p.status !== 'Replaced';
-        });
-        return already.length === 0;
-    });
-
-    var h = '<div style="background:var(--warning-dim);padding:12px;border-radius:6px;margin-bottom:16px;font-size:13px">';
-    h += '<strong>OBD:</strong> ' + escapeHtml(req.obdNo) + ' | <strong>Material:</strong> ' + escapeHtml(req.material) + ' | <strong>Old Location:</strong> ' + escapeHtml(req.oldRack || '-') + ' | <strong>Remaining Needed:</strong> ' + remaining;
-    h += '</div>';
-
-    // Search input for location — no dropdown
-    h += '<div class="form-group"><label>Search Location</label>';
-    h += '<input type="text" id="newLocSearchInput" class="form-input" placeholder="Type rack name to search..." oninput="filterAdminLocSearch()"></div>';
-    h += '<div id="locationSearchResults" style="max-height:200px;overflow-y:auto;margin-bottom:12px"></div>';
-
-    h += '<div class="form-group"><label>Assign Quantity <span class="req">*</span></label>';
-    h += '<input type="number" id="newLocQty" class="form-input" min="1" max="' + remaining + '" placeholder="Enter qty (max ' + remaining + ')"></div>';
-
-    if (availableLocs.length === 0) {
-        h += '<div style="color:var(--danger);font-size:13px"><i class="bx bx-error-circle"></i> No available locations found for this material.</div>';
-    }
-
-    showModal('Assign New Location', h, 'sm',
-        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-        '<button class="btn btn-primary" onclick="confirmAdminAssignLocation(\'' + reqId + '\',' + remaining + ')"' + (availableLocs.length === 0 ? ' disabled' : '') + '><i class="bx bx-check-circle"></i> Assign</button>');
-
-    window._adminLocOptions = availableLocs;
-    renderLocSearchResults(availableLocs);
-}
-
-function filterAdminLocSearch() {
-    var q = (document.getElementById('newLocSearchInput').value || '').toLowerCase();
-    var filtered = [];
-    for (var i = 0; i < (window._adminLocOptions || []).length; i++) {
-        if (window._adminLocOptions[i].rack.toLowerCase().indexOf(q) > -1) filtered.push(window._adminLocOptions[i]);
-    }
-    renderLocSearchResults(filtered);
-}
-
-function renderLocSearchResults(locs) {
-    var el = document.getElementById('locationSearchResults');
-    if (!el) return;
-    if (locs.length === 0) {
-        el.innerHTML = '<div style="color:var(--text-muted);font-size:12px;padding:8px">No locations found</div>';
-        return;
-    }
-    var h = '<div style="display:flex;flex-direction:column;gap:4px">';
-    for (var i = 0; i < locs.length; i++) {
-        var loc = locs[i];
-        h += '<label style="display:flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;transition:all .2s;font-size:13px" onmouseover="this.style.borderColor=\'var(--accent)\'" onmouseout="this.style.borderColor=\'var(--border)\'">';
-        h += '<input type="radio" name="newLocRadio" value="' + loc.id + '" data-rack="' + escapeHtml(loc.rack) + '" data-qty="' + loc.quantity + '" style="accent-color:var(--accent);width:16px;height:16px"> ';
-        h += '<strong>' + escapeHtml(loc.rack) + '</strong> — Available: <span style="color:var(--accent);font-weight:700">' + loc.quantity + '</span>';
-        h += '</label>';
-    }
-    h += '</div>';
-    el.innerHTML = h;
-}
-
-function confirmAdminAssignLocation(reqId, maxQty) {
-    var req = DB.find('location_requests', reqId);
-    if (!req) return;
-    var radio = document.querySelector('input[name="newLocRadio"]:checked');
-    var qty = parseInt(document.getElementById('newLocQty').value) || 0;
-    if (!radio) { showToast('Select a location', 'error'); return; }
-    if (qty <= 0) { showToast('Enter valid quantity', 'error'); return; }
-    if (qty > maxQty) { showToast('Quantity exceeds remaining required ' + maxQty, 'error'); return; }
-
-    var locId = radio.value;
-    var rack = radio.getAttribute('data-rack');
-    var loc = DB.find('location_master', locId);
-    if (!loc || loc.quantity < qty) { showToast('Insufficient stock at location', 'error'); return; }
-    if (isLocationLocked(locId, req.assignmentId)) { showToast('Location is now locked', 'error'); return; }
-
-    DB.update('picking_done', req.pickingDoneId, { status: 'Replaced' });
-
-    DB.add('picking_done', {
-        reportId: req.reportId || '', assignmentId: req.assignmentId, obdNo: req.obdNo,
-        pickerId: req.pickerId, pickerName: req.pickerName,
-        material: req.material, ean: req.ean || '', description: req.description || '',
-        locationId: locId, rack: rack,
-        assignedQty: qty, availableQty: loc.quantity, pickedQty: 0, status: 'Pending'
-    });
-
-    var reports = DB.filter('picking_reports', function(r) {
-        return r.assignmentId === req.assignmentId && r.material === req.material;
-    });
-    if (reports.length > 0) {
-        var allDone = DB.filter('picking_done', function(p) {
-            return p.assignmentId === req.assignmentId && p.material === req.material && p.status !== 'Not Found' && p.status !== 'Replaced';
-        });
-        var newTotal = 0;
-        for (var i = 0; i < allDone.length; i++) newTotal += allDone[i].assignedQty;
-        DB.update('picking_reports', reports[0].id, { totalAssigned: newTotal });
-    }
-
-    DB.update('location_requests', reqId, {
-        status: 'Assigned', newLocationId: locId, newRack: rack, newAssignedQty: qty,
-        resolvedAt: new Date().toISOString(), resolvedBy: APP.currentUser ? APP.currentUser.name : 'Admin'
-    });
-
-    addNotification('New location ' + rack + ' assigned for OBD ' + req.obdNo, 'success', req.pickerId);
-    logAction('Picking', 'LOCATION_ASSIGNED', 'Location ' + rack + ' (qty ' + qty + ') for ' + req.material + ' in OBD ' + req.obdNo);
-    showToast('New location assigned!', 'success');
-    closeModal();
-    renderPickingAssign();
-}
-
-function rejectLocationRequest(reqId) {
-    DB.update('location_requests', reqId, {
-        status: 'Rejected', resolvedAt: new Date().toISOString(), resolvedBy: APP.currentUser ? APP.currentUser.name : 'Admin'
-    });
-    var req = DB.find('location_requests', reqId);
-    if (req) addNotification('Location request rejected for ' + req.material, 'warning', req.pickerId);
-    showToast('Request rejected', 'info');
-    renderPickingAssign();
-}
-
-// ==================== START PICKING (Picker) ====================
-function renderStartPicking() {
-    var sec = document.getElementById('section-picking');
-    if (!APP.currentUser) { sec.innerHTML = ''; return; }
-
-    var assignments = DB.filter('picking_assignments', function(a) {
-        return a.pickerId === APP.currentUser.id && a.status !== 'Completed' && a.status !== 'Cancelled';
-    }).slice().reverse();
-
-    var html = '<div class="section-header"><h2><i class="bx bxs-box"></i> My Picking Tasks</h2></div>';
-
-    if (assignments.length === 0) {
-        html += '<div class="card"><div class="empty-state"><i class="bx bxs-box"></i><p>No picking tasks assigned to you</p></div></div>';
-    } else {
-        html += '<div class="card"><div class="card-title">Assigned OBDs</div>';
-        html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Status</th><th>Materials</th><th>Progress</th><th>Assigned At</th><th>Action</th></tr></thead><tbody>';
-        for (var i = 0; i < assignments.length; i++) {
-            var a = assignments[i];
-            var reports = DB.filter('picking_reports', function(r) { return r.assignmentId === a.id; });
-            var doneCount = 0, totalPicked = 0, totalPickQty = 0;
-            for (var r = 0; r < reports.length; r++) {
-                if (reports[r].status === 'Completed' || reports[r].status === 'Short') doneCount++;
-                totalPicked += (reports[r].totalPicked || 0);
-                totalPickQty += (reports[r].pickQty || reports[r].requiredQty || 0);
-            }
-            var pct = totalPickQty > 0 ? Math.round((totalPicked / totalPickQty) * 100) : 0;
-            var statusBadge = a.status === 'Assigned' ? 'badge-accent' : 'badge-warning';
-            html += '<tr><td><strong style="color:var(--accent)">' + escapeHtml(a.obdNo) + '</strong></td>';
-            html += '<td><span class="badge ' + statusBadge + '">' + escapeHtml(a.status) + '</span></td>';
-            html += '<td>' + doneCount + '/' + reports.length + '</td>';
-            html += '<td><div style="display:flex;align-items:center;gap:8px"><div style="flex:1;height:6px;background:var(--bg-secondary);border-radius:3px;overflow:hidden"><div style="height:100%;width:' + pct + '%;background:var(--accent);border-radius:3px;transition:width .3s"></div></div><span style="font-size:12px;font-weight:700;color:var(--accent)">' + pct + '%</span></div></td>';
-            html += '<td style="font-size:12px;color:var(--text-muted)">' + formatDateTime(a.createdAt) + '</td>';
-            html += '<td><button class="btn btn-sm btn-primary" onclick="openPickingReport(\'' + a.id + '\')"><i class="bx bx-clipboard"></i> Report</button></td></tr>';
-        }
-        html += '</tbody></table></div></div>';
-    }
-
-    sec.innerHTML = html;
-}
-
-/// Picking Report — with Edit working + Submit button
-function openPickingReport(assignmentId) {
-    var assignment = DB.find('picking_assignments', assignmentId);
-    if (!assignment) return;
-    if (assignment.status === 'Assigned') {
-        DB.update('picking_assignments', assignmentId, { status: 'In Progress' });
-    }
-    var reports = DB.filter('picking_reports', function(r) { return r.assignmentId === assignmentId; });
-    var sec = document.getElementById('section-picking');
-    var html = '<div class="section-header"><h2><i class="bx bxs-clipboard"></i> Picking Report — ' + escapeHtml(assignment.obdNo) + '</h2>';
-    html += '<button class="btn btn-secondary" onclick="renderStartPicking()"><i class="bx bx-arrow-back"></i> Back</button></div>';
-
-    for (var i = 0; i < reports.length; i++) {
-        var rep = reports[i];
-        var lines = DB.filter('picking_done', function(p) { return p.reportId === rep.id && p.status !== 'Replaced'; });
-        var repStatusBadge = rep.status === 'Completed' ? 'badge-success' : rep.status === 'Short' ? 'badge-warning' : 'badge-accent';
-        html += '<div class="card" style="margin-bottom:16px">';
-        html += '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;flex-wrap:wrap;gap:8px">';
-        html += '<div><div style="font-weight:700;font-size:15px;margin-bottom:2px">' + escapeHtml(rep.material) + '</div>';
-        html += '<div style="font-size:12px;color:var(--text-muted)">' + escapeHtml(rep.description || '-') + '</div></div>';
-        html += '<span class="badge ' + repStatusBadge + '">' + escapeHtml(rep.status) + '</span></div>';
-        html += '<div style="display:flex;gap:20px;margin-bottom:12px;flex-wrap:wrap;font-size:13px">';
-        html += '<div><span style="color:var(--text-muted)">EAN:</span> <strong>' + escapeHtml(rep.ean || '-') + '</strong></div>';
-        html += '<div><span style="color:var(--text-muted)">Order Qty:</span> <strong>' + (rep.orderQty || rep.requiredQty || 0) + '</strong></div>';
-        html += '<div><span style="color:var(--text-muted)">Pick Qty:</span> <strong style="color:var(--accent)">' + (rep.pickQty || rep.requiredQty || 0) + '</strong></div>';
-        html += '<div><span style="color:var(--text-muted)">Picked:</span> <strong>' + (rep.totalPicked || 0) + '</strong></div></div>';
-
-        if (lines.length === 0) {
-            html += '<div style="text-align:center;color:var(--text-muted);padding:16px;font-size:13px">No active locations</div>';
-        } else {
-            html += '<div style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;text-transform:uppercase;letter-spacing:.3px">Required Locations</div>';
-            html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>Location</th><th>Assigned Qty</th><th>Available Qty</th><th>Picked Qty</th><th>Status</th><th>Action</th></tr></thead><tbody>';
-            for (var j = 0; j < lines.length; j++) {
-                var line = lines[j];
-                var lineStatusBadge = line.status === 'Done' ? 'badge-success' : line.status === 'Not Found' ? 'badge-danger' : 'badge-accent';
-                var actionBtn = '';
-                if (line.status === 'Pending') {
-                    actionBtn = '<button class="btn btn-sm btn-primary pick-edit-btn" data-did="' + line.id + '"><i class="bx bx-edit"></i> Edit</button>';
-                } else if (line.status === 'Done') {
-                    actionBtn = '<span style="color:var(--success);font-size:12px"><i class="bx bx-check-circle"></i> ' + line.pickedQty + ' picked</span>';
-                } else if (line.status === 'Not Found') {
-                    actionBtn = '<span style="color:var(--danger);font-size:12px"><i class="bx bx-error-circle"></i> ' + escapeHtml(line.notFoundReason || 'N/A') + '</span>';
-                }
-                html += '<tr><td><strong>' + escapeHtml(line.rack) + '</strong></td><td>' + line.assignedQty + '</td><td>' + line.availableQty + '</td>';
-                html += '<td style="font-weight:700;color:' + (line.pickedQty > 0 ? 'var(--accent)' : 'var(--text-muted)') + '">' + line.pickedQty + '</td>';
-                html += '<td><span class="badge ' + lineStatusBadge + '">' + escapeHtml(line.status) + '</span></td><td>' + actionBtn + '</td></tr>';
-            }
-            html += '</tbody></table></div>';
-        }
-        html += '</div>';
-    }
-
-    // Submit button
-    var totalPickedAll = 0, totalPickAll = 0, pendingLines = 0;
-    for (var x = 0; x < reports.length; x++) {
-        totalPickedAll += (reports[x].totalPicked || 0);
-        totalPickAll += (reports[x].pickQty || reports[x].requiredQty || 0);
-        var xLines = DB.filter('picking_done', function(p) { return p.reportId === reports[x].id && p.status === 'Pending'; });
-        pendingLines += xLines.length;
-    }
-    html += '<div class="card" style="border-color:var(--accent);margin-top:8px">';
-    html += '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">';
-    html += '<div><div style="font-size:14px;font-weight:700">Total Picked: <span style="color:var(--accent)">' + totalPickedAll + '</span> / ' + totalPickAll + '</div>';
-    html += '<div style="font-size:12px;color:var(--text-muted);margin-top:2px">Pending lines: ' + pendingLines + '</div></div>';
-    html += '<div style="display:flex;gap:10px;flex-wrap:wrap">';
-    if (pendingLines > 0) {
-        html += '<button class="btn btn-warning" id="submitPickingPendingBtn" data-aid="' + assignmentId + '"><i class="bx bx-check-double"></i> Submit Picking (' + pendingLines + ' pending)</button>';
-    }
-    if (pendingLines === 0) {
-        html += '<button class="btn btn-primary" style="font-size:15px;padding:12px 28px" id="submitPickingFinalBtn" data-aid="' + assignmentId + '"><i class="bx bx-check-circle"></i> Submit Picking</button>';
-    }
-    html += '</div></div></div>';
-    sec.innerHTML = html;
-
-    // Bind Edit buttons via event delegation (no inline onclick — 100% reliable)
-    sec.onclick = function(e) {
-        var editBtn = e.target.closest('.pick-edit-btn');
-        if (editBtn) {
-            e.preventDefault();
-            e.stopPropagation();
-            var did = editBtn.getAttribute('data-did');
-            if (did) editPickingLine(did);
-            return;
-        }
-        var finalBtn = e.target.closest('#submitPickingFinalBtn');
-        if (finalBtn) {
-            e.preventDefault();
-            submitPickingFinal(finalBtn.getAttribute('data-aid'));
-            return;
-        }
-        var pendingBtn = e.target.closest('#submitPickingPendingBtn');
-        if (pendingBtn) {
-            e.preventDefault();
-            submitPickingWithPending(pendingBtn.getAttribute('data-aid'));
-            return;
-        }
-    };
-}
-
-// Edit Picking Line — opens modal
-function editPickingLine(doneId) {
-    var line = DB.find('picking_done', doneId);
-    if (!line) { showToast('Line not found', 'error'); return; }
-    var loc = DB.find('location_master', line.locationId);
-    var currentAvailable = loc ? loc.quantity : 0;
-    var maxPick = Math.min(line.assignedQty, currentAvailable);
-
-    var h = '<div class="form-row">';
-    h += '<div class="form-group"><label>Location</label><div class="form-input" style="font-weight:700;color:var(--accent)">' + escapeHtml(line.rack) + '</div></div>';
-    h += '<div class="form-group"><label>Available Qty</label><div class="form-input" style="font-weight:700">' + currentAvailable + '</div></div>';
-    h += '<div class="form-group"><label>Assigned Qty</label><div class="form-input">' + line.assignedQty + '</div></div>';
-    h += '</div>';
-    h += '<div class="form-group"><label>Picked Qty <span class="req">*</span></label>';
-    h += '<input type="number" id="pickedQtyInput" class="form-input" min="0" max="' + maxPick + '" value="' + line.assignedQty + '"></div>';
-    h += '<input type="hidden" id="editDoneId" value="' + doneId + '">';
-    h += '<input type="hidden" id="editCurrentAvailable" value="' + currentAvailable + '">';
-
-    if (currentAvailable < line.assignedQty) {
-        h += '<div style="background:var(--warning-dim);padding:10px;border-radius:6px;margin-bottom:12px;font-size:12px;color:var(--warning)"><i class="bx bx-error"></i> Available (' + currentAvailable + ') < Assigned (' + line.assignedQty + '). Adjust picked qty.</div>';
-    }
-
-    h += '<div class="form-actions" style="justify-content:space-between;flex-wrap:wrap">';
-    h += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
-    h += '<button class="btn btn-primary" id="donePickBtn"><i class="bx bx-check-circle"></i> Done</button>';
-    h += '<button class="btn btn-danger" id="notFoundBtn"><i class="bx bx-error-circle"></i> Material Not Found</button>';
-    h += '<button class="btn btn-warning" id="anotherLocBtn"><i class="bx bx-map-pin"></i> Give Another Location</button>';
-    h += '</div>';
-    h += '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>';
-    h += '</div>';
-
-    showModal('Pick — ' + line.rack, h, 'sm');
-
-    // Bind modal buttons via event delegation (no inline onclick)
-    setTimeout(function() {
-        var modalBody = document.querySelector('.modal-container');
-        if (modalBody) {
-            modalBody.onclick = function(e) {
-                if (e.target.closest('#donePickBtn')) { e.preventDefault(); donePickingLine(); return; }
-                if (e.target.closest('#notFoundBtn')) { e.preventDefault(); materialNotFoundClick(); return; }
-                if (e.target.closest('#anotherLocBtn')) { e.preventDefault(); requestAnotherLocationClick(); return; }
-            };
-        }
-    }, 100);
-}
-
-// Done — subtract from Location Master
-function donePickingLine() {
-    var doneId = document.getElementById('editDoneId').value;
-    var pickedQty = parseInt(document.getElementById('pickedQtyInput').value) || 0;
-    var line = DB.find('picking_done', doneId);
-    if (!line) return;
-    if (pickedQty <= 0) { showToast('Enter picked quantity', 'error'); return; }
-    if (pickedQty > line.assignedQty) { showToast('Cannot exceed assigned qty (' + line.assignedQty + ')', 'error'); return; }
-
-    var loc = DB.find('location_master', line.locationId);
-    if (!loc) { showToast('Location not found', 'error'); return; }
-    if (pickedQty > loc.quantity) { showToast('Only ' + loc.quantity + ' available now', 'error'); return; }
-
-    var remaining = loc.quantity - pickedQty;
-    DB.update('location_master', line.locationId, { quantity: remaining });
-    DB.update('picking_done', doneId, { pickedQty: pickedQty, status: 'Done', updatedAt: new Date().toISOString() });
-    updatePickingReportTotals(line.reportId);
-    checkAssignmentCompletion(line.assignmentId);
-
-    logAction('Picking', 'PICK_DONE', 'Picked ' + pickedQty + ' of ' + line.material + ' from ' + line.rack + '. Remaining: ' + remaining);
-    showToast('Picked ' + pickedQty + ' from ' + line.rack + '! Remaining: ' + remaining, 'success');
-    closeModal();
-    openPickingReport(line.assignmentId);
-}
-
-function updatePickingReportTotals(reportId) {
-    var report = DB.find('picking_reports', reportId);
-    if (!report) return;
-    var lines = DB.filter('picking_done', function(p) { return p.reportId === reportId && p.status !== 'Replaced'; });
-    var totalPicked = 0, allDone = true, anyNotFound = false;
-    for (var i = 0; i < lines.length; i++) {
-        totalPicked += (lines[i].pickedQty || 0);
-        if (lines[i].status === 'Pending') allDone = false;
-        if (lines[i].status === 'Not Found') anyNotFound = true;
-    }
-    var target = report.pickQty || report.requiredQty || 0;
-    var status = 'Pending';
-    if (allDone && totalPicked >= target) status = 'Completed';
-    else if (allDone && anyNotFound) status = 'Short';
-    else if (totalPicked > 0) status = 'In Progress';
-    DB.update('picking_reports', reportId, { totalPicked: totalPicked, status: status });
-}
-
-function checkAssignmentCompletion(assignmentId) {
-    var reports = DB.filter('picking_reports', function(r) { return r.assignmentId === assignmentId; });
-    var allComplete = true;
-    for (var i = 0; i < reports.length; i++) {
-        if (reports[i].status !== 'Completed' && reports[i].status !== 'Short') { allComplete = false; break; }
-    }
-    if (allComplete) {
-        var assignment = DB.find('picking_assignments', assignmentId);
-        DB.update('picking_assignments', assignmentId, { status: 'Completed', completedAt: new Date().toISOString() });
-        if (assignment && assignment.obdId) DB.update('obd_data', assignment.obdId, { status: 'Completed' });
-        addNotification('Picking completed for OBD ' + (assignment ? assignment.obdNo : ''), 'success');
-        logAction('Picking', 'COMPLETED', 'All picking completed for assignment ' + assignmentId);
-    }
-}
-
-// Material Not Found
-function materialNotFoundClick() {
-    var doneId = document.getElementById('editDoneId').value;
-    var line = DB.find('picking_done', doneId);
-    if (!line) return;
-    var h = '<div style="margin-bottom:16px"><label style="display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:8px;text-transform:uppercase">Reason <span class="req">*</span></label>';
-    var reasons = ['Material Missing', 'Wrong Material', 'Empty Location', 'Damaged', 'Other'];
-    for (var i = 0; i < reasons.length; i++) {
-        h += '<label style="display:flex;align-items:center;gap:8px;padding:8px 12px;margin-bottom:4px;border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;transition:all .2s" onmouseover="this.style.borderColor=\'var(--danger)\'" onmouseout="this.style.borderColor=\'var(--border)\'">';
-        h += '<input type="radio" name="notFoundReason" value="' + reasons[i] + '" style="accent-color:var(--danger);width:16px;height:16px"> ' + escapeHtml(reasons[i]) + '</label>';
-    }
-    h += '</div>';
-    h += '<div class="form-group"><label>Remarks (Optional)</label><textarea id="notFoundRemarks" class="form-input" rows="2" placeholder="Additional details..."></textarea></div>';
-    h += '<input type="hidden" id="notFoundDoneId" value="' + doneId + '">';
-    showModal('Material Not Found — ' + line.rack, h, 'sm',
-        '<button class="btn btn-secondary" onclick="closeModal();editPickingLine(\'' + doneId + '\')"><i class="bx bx-arrow-back"></i> Back</button>' +
-        '<button class="btn btn-danger" id="confirmNotFoundBtn"><i class="bx bx-error-circle"></i> Submit</button>');
-    setTimeout(function() {
-        var mc = document.querySelector('.modal-container');
-        if (mc) mc.onclick = function(e) { if (e.target.closest('#confirmNotFoundBtn')) { e.preventDefault(); submitMaterialNotFound(); } };
-    }, 100);
-}
-
-function submitMaterialNotFound() {
-    var doneId = document.getElementById('notFoundDoneId').value;
-    var reasonEl = document.querySelector('input[name="notFoundReason"]:checked');
-    var remarks = document.getElementById('notFoundRemarks').value.trim();
-    if (!reasonEl) { showToast('Select a reason', 'error'); return; }
-    DB.update('picking_done', doneId, { status: 'Not Found', pickedQty: 0, notFoundReason: reasonEl.value, notFoundRemarks: remarks, updatedAt: new Date().toISOString() });
-    var line = DB.find('picking_done', doneId);
-    if (line) { updatePickingReportTotals(line.reportId); logAction('Picking', 'NOT_FOUND', line.material + ' not found at ' + line.rack + '. Reason: ' + reasonEl.value + ' (OBD: ' + line.obdNo + ')'); }
-    showToast('Marked as Not Found: ' + reasonEl.value, 'warning');
-    closeModal();
-    if (line) openPickingReport(line.assignmentId);
-}
-
-// Request Another Location
-function requestAnotherLocationClick() {
-    var doneId = document.getElementById('editDoneId').value;
-    var line = DB.find('picking_done', doneId);
-    if (!line) return;
-    var existing = DB.filter('location_requests', function(r) { return r.pickingDoneId === doneId && r.status === 'Pending'; });
-    if (existing.length > 0) { showToast('Request already sent. Waiting for admin.', 'warning'); return; }
-    var h = '<div style="background:var(--info-dim);padding:12px;border-radius:6px;margin-bottom:16px;font-size:13px;color:var(--info)"><i class="bx bx-info-circle"></i> Request will be sent to admin with OBD, material, and location details.</div>';
-    h += '<div class="form-group"><label>Reason</label><textarea id="locReqReason" class="form-input" rows="2" placeholder="e.g. Material not found here..."></textarea></div>';
-    h += '<input type="hidden" id="locReqDoneId" value="' + doneId + '">';
-    showModal('Request Another Location', h, 'sm',
-        '<button class="btn btn-secondary" onclick="closeModal();editPickingLine(\'' + doneId + '\')"><i class="bx bx-arrow-back"></i> Back</button>' +
-        '<button class="btn btn-warning" id="sendLocReqBtn"><i class="bx bx-send"></i> Send Request</button>');
-    setTimeout(function() {
-        var mc = document.querySelector('.modal-container');
-        if (mc) mc.onclick = function(e) { if (e.target.closest('#sendLocReqBtn')) { e.preventDefault(); submitLocationRequest(); } };
-    }, 100);
-}
-
-function submitLocationRequest() {
-    var doneId = document.getElementById('locReqDoneId').value;
-    var reason = document.getElementById('locReqReason').value.trim();
-    var line = DB.find('picking_done', doneId);
-    if (!line) return;
-    DB.add('location_requests', {
-        assignmentId: line.assignmentId, obdNo: line.obdNo, pickingDoneId: doneId, reportId: line.reportId,
-        material: line.material, ean: line.ean, description: line.description,
-        oldLocationId: line.locationId, oldRack: line.rack, reason: reason || 'Not specified',
-        pickerId: APP.currentUser ? APP.currentUser.id : '', pickerName: APP.currentUser ? APP.currentUser.name : '',
-        status: 'Pending', requestedAt: new Date().toISOString()
-    });
-    addNotification('Location change request from ' + (APP.currentUser ? APP.currentUser.name : 'Picker') + ' for ' + line.material + ' (OBD: ' + line.obdNo + ')', 'warning');
-    logAction('Picking', 'LOCATION_REQUESTED', 'Picker requested new location for ' + line.material + ' at ' + line.rack);
-    showToast('Request sent to admin!', 'success');
-    closeModal();
-    if (line) openPickingReport(line.assignmentId);
-}
-
-// Submit when all done
-function submitPickingFinal(assignmentId) {
-    var assignment = DB.find('picking_assignments', assignmentId);
-    if (!assignment) return;
-    var reports = DB.filter('picking_reports', function(r) { return r.assignmentId === assignmentId; });
-    for (var i = 0; i < reports.length; i++) {
-        if (reports[i].status !== 'Completed' && reports[i].status !== 'Short') {
-            var target = reports[i].pickQty || reports[i].requiredQty || 0;
-            DB.update('picking_reports', reports[i].id, { status: (reports[i].totalPicked || 0) >= target ? 'Completed' : 'Short' });
-        }
-    }
-    DB.update('picking_assignments', assignmentId, { status: 'Completed', completedAt: new Date().toISOString() });
-    if (assignment.obdId) DB.update('obd_data', assignment.obdId, { status: 'Completed' });
-    addNotification('Picking submitted for OBD ' + assignment.obdNo, 'success');
-    logAction('Picking', 'SUBMITTED', 'Picking submitted for OBD ' + assignment.obdNo);
-    showToast('Picking for OBD ' + assignment.obdNo + ' submitted!', 'success');
-    renderStartPicking();
-}
-
-// Submit with pending
-function submitPickingWithPending(assignmentId) {
-    var assignment = DB.find('picking_assignments', assignmentId);
-    if (!assignment) return;
-    var reports = DB.filter('picking_reports', function(r) { return r.assignmentId === assignmentId; });
-    var totalPickedAll = 0;
-    for (var i = 0; i < reports.length; i++) totalPickedAll += (reports[i].totalPicked || 0);
-    if (totalPickedAll === 0) { showToast('Pick at least one item first', 'error'); return; }
-    showModal('Confirm Partial Submit', '<p>You have <strong style="color:var(--warning)">pending lines</strong>. Only picked items will be submitted.</p><p style="margin-top:8px;font-size:13px;color:var(--text-muted)">Total picked: <strong style="color:var(--accent)">' + totalPickedAll + '</strong></p>', 'sm',
-        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-        '<button class="btn btn-warning" id="confirmPartialBtn" data-aid="' + assignmentId + '"><i class="bx bx-check-double"></i> Submit Anyway</button>');
-    setTimeout(function() {
-        var mc = document.querySelector('.modal-container');
-        if (mc) mc.onclick = function(e) {
-            var btn = e.target.closest('#confirmPartialBtn');
-            if (btn) { e.preventDefault(); confirmPartialSubmit(btn.getAttribute('data-aid')); }
-        };
-    }, 100);
-}
-
-function confirmPartialSubmit(assignmentId) {
-    var assignment = DB.find('picking_assignments', assignmentId);
-    if (!assignment) return;
-    var reports = DB.filter('picking_reports', function(r) { return r.assignmentId === assignmentId; });
-    for (var i = 0; i < reports.length; i++) {
-        if (reports[i].status !== 'Completed' && reports[i].status !== 'Short') {
-            if ((reports[i].totalPicked || 0) > 0) DB.update('picking_reports', reports[i].id, { status: 'Short' });
-        }
-    }
-    DB.update('picking_assignments', assignmentId, { status: 'Completed', completedAt: new Date().toISOString() });
-    if (assignment.obdId) DB.update('obd_data', assignment.obdId, { status: 'Completed' });
-    addNotification('Partial picking submitted for OBD ' + assignment.obdNo, 'warning');
-    logAction('Picking', 'PARTIAL_SUBMIT', 'Partial picking for OBD ' + assignment.obdNo);
-    showToast('Partial picking submitted', 'success');
-    closeModal();
-    renderStartPicking();
-}
-
-// ==================== PICKING DONE ====================
-function renderPickingDone() {
-    var sec = document.getElementById('section-picking');
-    var assignments = DB.filter('picking_assignments', function(a) {
-        return a.status === 'Completed';
-    }).slice().reverse();
-
-    var html = '<div class="section-header"><h2><i class="bx bxs-check-double"></i> Picking Completed</h2>' +
-        '<button class="btn btn-secondary" onclick="exportPickingDoneExcel()"><i class="bx bx-download"></i> Export Excel</button></div>';
-
-    if (assignments.length === 0) {
-        html += '<div class="card"><div class="empty-state"><i class="bx bxs-check-double"></i><p>No completed picking yet</p></div></div>';
-    } else {
-        html += '<div class="kpi-grid" style="margin-bottom:20px">';
-        html += kpiCard('bxs-check-double', assignments.length, 'Completed OBDs');
-        var allReports = DB.filter('picking_reports', function(r) { return r.status === 'Completed' || r.status === 'Short'; });
-        var totalPicked = 0;
-        for (var t = 0; t < allReports.length; t++) totalPicked += (allReports[t].totalPicked || 0);
-        html += kpiCard('bxs-label', allReports.length, 'Materials Picked');
-        html += kpiCard('bxs-package', totalPicked, 'Total Qty Picked');
-        html += '</div>';
-
-        html += '<div class="card"><div class="card-title">Completed Assignments</div>';
-        html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Picker</th><th>Materials</th><th>Total Picked</th><th>Completed At</th><th>Action</th></tr></thead><tbody>';
-        for (var i = 0; i < assignments.length; i++) {
-            var a = assignments[i];
-            var reps = DB.filter('picking_reports', function(r) { return r.assignmentId === a.id; });
-            var tp = 0;
-            for (var r = 0; r < reps.length; r++) tp += (reps[r].totalPicked || 0);
-            html += '<tr><td><strong style="color:var(--accent)">' + escapeHtml(a.obdNo) + '</strong></td>';
-            html += '<td>' + escapeHtml(a.pickerName) + '</td>';
-            html += '<td>' + reps.length + '</td><td>' + tp + '</td>';
-            html += '<td style="font-size:12px;color:var(--text-muted)">' + formatDateTime(a.completedAt) + '</td>';
-            html += '<td><button class="btn btn-sm btn-secondary" onclick="viewCompletedPickingDetail(\'' + a.id + '\')"><i class="bx bx-show"></i> View</button></td></tr>';
-        }
-        html += '</tbody></table></div></div>';
-    }
-    sec.innerHTML = html;
-}
-
-function viewCompletedPickingDetail(assignmentId) {
-    var assignment = DB.find('picking_assignments', assignmentId);
-    if (!assignment) return;
-    var reports = DB.filter('picking_reports', function(r) { return r.assignmentId === assignmentId; });
-
-    var h = '<div style="margin-bottom:16px"><strong>OBD:</strong> ' + escapeHtml(assignment.obdNo) + ' | <strong>Picker:</strong> ' + escapeHtml(assignment.pickerName) + ' | <strong>Completed:</strong> ' + formatDateTime(assignment.completedAt) + '</div>';
-
-    for (var i = 0; i < reports.length; i++) {
-        var rep = reports[i];
-        var lines = DB.filter('picking_done', function(p) { return p.reportId === rep.id && (p.status === 'Done' || p.status === 'Not Found'); });
-        var target = rep.pickQty || rep.requiredQty || 0;
-        h += '<div style="margin-bottom:12px"><strong>' + escapeHtml(rep.material) + '</strong> — Picked: ' + (rep.totalPicked || 0) + '/' + target + ' <span class="badge ' + (rep.status === 'Completed' ? 'badge-success' : 'badge-warning') + '">' + rep.status + '</span></div>';
-        if (lines.length > 0) {
-            h += '<div class="table-wrapper" style="margin-bottom:12px"><table class="data-table"><thead><tr><th>Location</th><th>Picked</th><th>Status</th><th>Reason</th></tr></thead><tbody>';
-            for (var j = 0; j < lines.length; j++) {
-                var l = lines[j];
-                h += '<tr><td>' + escapeHtml(l.rack) + '</td><td>' + l.pickedQty + '</td>';
-                h += '<td><span class="badge ' + (l.status === 'Done' ? 'badge-success' : 'badge-danger') + '">' + l.status + '</span></td>';
-                h += '<td>' + escapeHtml(l.notFoundReason || '-') + '</td></tr>';
-            }
-            h += '</tbody></table></div>';
-        }
-    }
-
-    showModal('Picking Detail — ' + assignment.obdNo, h, 'lg');
-}
-
-function exportPickingDoneExcel() {
-    var assignments = DB.filter('picking_assignments', function(a) { return a.status === 'Completed'; });
-    if (assignments.length === 0) { showToast('No data to export', 'warning'); return; }
-
-    var rows = [];
-    for (var i = 0; i < assignments.length; i++) {
-        var a = assignments[i];
-        var reports = DB.filter('picking_reports', function(r) { return r.assignmentId === a.id; });
-        for (var j = 0; j < reports.length; j++) {
-            var rep = reports[j];
-            var lines = DB.filter('picking_done', function(p) { return p.reportId === rep.id && p.status === 'Done'; });
-            for (var k = 0; k < lines.length; k++) {
-                rows.push({
-                    'OBD No': a.obdNo, 'Picker': a.pickerName, 'Material': rep.material,
-                    'Description': rep.description || '', 'EAN': rep.ean || '',
-                    'Order Qty': rep.orderQty || rep.requiredQty || 0,
-                    'Pick Qty': rep.pickQty || rep.requiredQty || 0,
-                    'Location': lines[k].rack, 'Picked Qty': lines[k].pickedQty,
-                    'Status': rep.status, 'Completed At': formatDateTime(a.completedAt)
-                });
-            }
-        }
-    }
-
-    var ws = XLSX.utils.json_to_sheet(rows);
-    var wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Picking Done');
-    XLSX.writeFile(wb, 'Picking_Done_' + today() + '.xlsx');
-    logAction('Picking', 'EXPORT', 'Picking Done report exported');
-    showToast('Excel exported!', 'success');
-}
-
-// ==================== PICKING DONE ====================
-function renderPickingDone() {
-    var sec = document.getElementById('section-picking');
-    var assignments = DB.filter('picking_assignments', function(a) {
-        return a.status === 'Completed';
-    }).slice().reverse();
-
-    var html = '<div class="section-header"><h2><i class="bx bxs-check-double"></i> Picking Completed</h2>' +
-        '<button class="btn btn-secondary" onclick="exportPickingDoneExcel()"><i class="bx bx-download"></i> Export Excel</button></div>';
-
-    if (assignments.length === 0) {
-        html += '<div class="card"><div class="empty-state"><i class="bx bxs-check-double"></i><p>No completed picking yet</p></div></div>';
-    } else {
-        html += '<div class="kpi-grid" style="margin-bottom:20px">';
-        html += kpiCard('bxs-check-double', assignments.length, 'Completed OBDs');
-        var totalMats = 0, totalPicked = 0;
-        var allReports = DB.filter('picking_reports', function(r) { return r.status === 'Completed' || r.status === 'Short'; });
-        totalMats = allReports.length;
-        for (var t = 0; t < allReports.length; t++) { totalPicked += (allReports[t].totalPicked || 0); }
-        html += kpiCard('bxs-label', totalMats, 'Materials Picked');
-        html += kpiCard('bxs-package', totalPicked, 'Total Qty Picked');
-        html += '</div>';
-
-        html += '<div class="card"><div class="card-title">Completed Assignments</div>';
-        html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Picker</th><th>Materials</th><th>Total Picked</th><th>Completed At</th><th>Action</th></tr></thead><tbody>';
-        for (var i = 0; i < assignments.length; i++) {
-            var a = assignments[i];
-            var reps = DB.filter('picking_reports', function(r) { return r.assignmentId === a.id; });
-            var tp = 0;
-            for (var r = 0; r < reps.length; r++) { tp += (reps[r].totalPicked || 0); }
-            html += '<tr><td><strong style="color:var(--accent)">' + escapeHtml(a.obdNo) + '</strong></td>';
-            html += '<td>' + escapeHtml(a.pickerName) + '</td>';
-            html += '<td>' + reps.length + '</td><td>' + tp + '</td>';
-            html += '<td style="font-size:12px;color:var(--text-muted)">' + formatDateTime(a.completedAt) + '</td>';
-            html += '<td><button class="btn btn-sm btn-secondary" onclick="viewCompletedPickingDetail(\'' + a.id + '\')"><i class="bx bx-show"></i> View</button></td></tr>';
-        }
-        html += '</tbody></table></div></div>';
-    }
-    sec.innerHTML = html;
-}
-
-function viewCompletedPickingDetail(assignmentId) {
-    var assignment = DB.find('picking_assignments', assignmentId);
-    if (!assignment) return;
-    var reports = DB.filter('picking_reports', function(r) { return r.assignmentId === assignmentId; });
-
-    var h = '<div style="margin-bottom:16px"><strong>OBD:</strong> ' + escapeHtml(assignment.obdNo) + ' | <strong>Picker:</strong> ' + escapeHtml(assignment.pickerName) + ' | <strong>Completed:</strong> ' + formatDateTime(assignment.completedAt) + '</div>';
-
-    for (var i = 0; i < reports.length; i++) {
-        var rep = reports[i];
-        var lines = DB.filter('picking_done', function(p) { return p.reportId === rep.id && (p.status === 'Done' || p.status === 'Not Found'); });
-        h += '<div style="margin-bottom:12px"><strong>' + escapeHtml(rep.material) + '</strong> — Picked: ' + rep.totalPicked + '/' + rep.requiredQty + ' <span class="badge ' + (rep.status === 'Completed' ? 'badge-success' : 'badge-warning') + '">' + rep.status + '</span></div>';
-        if (lines.length > 0) {
-            h += '<div class="table-wrapper" style="margin-bottom:12px"><table class="data-table"><thead><tr><th>Location</th><th>Picked</th><th>Status</th><th>Reason</th></tr></thead><tbody>';
-            for (var j = 0; j < lines.length; j++) {
-                var l = lines[j];
-                h += '<tr><td>' + escapeHtml(l.rack) + '</td><td>' + l.pickedQty + '</td>';
-                h += '<td><span class="badge ' + (l.status === 'Done' ? 'badge-success' : 'badge-danger') + '">' + l.status + '</span></td>';
-                h += '<td>' + escapeHtml(l.notFoundReason || '-') + '</td></tr>';
-            }
-            h += '</tbody></table></div>';
-        }
-    }
-
-    showModal('Picking Detail — ' + assignment.obdNo, h, 'lg');
-}
-
-function exportPickingDoneExcel() {
-    var assignments = DB.filter('picking_assignments', function(a) { return a.status === 'Completed'; });
-    if (assignments.length === 0) { showToast('No data to export', 'warning'); return; }
-
-    var rows = [];
-    for (var i = 0; i < assignments.length; i++) {
-        var a = assignments[i];
-        var reports = DB.filter('picking_reports', function(r) { return r.assignmentId === a.id; });
-        for (var j = 0; j < reports.length; j++) {
-            var rep = reports[j];
-            var lines = DB.filter('picking_done', function(p) { return p.reportId === rep.id && p.status === 'Done'; });
-            for (var k = 0; k < lines.length; k++) {
-                rows.push({
-                    'OBD No': a.obdNo, 'Picker': a.pickerName, 'Material': rep.material,
-                    'EAN': rep.ean, 'Required Qty': rep.requiredQty, 'Location': lines[k].rack,
-                    'Picked Qty': lines[k].pickedQty, 'Status': rep.status,
-                    'Completed At': formatDateTime(a.completedAt)
-                });
-            }
-        }
-    }
-
-    var ws = XLSX.utils.json_to_sheet(rows);
-    var wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Picking Done');
-    XLSX.writeFile(wb, 'Picking_Done_' + today() + '.xlsx');
-    logAction('Picking', 'EXPORT', 'Picking Done report exported');
-    showToast('Excel exported!', 'success');
-}
-
-
-/* ============================================================
-   LOADING MODULE — Clean Implementation
-   ============================================================ */
-
-function renderLoading(sub) {
-    var sec = document.getElementById('section-loading');
-    if (!sec) {
-        sec = document.createElement('section');
-        sec.id = 'section-loading';
-        sec.className = 'content-section';
-        document.getElementById('contentArea').appendChild(sec);
-    }
-    switch (sub) {
-        case 'loading-assign': renderLoadingAssign(); break;
-        case 'start-loading': renderStartLoading(); break;
-        case 'loading-done': renderLoadingDone(); break;
-        case 'qty-mismatch': renderQtyMismatch(); break;
-        default:
-            sec.innerHTML = '<div class="section-header"><h2><i class="bx bxs-truck"></i> Loading Module</h2></div>' +
-                '<div class="card"><div class="empty-state"><i class="bx bxs-truck"></i><p>Select a sub-module from sidebar</p></div></div>';
-    }
-}
-
-// ==================== LOADING ====================
-function renderLoading(sub) {
-    if (sub === 'loading-assign') { renderLoadingAssign(); return; }
-    if (sub === 'start-loading') { renderStartLoading(); return; }
-    if (sub === 'loading-done') { renderLoadingDone(); return; }
-    if (sub === 'qty-mismatch') { renderQtyMismatch(); return; }
-    renderLoadingAssign();
-}
-
-// ===== LOADING ASSIGN — Search + Table + Select =====
-var _laT = null, _laP = 1, _laSel = {};
-
-function renderLoadingAssign() {
-    var html = '<div class="section-header"><h2><i class="bx bx-truck"></i> Loading Assign</h2></div>';
-
-    // Top Card
-    html += '<div class="card" style="margin-bottom:16px">';
-    html += '<div class="card-title">ASSIGN OBD TO LOADER</div>';
-    html += '<div class="form-row">';
-    html += '<div class="form-group" style="flex:2"><label>Search OBD / Customer</label>';
-    html += '<div style="position:relative"><i class="bx bx-search" style="position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--text-muted);font-size:16px"></i>';
-    html += '<input type="text" id="_las" class="form-input" style="padding-left:38px" placeholder="Type OBD number or customer name..." oninput="clearTimeout(_laT);_laT=setTimeout(function(){_laP=1;_loadLAOBDs()},300)"></div></div>';
-    html += '<div class="form-group" style="flex:1"><label>Loader Username <span class="req">*</span></label>';
-    html += '<input type="text" id="_lauser" class="form-input" placeholder="e.g. loader"></div>';
-    html += '</div>';
-    html += '<div class="form-actions" style="margin-top:12px">';
-    html += '<button class="btn btn-primary" onclick="_assignSelectedOBDs()"><i class="bx bx-check-double"></i> Assign Selected OBDs</button>';
-    html += '<button class="btn btn-secondary" onclick="_selectAllLA()"><i class="bx bx-check-square"></i> Select All</button>';
-    html += '<button class="btn btn-ghost" onclick="_deselectAllLA()"><i class="bx bx-square"></i> Deselect All</button>';
-    html += '<span id="_laSelCount" style="margin-left:12px;font-size:13px;color:var(--text-muted);display:flex;align-items:center;gap:4px"><i class="bx bx-check-circle"></i> 0 selected</span>';
-    html += '</div></div>';
-
-    // Table
-    html += '<div id="_lat"></div>';
-    document.getElementById('section-loading').innerHTML = html;
-    _laSel = {};
-    _loadLAOBDs();
-}
-
-function _loadLAOBDs() {
-    var q = (document.getElementById('_las') || {}).value || '';
-    var allOBDs = DB.get('obd_data');
-    var skipStatus = ['Loading Assigned', 'Loaded', 'Loading Done'];
-    var filtered = [];
-    for (var i = 0; i < allOBDs.length; i++) {
-        var obd = allOBDs[i];
-        if (skipStatus.indexOf(obd.status) > -1) continue;
-        if (q) {
-            var ql = q.toLowerCase();
-            if ((obd.obdNo || '').toLowerCase().indexOf(ql) === -1 && (obd.customer || '').toLowerCase().indexOf(ql) === -1) continue;
-        }
-        filtered.push(obd);
-    }
-    filtered.sort(function(a, b) { return new Date(b.createdAt || 0) - new Date(a.createdAt || 0); });
-
-    var total = filtered.length;
-    var perPage = 50;
-    var pages = Math.ceil(total / perPage) || 1;
-    var start = (_laP - 1) * perPage;
-    var items = filtered.slice(start, start + perPage);
-
-    var el = document.getElementById('_lat');
-    if (!el) return;
-
-    var h = '<div style="overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius)">';
-    h += '<table class="data-table"><thead><tr>';
-    h += '<th style="width:50px;text-align:center"><input type="checkbox" id="_laCA" onchange="_toggleAllLA(this.checked)" style="accent-color:var(--accent);width:16px;height:16px;cursor:pointer"></th>';
-    h += '<th>#</th><th>OBD No</th><th>Customer</th><th>Materials</th><th>Total Qty</th><th>Status</th><th>Created</th>';
-    h += '</tr></thead><tbody>';
-
-    if (items.length === 0) {
-        h += '<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:40px"><i class="bx bx-inbox" style="font-size:36px;display:block;margin-bottom:8px;opacity:.4"></i>No OBDs available for loading</td></tr>';
-    } else {
-        for (var r = 0; r < items.length; r++) {
-            var obd = items[r];
-            var ck = _laSel[obd.id] ? 'checked' : '';
-            var mc = obd.materials ? (Array.isArray(obd.materials) ? obd.materials.length : 0) : (obd.materialCount || 0);
-            var tq = obd.totalQty || obd.totalPickQty || 0;
-            var bg = _laSel[obd.id] ? 'background:var(--accent-dim)' : '';
-
-            h += '<tr style="' + bg + '">';
-            h += '<td style="text-align:center"><input type="checkbox" class="_laChk" data-id="' + obd.id + '" ' + ck + ' onchange="_toggleLA(\'' + obd.id + '\',this.checked)" style="accent-color:var(--accent);width:16px;height:16px;cursor:pointer"></td>';
-            h += '<td style="color:var(--text-muted);font-size:11px">' + (start + r + 1) + '</td>';
-            h += '<td><strong style="color:var(--accent);font-family:var(--font-display);font-size:12px">' + escapeHtml(obd.obdNo || '-') + '</strong></td>';
-            h += '<td>' + escapeHtml(obd.customer || '-') + '</td>';
-            h += '<td><span class="badge badge-info">' + mc + '</span></td>';
-            h += '<td><strong>' + tq + '</strong></td>';
-            h += '<td>' + _laBadge(obd.status) + '</td>';
-            h += '<td style="font-size:12px;color:var(--text-muted)">' + formatDateTime(obd.createdAt) + '</td>';
-            h += '</tr>';
-        }
-    }
-    h += '</tbody></table></div>';
-
-    // Pagination
-    if (pages > 1) {
-        h += '<div class="pagination" style="margin-top:12px">';
-        h += '<button class="page-btn" onclick="_laP=' + (_laP - 1) + ';_loadLAOBDs()" ' + (_laP <= 1 ? 'disabled' : '') + '><i class="bx bx-chevron-left"></i></button>';
-        var s = Math.max(1, _laP - 2), e = Math.min(pages, _laP + 2);
-        if (s > 1) { h += '<button class="page-btn" onclick="_laP=1;_loadLAOBDs()">1</button>'; if (s > 2) h += '<span style="color:var(--text-muted);padding:0 4px">...</span>'; }
-        for (var p = s; p <= e; p++) h += '<button class="page-btn ' + (p === _laP ? 'active' : '') + '" onclick="_laP=' + p + ';_loadLAOBDs()">' + p + '</button>';
-        if (e < pages) { if (e < pages - 1) h += '<span style="color:var(--text-muted);padding:0 4px">...</span>'; h += '<button class="page-btn" onclick="_laP=' + pages + ';_loadLAOBDs()">' + pages + '</button>'; }
-        h += '<button class="page-btn" onclick="_laP=' + (_laP + 1) + ';_loadLAOBDs()" ' + (_laP >= pages ? 'disabled' : '') + '><i class="bx bx-chevron-right"></i></button>';
-        h += '</div>';
-    }
-
-    // Info
-    h += '<div style="margin-top:10px;font-size:12px;color:var(--text-muted)">Showing ' + (total > 0 ? start + 1 : 0) + ' - ' + Math.min(start + perPage, total) + ' of ' + total + ' OBDs</div>';
-
-    el.innerHTML = h;
-}
-
-function _laBadge(v) {
-    if (!v) return '-';
-    if (v === 'Pending') return '<span class="badge badge-warning">Pending</span>';
-    if (v === 'Assigned') return '<span class="badge badge-accent">Assigned</span>';
-    if (v === 'In Progress') return '<span class="badge badge-info">In Progress</span>';
-    if (v === 'Picking Done' || v === 'Completed') return '<span class="badge badge-success">Picking Done</span>';
-    return '<span class="badge badge-info">' + escapeHtml(v) + '</span>';
-}
-
-function _toggleLA(id, checked) {
-    if (checked) _laSel[id] = true; else delete _laSel[id];
-    _updateLACount();
-    _loadLAOBDs();
-}
-function _toggleAllLA(checked) {
-    var cbs = document.querySelectorAll('._laChk');
-    for (var i = 0; i < cbs.length; i++) {
-        var id = cbs[i].getAttribute('data-id');
-        if (checked) _laSel[id] = true; else delete _laSel[id];
-    }
-    _updateLACount();
-    _loadLAOBDs();
-}
-function _selectAllLA() {
-    var q = (document.getElementById('_las') || {}).value || '';
-    var allOBDs = DB.get('obd_data');
-    var skip = ['Loading Assigned', 'Loaded', 'Loading Done'];
-    for (var i = 0; i < allOBDs.length; i++) {
-        if (skip.indexOf(allOBDs[i].status) > -1) continue;
-        if (q) {
-            var ql = q.toLowerCase();
-            if ((allOBDs[i].obdNo || '').toLowerCase().indexOf(ql) === -1 && (allOBDs[i].customer || '').toLowerCase().indexOf(ql) === -1) continue;
-        }
-        _laSel[allOBDs[i].id] = true;
-    }
-    _updateLACount();
-    _loadLAOBDs();
-}
-function _deselectAllLA() { _laSel = {}; _updateLACount(); _loadLAOBDs(); }
-function _updateLACount() {
-    var el = document.getElementById('_laSelCount');
-    if (el) el.innerHTML = '<i class="bx bx-check-circle"></i> ' + Object.keys(_laSel).length + ' selected';
-}
-
-function _assignSelectedOBDs() {
-    var user = (document.getElementById('_lauser') || {}).value || '';
-    if (!user.trim()) { showToast('Enter loader username first', 'error'); return; }
-    var ids = Object.keys(_laSel);
-    if (ids.length === 0) { showToast('Select at least one OBD', 'warning'); return; }
-
-    if (!confirm('Assign ' + ids.length + ' OBD(s) to "' + user.trim() + '"?')) return;
-
-    var count = 0;
-    var allOBDs = DB.get('obd_data');
-    for (var i = 0; i < allOBDs.length; i++) {
-        if (_laSel[allOBDs[i].id]) {
-            DB.update('obd_data', allOBDs[i].id, {
-                status: 'Loading Assigned',
-                assignedLoader: user.trim(),
-                loadingAssignedAt: new Date().toISOString()
-            });
-
-            // Also create loading assignment record
-            DB.add('loading_assignments', {
-                obdId: allOBDs[i].id,
-                obdNo: allOBDs[i].obdNo,
-                customer: allOBDs[i].customer,
-                loader: user.trim(),
-                materialCount: allOBDs[i].materials ? (Array.isArray(allOBDs[i].materials) ? allOBDs[i].materials.length : 0) : (allOBDs[i].materialCount || 0),
-                totalQty: allOBDs[i].totalQty || allOBDs[i].totalPickQty || 0,
-                status: 'Loading Assigned',
-                assignedAt: new Date().toISOString()
-            });
-            count++;
-        }
-    }
-
-    addNotification(count + ' OBD(s) assigned to loader ' + user.trim(), 'info');
-    logAction('Loading', 'ASSIGN', count + ' OBDs assigned to ' + user.trim());
-    showToast(count + ' OBD(s) assigned to ' + user.trim() + '!', 'success');
-    _laSel = {};
-    _loadLAOBDs();
-}
-
-// ===== START LOADING =====
-function renderStartLoading() {
-    var assignments = DB.filter('loading_assignments', function(a) { return a.status === 'Loading Assigned'; });
-    var html = '<div class="section-header"><h2><i class="bx bx-loader-circle"></i> Start Loading</h2></div>';
-
-    if (assignments.length === 0) {
-        html += '<div class="card"><div class="empty-state"><i class="bx bx-inbox"></i><p>No pending loading assignments</p></div></div>';
-        document.getElementById('section-loading').innerHTML = html;
-        return;
-    }
-
-    html += '<div class="card"><div class="card-title">PENDING LOADING (' + assignments.length + ')</div>';
-    html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>OBD No</th><th>Customer</th><th>Materials</th><th>Loader</th><th>Assigned At</th><th>Action</th></tr></thead><tbody>';
-    for (var i = 0; i < assignments.length; i++) {
-        var a = assignments[i];
-        html += '<tr>';
-        html += '<td>' + (i + 1) + '</td>';
-        html += '<td><strong style="color:var(--accent)">' + escapeHtml(a.obdNo || '-') + '</strong></td>';
-        html += '<td>' + escapeHtml(a.customer || '-') + '</td>';
-        html += '<td>' + (a.materialCount || 0) + '</td>';
-        html += '<td>' + escapeHtml(a.loader || '-') + '</td>';
-        html += '<td style="font-size:12px;color:var(--text-muted)">' + formatDateTime(a.assignedAt) + '</td>';
-        html += '<td><button class="btn btn-primary btn-sm" onclick="_startLoadingItem(\'' + a.obdId + '\')"><i class="bx bx-play"></i> Start</button></td>';
-        html += '</tr>';
-    }
-    html += '</tbody></table></div></div>';
-    document.getElementById('section-loading').innerHTML = html;
-}
-
-function _startLoadingItem(obdId) {
-    DB.update('loading_assignments', obdId, { status: 'Loading', startedAt: new Date().toISOString() });
-    DB.update('obd_data', obdId, { status: 'Loading' });
-    showToast('Loading started', 'success');
-    logAction('Loading', 'START', 'Loading started for OBD');
-    renderStartLoading();
-}
-
-// ===== LOADING DONE / LOADED VEHICLES =====
-function renderLoadingDone() {
-    var loaded = DB.get('loaded_vehicles');
-    var html = '<div class="section-header"><h2><i class="bx bx-check-double"></i> Loaded Vehicles</h2></div>';
-
-    if (loaded.length === 0) {
-        html += '<div class="card"><div class="empty-state"><i class="bx bx-truck"></i><p>No loaded vehicles yet</p></div></div>';
-        document.getElementById('section-loading').innerHTML = html;
-        return;
-    }
-
-    html += '<div class="card"><div class="card-title">LOADED VEHICLES (' + loaded.length + ')</div>';
-    html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>Vehicle No</th><th>OBDs Loaded</th><th>Total Items</th><th>Loader</th><th>Security</th><th>Loaded At</th><th>Action</th></tr></thead><tbody>';
-    for (var i = 0; i < loaded.length; i++) {
-        var v = loaded[i];
-        html += '<tr>';
-        html += '<td>' + (i + 1) + '</td>';
-        html += '<td><strong>' + escapeHtml(v.vehicleNo || '-') + '</strong></td>';
-        html += '<td>' + escapeHtml(v.obdNo || '-') + '</td>';
-        html += '<td>' + (v.totalItems || v.totalMaterials || 0) + '</td>';
-        html += '<td>' + escapeHtml(v.loader || v.loadedBy || '-') + '</td>';
-        html += '<td>' + escapeHtml(v.security || '-') + '</td>';
-        html += '<td style="font-size:12px;color:var(--text-muted)">' + formatDateTime(v.loadedAt || v.dateTime) + '</td>';
-        html += '<td><button class="btn-icon" onclick="_viewLoaded(\'' + v.id + '\')"><i class="bx bx-eye"></i></button></td>';
-        html += '</tr>';
-    }
-    html += '</tbody></table></div></div>';
-    document.getElementById('section-loading').innerHTML = html;
-}
-
-function _viewLoaded(id) {
-    var v = DB.find('loaded_vehicles', id);
-    if (!v) { showToast('Not found', 'error'); return; }
-    var html = '<div class="form-row">';
-    html += '<div class="form-group"><label>Vehicle No</label><div class="form-input" style="background:var(--bg-secondary)">' + escapeHtml(v.vehicleNo || '-') + '</div></div>';
-    html += '<div class="form-group"><label>OBDs</label><div class="form-input" style="background:var(--bg-secondary)">' + escapeHtml(v.obdNo || '-') + '</div></div>';
-    html += '<div class="form-group"><label>Loader</label><div class="form-input" style="background:var(--bg-secondary)">' + escapeHtml(v.loader || v.loadedBy || '-') + '</div></div>';
-    html += '<div class="form-group"><label>Security</label><div class="form-input" style="background:var(--bg-secondary)">' + escapeHtml(v.security || '-') + '</div></div>';
-    html += '</div>';
-    showModal('Loaded Vehicle Details', html);
-}
-
-// ===== QTY MISMATCH =====
-function renderQtyMismatch() {
-    var diffs = DB.get('difference_reports');
-    var html = '<div class="section-header"><h2><i class="bx bx-error-circle"></i> Qty Mismatch</h2></div>';
-
-    if (diffs.length === 0) {
-        html += '<div class="card"><div class="empty-state"><i class="bx bx-check-circle"></i><p>No quantity mismatches found</p></div></div>';
-        document.getElementById('section-loading').innerHTML = html;
-        return;
-    }
-
-    html += '<div class="card"><div class="card-title">MISMATCH REPORTS (' + diffs.length + ')</div>';
-    html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>OBD No</th><th>Material</th><th>Order Qty</th><th>Loaded Qty</th><th>Difference</th><th>Reported By</th><th>Date</th></tr></thead><tbody>';
-    for (var i = 0; i < diffs.length; i++) {
-        var d = diffs[i];
-        var diff = (d.loadedQty || 0) - (d.orderQty || 0);
-        var cls = diff < 0 ? 'qty-mismatch' : 'qty-match';
-        html += '<tr>';
-        html += '<td>' + (i + 1) + '</td>';
-        html += '<td><strong style="color:var(--accent)">' + escapeHtml(d.obdNo || '-') + '</strong></td>';
-        html += '<td>' + escapeHtml(d.material || '-') + '</td>';
-        html += '<td>' + (d.orderQty || 0) + '</td>';
-        html += '<td>' + (d.loadedQty || 0) + '</td>';
-        html += '<td class="' + cls + '">' + (diff < 0 ? '' : '+') + diff + '</td>';
-        html += '<td>' + escapeHtml(d.reportedBy || d.user || '-') + '</td>';
-        html += '<td style="font-size:12px;color:var(--text-muted)">' + formatDateTime(d.dateTime || d.createdAt) + '</td>';
-        html += '</tr>';
-    }
-    html += '</tbody></table></div></div>';
-    document.getElementById('section-loading').innerHTML = html;
-}
-/* ============================================================
-   PART 4: ADMIN + USER WORKING TIME + ENHANCED REPORTS
-   Developed by Nikhil Patil
-   ============================================================ */
-
-// ==================== ADMIN MODULE ====================
-function renderAdmin() {
-    if (!checkActionPerm('canAdmin')) {
-        document.getElementById('section-admin').innerHTML = '<div class="card"><div class="empty-state"><i class="bx bx-lock"></i><p>Access Denied — Admin only</p></div></div>';
-        return;
-    }
-
-    var users = DB.get('users');
-    var html = '<div class="section-header"><h2><i class="bx bxs-user-detail"></i> Admin — User Management</h2>';
-    html += '<button class="btn btn-primary" onclick="showAddUserModal()"><i class="bx bx-user-plus"></i> Add User</button></div>';
-
-    // Role summary
-    var roleCount = {};
-    for (var i = 0; i < users.length; i++) {
-        var role = users[i].role || 'Unknown';
-        roleCount[role] = (roleCount[role] || 0) + 1;
-    }
-    html += '<div class="kpi-grid" style="margin-bottom:20px">';
-    for (var rk in roleCount) {
-        html += kpiCard('bx-user', roleCount[rk], rk + 's');
-    }
-    html += '</div>';
-
-    // Users table
-    html += '<div class="card"><div class="card-title">All Users (' + users.length + ')</div>';
-    html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>Name</th><th>Username</th><th>Role</th><th>Modules</th><th>Actions</th><th>Status</th></tr></thead><tbody>';
-    for (var j = 0; j < users.length; j++) {
-        var u = users[j];
-        var moduleStr = '';
-        if (u.permissions && u.permissions.modules) {
-            if (u.permissions.modules.indexOf('all') > -1) {
-                moduleStr = '<span class="badge badge-accent">ALL</span>';
-            } else {
-                moduleStr = u.permissions.modules.slice(0, 3).map(function(m) { return '<span class="badge badge-info" style="margin:1px">' + escapeHtml(m) + '</span>'; }).join(' ');
-                if (u.permissions.modules.length > 3) moduleStr += '<span class="badge" style="margin:1px">+' + (u.permissions.modules.length - 3) + '</span>';
-            }
-        }
-        // Check if user is currently active
-        var activeSession = DB.filter('user_sessions', function(s) { return s.userId === u.id && !s.logoutTime; });
-        var statusBadge = activeSession.length > 0 ? '<span class="badge badge-success"><span class="status-dot green"></span> Online</span>' : '<span class="badge" style="background:var(--bg-secondary);color:var(--text-muted)"><span class="status-dot" style="background:var(--text-muted)"></span> Offline</span>';
-
-        html += '<tr><td>' + (j + 1) + '</td>';
-        html += '<td><strong>' + escapeHtml(u.name) + '</strong></td>';
-        html += '<td style="font-family:var(--font-display);font-size:12px;color:var(--accent)">' + escapeHtml(u.username) + '</td>';
-        html += '<td><span class="badge badge-warning">' + escapeHtml(u.role) + '</span></td>';
-        html += '<td>' + moduleStr + '</td>';
-        html += '<td><div class="table-actions">';
-        html += '<button class="btn-icon" onclick="showEditUserModal(\'' + u.id + '\')"><i class="bx bx-pencil"></i></button>';
-        html += '<button class="btn-icon" onclick="showUserPermModal(\'' + u.id + '\')" title="Permissions"><i class="bx bx-shield"></i></button>';
-        if (u.role !== 'Super Admin') {
-            html += '<button class="btn-icon danger" onclick="deleteUser(\'' + u.id + '\')"><i class="bx bx-trash"></i></button>';
-        }
-        html += '</div></td>';
-        html += '<td>' + statusBadge + '</td></tr>';
-    }
-    html += '</tbody></table></div></div>';
-
-    document.getElementById('section-admin').innerHTML = html;
-}
-
-function showAddUserModal() {
-    var html = '<div class="form-row">';
-    html += '<div class="form-group"><label>Full Name <span class="req">*</span></label><input type="text" id="addUserName" class="form-input" placeholder="e.g. John Doe"></div>';
-    html += '<div class="form-group"><label>Username <span class="req">*</span></label><input type="text" id="addUserUsername" class="form-input" placeholder="e.g. johndoe"></div>';
-    html += '</div>';
-    html += '<div class="form-row">';
-    html += '<div class="form-group"><label>Password <span class="req">*</span></label><input type="password" id="addUserPassword" class="form-input" placeholder="Min 4 characters"></div>';
-    html += '<div class="form-group"><label>Role <span class="req">*</span></label>';
-    html += '<select id="addUserRole" class="form-input" onchange="setRoleDefaults()">';
-    html += '<option value="">-- Select Role --</option>';
-    html += '<option value="Super Admin">Super Admin</option>';
-    html += '<option value="Admin">Admin</option>';
-    html += '<option value="Manager">Manager</option>';
-    html += '<option value="DEO">Data Entry Operator</option>';
-    html += '<option value="Security">Security</option>';
-    html += '<option value="Unloading User">Unloading User</option>';
-    html += '<option value="Picker">Picker</option>';
-    html += '<option value="Loader">Loader</option>';
-    html += '<option value="Custom">Custom</option>';
-    html += '</select></div>';
-    html += '</div>';
-    html += '<div id="roleDefaultsMsg" style="font-size:12px;color:var(--text-muted);margin-bottom:12px"></div>';
-    showModal('Add New User', html, 'md',
-        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-        '<button class="btn btn-primary" onclick="addUser()"><i class="bx bx-check"></i> Create User</button>');
-}
-
-function setRoleDefaults() {
-    var role = document.getElementById('addUserRole').value;
-    var msg = document.getElementById('roleDefaultsMsg');
-    var defaults = {
-        'Super Admin': 'Full access to everything',
-        'Admin': 'Full access except Security Gate entry',
-        'Manager': 'Dashboard, Inbound, Reports, Audit, Picking, Loading (view + assign)',
-        'DEO': 'Inbound only (upload invoice, assign vehicle)',
-        'Security': 'Security Gate entry only',
-        'Unloading User': 'Unloading Screen only (scan + submit)',
-        'Picker': 'Picking only (start picking)',
-        'Loader': 'Loading only (start loading)',
-        'Custom': 'You can set custom permissions after creation'
-    };
-    msg.innerHTML = defaults[role] ? '<span class="badge badge-info">Default: ' + defaults[role] + '</span>' : '';
-}
-
-function addUser() {
-    var name = document.getElementById('addUserName').value.trim();
-    var username = document.getElementById('addUserUsername').value.trim().toLowerCase();
-    var password = document.getElementById('addUserPassword').value;
-    var role = document.getElementById('addUserRole').value;
-
-    if (!name || !username || !password || !role) { showToast('All fields required', 'error'); return; }
-    if (password.length < 4) { showToast('Password must be at least 4 characters', 'error'); return; }
-    var exists = DB.filter('users', function(u) { return u.username === username; });
-    if (exists.length > 0) { showToast('Username already exists!', 'error'); return; }
-
-    var perms = getDefaultPermissions(role);
-    DB.add('users', { name: name, username: username, password: password, role: role, permissions: perms });
-    logAction('Admin', 'ADD_USER', 'Created user: ' + name + ' (' + username + ') role=' + role);
-    showToast('User created: ' + name, 'success');
-    closeModal();
-    renderAdmin();
-}
-
-function getDefaultPermissions(role) {
-    var perms = { modules: [], actions: {} };
-    switch (role) {
-        case 'Super Admin':
-            perms.modules = ['all'];
-            perms.actions = { canSecurityEntry: true, canUploadInvoice: true, canAssignVehicle: true, canStartUnloading: true, canPostVehicle: true, canApprove: true, canViewReports: true, canPutaway: true, canPIV: true, canPick: true, canLoad: true, canAdmin: true };
-            break;
-        case 'Admin':
-            perms.modules = ['all'];
-            perms.actions = { canSecurityEntry: false, canUploadInvoice: true, canAssignVehicle: true, canStartUnloading: true, canPostVehicle: true, canApprove: true, canViewReports: true, canPutaway: true, canPIV: true, canPick: true, canLoad: true, canAdmin: true };
-            break;
-        case 'Manager':
-            perms.modules = ['dashboard', 'inbound', 'reports', 'audit', 'picking', 'loading'];
-            perms.actions = { canSecurityEntry: false, canUploadInvoice: true, canAssignVehicle: true, canStartUnloading: false, canPostVehicle: false, canApprove: true, canViewReports: true, canPutaway: false, canPIV: false, canPick: true, canLoad: true, canAdmin: false };
-            break;
-        case 'DEO':
-            perms.modules = ['inbound'];
-            perms.actions = { canSecurityEntry: false, canUploadInvoice: true, canAssignVehicle: true, canStartUnloading: false, canPostVehicle: false, canApprove: false, canViewReports: false, canPutaway: false, canPIV: false, canPick: false, canLoad: false, canAdmin: false };
-            break;
-        case 'Security':
-            perms.modules = ['security-gate'];
-            perms.actions = { canSecurityEntry: true, canUploadInvoice: false, canAssignVehicle: false, canStartUnloading: false, canPostVehicle: false, canApprove: false, canViewReports: false, canPutaway: false, canPIV: false, canPick: false, canLoad: false, canAdmin: false };
-            break;
-        case 'Unloading User':
-            perms.modules = ['unloading-screen'];
-            perms.actions = { canSecurityEntry: false, canUploadInvoice: false, canAssignVehicle: false, canStartUnloading: true, canPostVehicle: true, canApprove: false, canViewReports: false, canPutaway: false, canPIV: false, canPick: false, canLoad: false, canAdmin: false };
-            break;
-        case 'Picker':
-            perms.modules = ['picking'];
-            perms.actions = { canSecurityEntry: false, canUploadInvoice: false, canAssignVehicle: false, canStartUnloading: false, canPostVehicle: false, canApprove: false, canViewReports: false, canPutaway: false, canPIV: false, canPick: true, canLoad: false, canAdmin: false };
-            break;
-        case 'Loader':
-            perms.modules = ['loading'];
-            perms.actions = { canSecurityEntry: false, canUploadInvoice: false, canAssignVehicle: false, canStartUnloading: false, canPostVehicle: false, canApprove: false, canViewReports: false, canPutaway: false, canPIV: false, canPick: false, canLoad: true, canAdmin: false };
-            break;
-        default:
-            perms.modules = ['dashboard'];
-            perms.actions = {};
-    }
-    return perms;
-}
-
-function showEditUserModal(userId) {
-    var user = DB.find('users', userId);
-    if (!user) return;
-    var html = '<div class="form-row">';
-    html += '<div class="form-group"><label>Full Name</label><input type="text" id="editUserName" class="form-input" value="' + escapeHtml(user.name) + '"></div>';
-    html += '<div class="form-group"><label>Username</label><input type="text" id="editUserUsername" class="form-input" value="' + escapeHtml(user.username) + '" readonly style="background:var(--bg-secondary)"></div>';
-    html += '</div>';
-    html += '<div class="form-row">';
-    html += '<div class="form-group"><label>New Password (leave blank to keep current)</label><input type="password" id="editUserPassword" class="form-input" placeholder="New password..."></div>';
-    html += '<div class="form-group"><label>Role</label>';
-    html += '<select id="editUserRole" class="form-input">';
-    var roles = ['Super Admin', 'Admin', 'Manager', 'DEO', 'Security', 'Unloading User', 'Picker', 'Loader', 'Custom'];
-    for (var i = 0; i < roles.length; i++) {
-        html += '<option value="' + roles[i] + '"' + (user.role === roles[i] ? ' selected' : '') + '>' + roles[i] + '</option>';
-    }
-    html += '</select></div>';
-    html += '</div>';
-    showModal('Edit User: ' + user.name, html, 'md',
-        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-        '<button class="btn btn-primary" onclick="updateUser(\'' + userId + '\')"><i class="bx bx-check"></i> Update</button>');
-}
-
-function updateUser(userId) {
-    var name = document.getElementById('editUserName').value.trim();
-    var password = document.getElementById('editUserPassword').value;
-    var role = document.getElementById('editUserRole').value;
-    if (!name) { showToast('Name is required', 'error'); return; }
-    var updates = { name: name, role: role };
-    if (password && password.length >= 4) updates.password = password;
-    if (password && password.length < 4) { showToast('Password must be at least 4 characters', 'error'); return; }
-    DB.update('users', userId, updates);
-    logAction('Admin', 'EDIT_USER', 'Updated user: ' + name + ' role=' + role);
-    showToast('User updated!', 'success');
-    closeModal();
-    renderAdmin();
-}
-
-function deleteUser(userId) {
-    var user = DB.find('users', userId);
-    if (!user) return;
-    if (user.role === 'Super Admin') { showToast('Cannot delete Super Admin!', 'error'); return; }
-    if (user.id === APP.currentUser.id) { showToast('Cannot delete yourself!', 'error'); return; }
-    if (!confirm('Delete user "' + user.name + '" (' + user.username + ')?')) return;
-    DB.remove('users', userId);
-    logAction('Admin', 'DELETE_USER', 'Deleted user: ' + user.name);
-    showToast('User deleted', 'info');
-    renderAdmin();
-}
-
-// --- PERMISSION EDITOR ---
-function showUserPermModal(userId) {
-    var user = DB.find('users', userId);
-    if (!user) return;
-    if (user.role === 'Super Admin') { showToast('Super Admin has all permissions by default', 'info'); return; }
-
-    var allModules = [
-        { id: 'dashboard', label: 'Dashboard' },
-        { id: 'inbound', label: 'Inbound' },
-        { id: 'security-gate', label: 'Security Gate' },
-        { id: 'pending-vehicle', label: 'Pending Vehicle' },
-        { id: 'unloading-screen', label: 'Unloading Screen' },
-        { id: 'posting-pending', label: 'Posting Pending' },
-        { id: 'inbound-record', label: 'Inbound Record' },
-        { id: 'putaway', label: 'Putaway' },
-        { id: 'piv', label: 'PIV' },
-        { id: 'location', label: 'Location Master' },
-        { id: 'rack', label: 'Rack Master' },
-        { id: 'material', label: 'Material Master' },
-        { id: 'picking', label: 'Picking' },
-        { id: 'obd-upload', label: 'OBD Upload' },
-        { id: 'picking-assign', label: 'Picking Assign' },
-        { id: 'start-picking', label: 'Start Picking' },
-        { id: 'picking-done', label: 'Picking Done' },
-        { id: 'loading', label: 'Loading' },
-        { id: 'loading-assign', label: 'Loading Assign' },
-        { id: 'start-loading', label: 'Start Loading' },
-        { id: 'loading-done', label: 'Loading Done' },
-        { id: 'qty-mismatch', label: 'Qty Mismatch' },
-        { id: 'user-time', label: 'User Working Time' },
-        { id: 'admin', label: 'Admin' },
-        { id: 'settings', label: 'Settings' },
-        { id: 'reports', label: 'Reports' },
-        { id: 'audit', label: 'Audit Log' }
-    ];
-
-    var allActions = [
-        { id: 'canSecurityEntry', label: 'Security Gate Entry' },
-        { id: 'canUploadInvoice', label: 'Upload Invoice' },
-        { id: 'canAssignVehicle', label: 'Assign Vehicle' },
-        { id: 'canStartUnloading', label: 'Start Unloading' },
-        { id: 'canPostVehicle', label: 'Post Vehicle' },
-        { id: 'canApprove', label: 'Approve/Reject' },
-        { id: 'canViewReports', label: 'View Reports' },
-        { id: 'canPutaway', label: 'Putaway Access' },
-        { id: 'canPIV', label: 'PIV Access' },
-        { id: 'canPick', label: 'Picking Access' },
-        { id: 'canLoad', label: 'Loading Access' },
-        { id: 'canAdmin', label: 'Admin Access' }
-    ];
-
-    var currentModules = (user.permissions && user.permissions.modules) ? user.permissions.modules : [];
-    var currentActions = (user.permissions && user.permissions.actions) ? user.permissions.actions : {};
-    var isAll = currentModules.indexOf('all') > -1;
-
-    var html = '<div style="background:var(--accent-dim);padding:10px;border-radius:6px;margin-bottom:16px"><strong>' + escapeHtml(user.name) + '</strong> (' + escapeHtml(user.username) + ') — Role: <span class="badge badge-warning">' + escapeHtml(user.role) + '</span></div>';
-
-    // Modules
-    html += '<div class="card-title" style="margin-bottom:8px">Module Access</div>';
-    html += '<div class="perm-grid" style="margin-bottom:16px">';
-    html += '<label class="perm-item" style="border-color:var(--accent);background:var(--accent-dim)"><input type="checkbox" id="permAllModules" ' + (isAll ? 'checked' : '') + ' onchange="toggleAllPerms()"> <strong style="color:var(--accent)">ALL MODULES</strong></label>';
-    for (var m = 0; m < allModules.length; m++) {
-        var mod = allModules[m];
-        var checked = isAll || currentModules.indexOf(mod.id) > -1;
-        html += '<label class="perm-item"><input type="checkbox" class="permModuleCb" value="' + mod.id + '" ' + (checked ? 'checked' : '') + ' ' + (isAll ? 'disabled' : '') + '> ' + mod.label + '</label>';
-    }
-    html += '</div>';
-
-    // Actions
-    html += '<div class="card-title" style="margin-bottom:8px">Button / Action Access</div>';
-    html += '<div class="perm-grid">';
-    for (var a = 0; a < allActions.length; a++) {
-        var act = allActions[a];
-        var actChecked = isAll || currentActions[act.id] === true;
-        html += '<label class="perm-item"><input type="checkbox" class="permActionCb" value="' + act.id + '" ' + (actChecked ? 'checked' : '') + ' ' + (isAll ? 'disabled' : '') + '> ' + act.label + '</label>';
-    }
-    html += '</div>';
-
-    showModal('Permissions: ' + user.name, html, 'lg',
-        '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-        '<button class="btn btn-primary" onclick="savePermissions(\'' + userId + '\')"><i class="bx bx-shield"></i> Save Permissions</button>');
-}
-
-function toggleAllPerms() {
-    var isAll = document.getElementById('permAllModules').checked;
-    var modCbs = document.querySelectorAll('.permModuleCb');
-    var actCbs = document.querySelectorAll('.permActionCb');
-    for (var i = 0; i < modCbs.length; i++) { modCbs[i].checked = isAll; modCbs[i].disabled = isAll; }
-    for (var j = 0; j < actCbs.length; j++) { actCbs[j].checked = isAll; actCbs[j].disabled = isAll; }
-}
-
-function savePermissions(userId) {
-    var isAll = document.getElementById('permAllModules').checked;
-    var modules = [];
-    var actions = {};
-
-    if (isAll) {
-        modules = ['all'];
-        actions = { canSecurityEntry: true, canUploadInvoice: true, canAssignVehicle: true, canStartUnloading: true, canPostVehicle: true, canApprove: true, canViewReports: true, canPutaway: true, canPIV: true, canPick: true, canLoad: true, canAdmin: true };
-    } else {
-        var modCbs = document.querySelectorAll('.permModuleCb');
-        for (var i = 0; i < modCbs.length; i++) {
-            if (modCbs[i].checked) modules.push(modCbs[i].value);
-        }
-        var actCbs = document.querySelectorAll('.permActionCb');
-        for (var j = 0; j < actCbs.length; j++) {
-            actions[actCbs[j].value] = actCbs[j].checked;
-        }
-    }
-
-    DB.update('users', userId, { permissions: { modules: modules, actions: actions } });
-    var user = DB.find('users', userId);
-    logAction('Admin', 'UPDATE_PERMS', 'Updated permissions for ' + (user ? user.name : userId));
-    showToast('Permissions saved!', 'success');
-    closeModal();
-    renderAdmin();
-}
-
-// ==================== USER WORKING TIME ====================
-function renderUserWorkingTime() {
-    var sessions = DB.get('user_sessions').slice().reverse();
-    var users = DB.get('users');
-
-    // Filters
-    var filterUser = '';
-    var filterDate = '';
-    var fUserEl = document.getElementById('utFilterUser');
-    var fDateEl = document.getElementById('utFilterDate');
-    if (fUserEl) filterUser = fUserEl.value;
-    if (fDateEl) filterDate = fDateEl.value;
-
-    var filtered = sessions;
-    if (filterUser) filtered = filtered.filter(function(s) { return s.userId === filterUser; });
-    if (filterDate) filtered = filtered.filter(function(s) { return s.loginTime && s.loginTime.indexOf(filterDate) > -1; });
-
-    var html = '<div class="section-header"><h2><i class="bx bx-time-five"></i> User Working Time</h2>';
-    html += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
-    html += '<button class="btn btn-secondary btn-sm" onclick="exportUserTimePDF()"><i class="bx bx-download"></i> Export PDF</button>';
-    html += '</div></div>';
-
-    // Filter bar
-    html += '<div class="card" style="margin-bottom:16px"><div class="form-row">';
-    html += '<div class="form-group"><label>Filter by User</label><select id="utFilterUser" class="form-input" onchange="renderUserWorkingTime()"><option value="">All Users</option>';
-    for (var u = 0; u < users.length; u++) {
-        html += '<option value="' + users[u].id + '"' + (filterUser === users[u].id ? ' selected' : '') + '>' + escapeHtml(users[u].name) + ' (' + users[u].username + ')</option>';
-    }
-    html += '</select></div>';
-    html += '<div class="form-group"><label>Filter by Date</label><input type="date" id="utFilterDate" class="form-input" value="' + escapeHtml(filterDate) + '" onchange="renderUserWorkingTime()"></div>';
-    html += '</div></div>';
-
-    // Summary KPIs
-    var totalSessions = filtered.length;
-    var activeNow = filtered.filter(function(s) { return !s.logoutTime; }).length;
-    var totalMinutes = 0;
-    for (var t = 0; t < filtered.length; t++) {
-        var s = filtered[t];
-        var end = s.logoutTime ? new Date(s.logoutTime) : new Date();
-        var start = new Date(s.loginTime);
-        totalMinutes += Math.round((end - start) / 60000);
-    }
-    var totalHours = (totalMinutes / 60).toFixed(1);
-
-    html += '<div class="kpi-grid" style="margin-bottom:16px">';
-    html += kpiCard('bx-user', totalSessions, 'Total Sessions');
-    html += kpiCard('bx-broadcast', activeNow, 'Currently Active');
-    html += kpiCard('bx-time', totalHours + 'h', 'Total Hours');
-    html += kpiCard('bx-timer', totalMinutes + 'm', 'Total Minutes');
-    html += '</div>';
-
-    // Per-user daily summary
-    var userDayMap = {};
-    for (var d = 0; d < filtered.length; d++) {
-        var sess = filtered[d];
-        var day = sess.loginTime ? sess.loginTime.split('T')[0] : 'Unknown';
-        var key = sess.userName + '|' + day;
-        if (!userDayMap[key]) {
-            userDayMap[key] = { userName: sess.userName, userId: sess.userId, date: day, sessions: 0, totalMinutes: 0, firstLogin: sess.loginTime, lastLogout: sess.logoutTime };
-        }
-        userDayMap[key].sessions++;
-        var sEnd = sess.logoutTime ? new Date(sess.logoutTime) : new Date();
-        var sStart = new Date(sess.loginTime);
-        userDayMap[key].totalMinutes += Math.round((sEnd - sStart) / 60000);
-        if (!sess.logoutTime) userDayMap[key].lastLogout = 'Active';
-    }
-
-    var dailySummary = [];
-    for (var dk in userDayMap) { dailySummary.push(userDayMap[dk]); }
-    dailySummary.sort(function(a, b) { return b.date.localeCompare(a.date) || a.userName.localeCompare(b.userName); });
-
-    html += '<div class="card" style="margin-bottom:16px"><div class="card-title">Daily Summary Per User</div>';
-    html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>User</th><th>Date</th><th>Sessions</th><th>Total Time</th><th>First Login</th><th>Last Logout</th><th>Status</th></tr></thead><tbody>';
-    for (var ds = 0; ds < dailySummary.length; ds++) {
-        var dsItem = dailySummary[ds];
-        var hrs = Math.floor(dsItem.totalMinutes / 60);
-        var mins = dsItem.totalMinutes % 60;
-        var timeStr = hrs + 'h ' + mins + 'm';
-        var statusBadge = dsItem.lastLogout === 'Active' ? '<span class="badge badge-success"><span class="status-dot green"></span> Active</span>' : '<span class="badge" style="background:var(--bg-secondary);color:var(--text-muted)">Logged Out</span>';
-        html += '<tr><td><strong>' + escapeHtml(dsItem.userName) + '</strong></td>';
-        html += '<td>' + escapeHtml(dsItem.date) + '</td><td>' + dsItem.sessions + '</td>';
-        html += '<td><strong>' + timeStr + '</strong></td>';
-        html += '<td style="font-size:11px">' + formatDateTime(dsItem.firstLogin) + '</td>';
-        html += '<td style="font-size:11px">' + (dsItem.lastLogout === 'Active' ? '<span style="color:var(--success)">Active Now</span>' : formatDateTime(dsItem.lastLogout)) + '</td>';
-        html += '<td>' + statusBadge + '</td></tr>';
-    }
-    html += '</tbody></table></div></div>';
-
-    // Detailed session log
-    html += '<div class="card"><div class="card-title">Session Log (' + filtered.length + ')</div>';
-    html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>User</th><th>Login Time</th><th>Logout Time</th><th>Duration</th><th>Status</th></tr></thead><tbody>';
-    if (filtered.length === 0) {
-        html += '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:30px">No sessions found</td></tr>';
-    } else {
-        for (var sl = 0; sl < filtered.length; sl++) {
-            var sess = filtered[sl];
-            var endT = sess.logoutTime ? new Date(sess.logoutTime) : new Date();
-            var startT = new Date(sess.loginTime);
-            var durMins = Math.round((endT - startT) / 60000);
-            var durHrs = Math.floor(durMins / 60);
-            var durM = durMins % 60;
-            var durStr = durHrs + 'h ' + durM + 'm';
-            var sBadge = !sess.logoutTime ? '<span class="badge badge-success"><span class="status-dot green"></span> Active</span>' : '<span class="badge" style="background:var(--bg-secondary);color:var(--text-muted)">Ended</span>';
-            html += '<tr><td>' + (sl + 1) + '</td><td><strong>' + escapeHtml(sess.userName) + '</strong></td>';
-            html += '<td style="font-size:12px">' + formatDateTime(sess.loginTime) + '</td>';
-            html += '<td style="font-size:12px">' + (sess.logoutTime ? formatDateTime(sess.logoutTime) : '<span style="color:var(--success)">— Active —</span>') + '</td>';
-            html += '<td><strong>' + durStr + '</strong></td><td>' + sBadge + '</td></tr>';
-        }
-    }
-    html += '</tbody></table></div></div>';
-
-    var sec = document.getElementById('section-user-time');
-    if (sec) sec.innerHTML = html;
-}
-
-function exportUserTimePDF() {
-    try {
-        var sessions = DB.get('user_sessions').slice().reverse();
-        var doc = new jspdf.jsPDF('l', 'mm', 'a4');
-        doc.setFontSize(16); doc.text('VIP INDUSTRIES LIMITED (MD20) — User Working Time Report', 14, 15);
-        doc.setFontSize(9); doc.text('Generated: ' + formatDateTime(new Date()), 14, 22);
-
-        // Daily summary
-        var userDayMap = {};
-        for (var d = 0; d < sessions.length; d++) {
-            var sess = sessions[d];
-            var day = sess.loginTime ? sess.loginTime.split('T')[0] : 'Unknown';
-            var key = sess.userName + '|' + day;
-            if (!userDayMap[key]) {
-                userDayMap[key] = { userName: sess.userName, date: day, sessions: 0, totalMinutes: 0 };
-            }
-            userDayMap[key].sessions++;
-            var sEnd = sess.logoutTime ? new Date(sess.logoutTime) : new Date();
-            var sStart = new Date(sess.loginTime);
-            userDayMap[key].totalMinutes += Math.round((sEnd - sStart) / 60000);
-        }
-
-        var dailyData = [];
-        for (var dk in userDayMap) {
-            var dItem = userDayMap[dk];
-            var hrs = Math.floor(dItem.totalMinutes / 60);
-            var mins = dItem.totalMinutes % 60;
-            dailyData.push([dItem.userName, dItem.date, dItem.sessions, hrs + 'h ' + mins + 'm']);
-        }
-        doc.autoTable({
-            head: [['User', 'Date', 'Sessions', 'Total Time']],
-            body: dailyData, startY: 28, styles: { fontSize: 8 },
-            headStyles: { fillColor: [0, 229, 160] }
-        });
-
-        // Detail log
-        var logData = [];
-        for (var l = 0; l < sessions.length; l++) {
-            var s = sessions[l];
-            var endT = s.logoutTime ? new Date(s.logoutTime) : new Date();
-            var startT = new Date(s.loginTime);
-            var durMins = Math.round((endT - startT) / 60000);
-            logData.push([s.userName, formatDateTime(s.loginTime), s.logoutTime ? formatDateTime(s.logoutTime) : 'Active', Math.floor(durMins / 60) + 'h ' + (durMins % 60) + 'm']);
-        }
-        doc.autoTable({
-            head: [['User', 'Login', 'Logout', 'Duration']],
-            body: logData, startY: doc.lastAutoTable.finalY + 10,
-            styles: { fontSize: 7 }, headStyles: { fillColor: [59, 130, 246] }
-        });
-
-        doc.save('UserWorkingTime_' + today() + '.pdf');
-        showToast('PDF exported!', 'success');
-    } catch(e) { showToast('Export failed: ' + e.message, 'error'); }
-}
-
-// ==================== REPORTS MODULE ====================
-function renderReports() {
-    var todayStr = today();
-    var html = '<div class="section-header"><h2><i class="bx bxs-bar-chart-alt-2"></i> Reports & Analytics</h2></div>';
-
-    // Filter Card
-    html += '<div class="card" style="margin-bottom:20px">';
-    html += '<div class="card-title">Filter Reports</div>';
-    html += '<div class="form-row">';
-    html += '<div class="form-group"><label>From Date</label><input type="date" id="rptFromDate" class="form-input" value="' + todayStr + '"></div>';
-    html += '<div class="form-group"><label>To Date</label><input type="date" id="rptToDate" class="form-input" value="' + todayStr + '"></div>';
-    html += '<div class="form-group"><label>Report Type</label>';
-    html += '<select id="rptType" class="form-input" onchange="loadReport()">';
-    html += '<option value="vehicle">Vehicle Report</option>';
-    html += '<option value="piv">PIV Report</option>';
-    html += '<option value="putaway">Putaway Report</option>';
-    html += '<option value="loading">Loading Report</option>';
-    html += '<option value="user-time">User Working Time</option>';
-    html += '<option value="grn">GRN Report</option>';
-    html += '<option value="short">Short Report</option>';
-    html += '</select></div>';
-    html += '<div class="form-group" style="display:flex;align-items:flex-end;gap:8px">';
-    html += '<button class="btn btn-primary" onclick="loadReport()"><i class="bx bx-search"></i> Search</button>';
-    html += '<button class="btn btn-secondary" onclick="resetReportFilter()"><i class="bx bx-refresh"></i> Reset</button>';
-    html += '</div></div>';
-    html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">';
-    html += '<button class="btn btn-success btn-sm" onclick="downloadReportExcel()"><i class="bx bx-table"></i> Download Excel</button>';
-    html += '<button class="btn btn-danger btn-sm" onclick="downloadReportPDF()"><i class="bx bx-file"></i> Download PDF</button>';
-    html += '</div></div>';
-
-    // Summary KPIs
-    html += '<div id="rptKPIs" class="kpi-grid" style="margin-bottom:20px"></div>';
-
-    // Report Table
-    html += '<div class="card"><div class="card-title" id="rptTitle">Vehicle Report</div>';
-    html += '<div class="table-wrapper" style="max-height:60vh;overflow-y:auto">';
-    html += '<table class="data-table" id="rptTable"><thead id="rptHead"></thead><tbody id="rptBody"></tbody></table>';
-    html += '</div>';
-    html += '<div id="rptPagination" style="margin-top:12px"></div>';
-    html += '<div id="rptEmpty" class="empty-state" style="display:none"><i class="bx bx-bar-chart-alt-2"></i><p>No data found for selected filters</p></div>';
-    html += '</div>';
-
-    document.getElementById('section-reports').innerHTML = html;
-    loadReport();
-}
-
-var rptCurrentData = [];
-var rptCurrentColumns = [];
-var rptCurrentTitle = '';
-
-function resetReportFilter() {
-    var fd = document.getElementById('rptFromDate');
-    var td = document.getElementById('rptToDate');
-    if (fd) fd.value = today();
-    if (td) td.value = today();
-    document.getElementById('rptType').value = 'vehicle';
-    loadReport();
-}
-
-function getDateRange() {
-    var fd = document.getElementById('rptFromDate').value;
-    var td = document.getElementById('rptToDate').value;
-    if (!fd) fd = '2000-01-01';
-    if (!td) td = '2099-12-31';
-    return { from: fd, to: td };
-}
-
-function isInDateRange(dateStr, from, to) {
-    if (!dateStr) return false;
-    var d = dateStr.split('T')[0];
-    return d >= from && d <= to;
-}
-
-function loadReport() {
-    var type = document.getElementById('rptType').value;
-    var range = getDateRange();
-    var kpiHtml = '';
-    var headHtml = '';
-    var bodyHtml = '';
-    var data = [];
-    var columns = [];
-    var title = '';
-    var kpis = [];
-
-    // ===== VEHICLE REPORT =====
-    if (type === 'vehicle') {
-        title = 'Vehicle Report (' + range.from + ' to ' + range.to + ')';
-        columns = ['Sr', 'Vehicle No', 'LR No', 'Driver', 'Mobile', 'Transport', 'Type', 'Status', 'Reported At', 'Assigned To'];
-        var vehicles = DB.get('vehicles');
-        var filtered = [];
-        for (var i = 0; i < vehicles.length; i++) {
-            if (isInDateRange(vehicles[i].reportedAt, range.from, range.to)) {
-                filtered.push(vehicles[i]);
-            }
-        }
-        var pendingCount = 0, unloadedCount = 0, postedCount = 0, loadingCount = 0, rejectedCount = 0;
-        for (var v = 0; v < filtered.length; v++) {
-            var veh = filtered[v];
-            var st = veh.status || '';
-            if (st === 'Unload Pending' || st === 'Reporting Completed' || st === 'Assigned') pendingCount++;
-            else if (st === 'Unloading' || st === 'Unloaded') unloadedCount++;
-            else if (st === 'Posted' || st === 'Posting Pending Approval') postedCount++;
-            else if (st.indexOf('Loading') > -1 || st === 'Loaded') loadingCount++;
-            if (st === 'Rejected') rejectedCount++;
-
-            data.push([
-                v + 1,
-                veh.vehicleNo || '-',
-                veh.lrNo || '-',
-                veh.driverName || '-',
-                veh.driverMobile || '-',
-                veh.transportName || '-',
-                veh.vehicleType || '-',
-                st,
-                formatDateTime(veh.reportedAt),
-                veh.assignedTo || '-'
-            ]);
-        }
-        kpis = [
-            { icon: 'bx-time-five', value: pendingCount, label: 'Pending', color: 'var(--warning)' },
-            { icon: 'bx-check-circle', value: unloadedCount, label: 'Unloaded', color: 'var(--info)' },
-            { icon: 'bx-check-double', value: postedCount, label: 'Posted', color: 'var(--success)' },
-            { icon: 'bx-truck', value: loadingCount, label: 'Loading', color: 'var(--accent2)' },
-            { icon: 'bx-block', value: rejectedCount, label: 'Rejected', color: 'var(--danger)' },
-            { icon: 'bx-list-ul', value: filtered.length, label: 'Total Vehicles', color: 'var(--accent)' }
-        ];
-    }
-
-    // ===== PIV REPORT =====
-    else if (type === 'piv') {
-        title = 'PIV Report (' + range.from + ' to ' + range.to + ')';
-        columns = ['Sr', 'Date', 'Rack', 'EAN', 'Material', 'Description', 'Qty', 'Packing', 'Box', 'Done By'];
-        var locs = DB.get('location_master');
-        var pivData = [];
-        var totalQty = 0;
-        for (var p = 0; p < locs.length; p++) {
-            if (locs[p].action === 'PIV' && isInDateRange(locs[p].dateTime || locs[p].date, range.from, range.to)) {
-                pivData.push(locs[p]);
-                totalQty += (parseInt(locs[p].quantity) || 0);
-            }
-        }
-        for (var pi = 0; pi < pivData.length; pi++) {
-            var pd = pivData[pi];
-            data.push([
-                pi + 1,
-                pd.date || '-',
-                pd.rack || '-',
-                pd.ean || '-',
-                pd.material || '-',
-                pd.description || '-',
-                pd.quantity || 0,
-                pd.packing || '-',
-                pd.box || '-',
-                pd.user || '-'
-            ]);
-        }
-        kpis = [
-            { icon: 'bx-clipboard', value: pivData.length, label: 'Total PIV Entries', color: 'var(--accent)' },
-            { icon: 'bx-package', value: totalQty, label: 'Total Qty PIV', color: 'var(--info)' },
-            { icon: 'bx-calendar', value: range.from, label: 'From Date', color: 'var(--warning)' },
-            { icon: 'bx-calendar-check', value: range.to, label: 'To Date', color: 'var(--success)' }
-        ];
-    }
-
-    // ===== PUTAWAY REPORT =====
-    else if (type === 'putaway') {
-        title = 'Putaway Report (' + range.from + ' to ' + range.to + ')';
-        columns = ['Sr', 'Date', 'Rack', 'EAN', 'Material', 'Description', 'Qty', 'Packing', 'Box', 'Done By', 'Time'];
-        var locs2 = DB.get('location_master');
-        var putData = [];
-        var totalPutQty = 0;
-        var userPutMap = {};
-        for (var pu = 0; pu < locs2.length; pu++) {
-            if (locs2[pu].action === 'PUTAWAY' && isInDateRange(locs2[pu].dateTime || locs2[pu].date, range.from, range.to)) {
-                putData.push(locs2[pu]);
-                totalPutQty += (parseInt(locs2[pu].quantity) || 0);
-                var uName = locs2[pu].user || 'Unknown';
-                if (!userPutMap[uName]) userPutMap[uName] = { count: 0, qty: 0 };
-                userPutMap[uName].count++;
-                userPutMap[uName].qty += (parseInt(locs2[pu].quantity) || 0);
-            }
-        }
-        for (var pj = 0; pj < putData.length; pj++) {
-            var pt = putData[pj];
-            data.push([
-                pj + 1,
-                pt.date || '-',
-                pt.rack || '-',
-                pt.ean || '-',
-                pt.material || '-',
-                pt.description || '-',
-                pt.quantity || 0,
-                pt.packing || '-',
-                pt.box || '-',
-                pt.user || '-',
-                formatDateTime(pt.dateTime)
-            ]);
-        }
-        var topUser = '-', topUserCount = 0;
-        for (var uk in userPutMap) {
-            if (userPutMap[uk].count > topUserCount) { topUser = uk; topUserCount = userPutMap[uk].count; }
-        }
-        kpis = [
-            { icon: 'bx-package', value: putData.length, label: 'Total Putaway', color: 'var(--accent)' },
-            { icon: 'bx-cube', value: totalPutQty, label: 'Total Qty', color: 'var(--info)' },
-            { icon: 'bx-user', value: Object.keys(userPutMap).length, label: 'Users Worked', color: 'var(--accent2)' },
-            { icon: 'bx-star', value: topUser, label: 'Top Performer', color: 'var(--warning)' }
-        ];
-    }
-
-    // ===== LOADING REPORT =====
-    else if (type === 'loading') {
-        title = 'Loading Report (' + range.from + ' to ' + range.to + ')';
-        columns = ['Sr', 'Load No', 'OBD No', 'Vehicle No', 'Driver', 'Total Materials', 'Total Qty', 'Loaded By', 'Date', 'Status'];
-        var loadedVehs = DB.get('loaded_vehicles');
-        var loadData = [];
-        var totalLoaded = 0;
-        var loaderMap = {};
-        for (var ld = 0; ld < loadedVehs.length; ld++) {
-            if (isInDateRange(loadedVehs[ld].loadedAt || loadedVehs[ld].dateTime, range.from, range.to)) {
-                loadData.push(loadedVehs[ld]);
-                totalLoaded++;
-                var lBy = loadedVehs[ld].loadedBy || 'Unknown';
-                if (!loaderMap[lBy]) loaderMap[lBy] = 0;
-                loaderMap[lBy]++;
-            }
-        }
-        // Also check loading_data
-        var loadingData2 = DB.get('loading_data');
-        for (var ld2 = 0; ld2 < loadingData2.length; ld2++) {
-            if (isInDateRange(loadingData2[ld2].dateTime, range.from, range.to)) {
-                var alreadyAdded = false;
-                for (var chk = 0; chk < loadData.length; chk++) {
-                    if (loadData[chk].obdNo === loadingData2[ld2].obdNo) { alreadyAdded = true; break; }
-                }
-                if (!alreadyAdded) {
-                    loadingData2[ld2].loadNo = loadingData2[ld2].loadNo || DB.loadNo(loadingData2[ld2].obdNo);
-                    loadData.push(loadingData2[ld2]);
-                    totalLoaded++;
-                }
-            }
-        }
-        for (var li = 0; li < loadData.length; li++) {
-            var lItem = loadData[li];
-            data.push([
-                li + 1,
-                lItem.loadNo || '-',
-                lItem.obdNo || '-',
-                lItem.vehicleNo || '-',
-                lItem.driverName || '-',
-                lItem.totalMaterials || lItem.materialCount || '-',
-                lItem.totalQty || lItem.loadedQty || '-',
-                lItem.loadedBy || lItem.user || '-',
-                formatDateTime(lItem.loadedAt || lItem.dateTime),
-                lItem.status || 'Loaded'
-            ]);
-        }
-        var topLoader = '-', topLoaderCount = 0;
-        for (var lk in loaderMap) {
-            if (loaderMap[lk] > topLoaderCount) { topLoader = lk; topLoaderCount = loaderMap[lk]; }
-        }
-        kpis = [
-            { icon: 'bx-truck', value: totalLoaded, label: 'Vehicles Loaded', color: 'var(--accent)' },
-            { icon: 'bx-user', value: Object.keys(loaderMap).length, label: 'Loaders', color: 'var(--info)' },
-            { icon: 'bx-star', value: topLoader, label: 'Top Loader', color: 'var(--warning)' },
-            { icon: 'bx-check-double', value: topLoaderCount, label: 'Max by One Person', color: 'var(--success)' }
-        ];
-    }
-
-    // ===== USER WORKING TIME =====
-    else if (type === 'user-time') {
-        title = 'User Working Time Report (' + range.from + ' to ' + range.to + ')';
-        columns = ['Sr', 'User Name', 'Login Time', 'Logout Time', 'Duration (hrs)', 'Status'];
-        var sessions = DB.get('user_sessions');
-        var sessData = [];
-        var totalHrs = 0;
-        var activeUsers = 0;
-        for (var s = 0; s < sessions.length; s++) {
-            if (isInDateRange(sessions[s].loginTime, range.from, range.to)) {
-                sessData.push(sessions[s]);
-                var dur = 0;
-                if (sessions[s].loginTime && sessions[s].logoutTime) {
-                    dur = (new Date(sessions[s].logoutTime) - new Date(sessions[s].loginTime)) / (1000 * 60 * 60);
-                } else if (sessions[s].loginTime) {
-                    dur = (new Date() - new Date(sessions[s].loginTime)) / (1000 * 60 * 60);
-                }
-                totalHrs += dur;
-                if (sessions[s].status === 'Active') activeUsers++;
-            }
-        }
-        for (var si = 0; si < sessData.length; si++) {
-            var sess = sessData[si];
-            var duration = 0;
-            if (sess.loginTime && sess.logoutTime) {
-                duration = (new Date(sess.logoutTime) - new Date(sess.loginTime)) / (1000 * 60 * 60);
-            } else if (sess.loginTime) {
-                duration = (new Date() - new Date(sess.loginTime)) / (1000 * 60 * 60);
-            }
-            data.push([
-                si + 1,
-                sess.userName || '-',
-                formatDateTime(sess.loginTime),
-                sess.logoutTime ? formatDateTime(sess.logoutTime) : 'Still Active',
-                duration.toFixed(2),
-                sess.status || '-'
-            ]);
-        }
-        kpis = [
-            { icon: 'bx-user', value: sessData.length, label: 'Total Sessions', color: 'var(--accent)' },
-            { icon: 'bx-time', value: totalHrs.toFixed(1) + 'h', label: 'Total Hours', color: 'var(--info)' },
-            { icon: 'bx-check-circle', value: activeUsers, label: 'Currently Active', color: 'var(--success)' },
-            { icon: 'bx-calendar', value: Object.keys(sessData.reduce(function(acc, s) { acc[s.userName || 'Unknown'] = true; return acc; }, {})).length, label: 'Unique Users', color: 'var(--warning)' }
-        ];
-    }
-
-    // ===== GRN REPORT =====
-    else if (type === 'grn') {
-        title = 'GRN Report (' + range.from + ' to ' + range.to + ')';
-        columns = ['Sr', 'GRN No', 'Vehicle No', 'Invoice No', 'Material', 'Qty', 'Unloaded Qty', 'Date', 'User'];
-        var grns = DB.get('grn_records');
-        var grnData = [];
-        var totalGrnQty = 0;
-        for (var g = 0; g < grns.length; g++) {
-            if (isInDateRange(grns[g].dateTime || grns[g].date, range.from, range.to)) {
-                grnData.push(grns[g]);
-                totalGrnQty += (parseInt(grns[g].unloadedQty) || 0);
-            }
-        }
-        for (var gi = 0; gi < grnData.length; gi++) {
-            var grn = grnData[gi];
-            data.push([
-                gi + 1,
-                grn.grnNo || '-',
-                grn.vehicleNo || '-',
-                grn.invoiceNo || '-',
-                grn.material || '-',
-                grn.qty || 0,
-                grn.unloadedQty || 0,
-                formatDateTime(grn.dateTime || grn.date),
-                grn.user || '-'
-            ]);
-        }
-        kpis = [
-            { icon: 'bx-file', value: grnData.length, label: 'Total GRNs', color: 'var(--accent)' },
-            { icon: 'bx-cube', value: totalGrnQty, label: 'Total Unloaded Qty', color: 'var(--info)' },
-            { icon: 'bx-calendar', value: range.from, label: 'From', color: 'var(--warning)' },
-            { icon: 'bx-calendar-check', value: range.to, label: 'To', color: 'var(--success)' }
-        ];
-    }
-
-    // ===== SHORT REPORT =====
-    else if (type === 'short') {
-        title = 'Short/Excess Report (' + range.from + ' to ' + range.to + ')';
-        columns = ['Sr', 'Short No', 'Vehicle No', 'Invoice No', 'Material', 'Invoice Qty', 'Actual Qty', 'Difference', 'Type', 'Date', 'User'];
-        var shorts = DB.get('short_reports');
-        var shortData = [];
-        var totalShort = 0, totalExcess = 0;
-        for (var sh = 0; sh < shorts.length; sh++) {
-            if (isInDateRange(shorts[sh].dateTime || shorts[sh].date, range.from, range.to)) {
-                shortData.push(shorts[sh]);
-                var diff = (parseInt(shorts[sh].actualQty) || 0) - (parseInt(shorts[sh].invoiceQty) || 0);
-                if (diff < 0) totalShort += Math.abs(diff);
-                else totalExcess += diff;
-            }
-        }
-        for (var shi = 0; shi < shortData.length; shi++) {
-            var sht = shortData[shi];
-            var diffVal = (parseInt(sht.actualQty) || 0) - (parseInt(sht.invoiceQty) || 0);
-            data.push([
-                shi + 1,
-                sht.shortNo || '-',
-                sht.vehicleNo || '-',
-                sht.invoiceNo || '-',
-                sht.material || '-',
-                sht.invoiceQty || 0,
-                sht.actualQty || 0,
-                (diffVal < 0 ? '' : '+') + diffVal,
-                diffVal < 0 ? 'SHORT' : 'EXCESS',
-                formatDateTime(sht.dateTime || sht.date),
-                sht.user || '-'
-            ]);
-        }
-        kpis = [
-            { icon: 'bx-error-circle', value: shortData.length, label: 'Total Differences', color: 'var(--danger)' },
-            { icon: 'bx-minus-circle', value: totalShort, label: 'Total Short Qty', color: 'var(--danger)' },
-            { icon: 'bx-plus-circle', value: totalExcess, label: 'Total Excess Qty', color: 'var(--warning)' },
-            { icon: 'bx-calendar', value: range.from + ' to ' + range.to, label: 'Period', color: 'var(--accent)' }
-        ];
-    }
-
-    // Store for export
-    rptCurrentData = data;
-    rptCurrentColumns = columns;
-    rptCurrentTitle = title;
-
-    // Render KPIs
-    var kpiContainer = document.getElementById('rptKPIs');
-    if (kpiContainer) {
-        var kpiH = '';
-        for (var ki = 0; ki < kpis.length; ki++) {
-            var k = kpis[ki];
-            kpiH += '<div class="kpi-card" style="cursor:default">';
-            kpiH += '<div class="kpi-icon" style="background:' + (k.color || 'var(--accent)') + '15;color:' + (k.color || 'var(--accent)') + '"><i class="bx ' + k.icon + '"></i></div>';
-            kpiH += '<div class="kpi-value" style="font-size:' + (String(k.value).length > 10 ? '16px' : '28px') + '">' + escapeHtml(String(k.value)) + '</div>';
-            kpiH += '<div class="kpi-label">' + escapeHtml(k.label) + '</div>';
-            kpiH += '</div>';
-        }
-        kpiContainer.innerHTML = kpiH;
-    }
-
-    // Render Table Header
-    var headEl = document.getElementById('rptHead');
-    if (headEl) {
-        var thHtml = '<tr>';
-        for (var ci = 0; ci < columns.length; ci++) {
-            thHtml += '<th>' + escapeHtml(columns[ci]) + '</th>';
-        }
-        thHtml += '</tr>';
-        headEl.innerHTML = thHtml;
-    }
-
-    // Render Table Body
-    var bodyEl = document.getElementById('rptBody');
-    var emptyEl = document.getElementById('rptEmpty');
-    var tableWrapper = document.querySelector('#section-reports .table-wrapper');
-    if (bodyEl) {
-        if (data.length === 0) {
-            bodyEl.innerHTML = '';
-            if (emptyEl) emptyEl.style.display = 'block';
-            if (tableWrapper) tableWrapper.style.display = 'none';
-        } else {
-            if (emptyEl) emptyEl.style.display = 'none';
-            if (tableWrapper) tableWrapper.style.display = 'block';
-            var tbHtml = '';
-            for (var di = 0; di < data.length; di++) {
-                tbHtml += '<tr>';
-                for (var dci = 0; dci < data[di].length; dci++) {
-                    var cellVal = String(data[di][dci]);
-                    var cellClass = '';
-                    // Highlight status
-                    if (columns[dci] === 'Status' || columns[dci] === 'Type') {
-                        if (cellVal === 'Posted' || cellVal === 'Unloaded' || cellVal === 'EXCESS' || cellVal === 'Logged Out') {
-                            cellClass = ' class="qty-match"';
-                        } else if (cellVal === 'Unload Pending' || cellVal === 'Assigned' || cellVal === 'Pending' || cellVal === 'SHORT' || cellVal === 'Rejected') {
-                            cellClass = ' class="qty-mismatch"';
-                        } else if (cellVal === 'Active') {
-                            cellClass = ' style="color:var(--accent);font-weight:600"';
-                        }
-                    }
-                    // Highlight difference column
-                    if (columns[dci] === 'Difference') {
-                        var numVal = parseInt(cellVal);
-                        if (!isNaN(numVal)) {
-                            cellClass = numVal < 0 ? ' class="qty-mismatch"' : ' class="qty-match"';
-                        }
-                    }
-                    tbHtml += '<td' + cellClass + '>' + escapeHtml(cellVal) + '</td>';
-                }
-                tbHtml += '</tr>';
-            }
-            bodyEl.innerHTML = tbHtml;
-        }
-    }
-
-    // Title
-    var titleEl = document.getElementById('rptTitle');
-    if (titleEl) titleEl.textContent = title;
-
-    // Log
-    logAction('Reports', 'VIEW', 'Viewed ' + title);
-}
-
-// ==================== EXCEL DOWNLOAD ====================
-function downloadReportExcel() {
-    if (rptCurrentData.length === 0) {
-        showToast('No data to export', 'warning');
-        return;
-    }
-    try {
-        var wb = XLSX.utils.book_new();
-        var wsData = [rptCurrentColumns];
-        for (var i = 0; i < rptCurrentData.length; i++) {
-            wsData.push(rptCurrentData[i]);
-        }
-        var ws = XLSX.utils.aoa_to_sheet(wsData);
-
-        // Column widths
-        var colWidths = [];
-        for (var c = 0; c < rptCurrentColumns.length; c++) {
-            var maxLen = rptCurrentColumns[c].length;
-            for (var r = 0; r < rptCurrentData.length; r++) {
-                if (rptCurrentData[r][c] && String(rptCurrentData[r][c]).length > maxLen) {
-                    maxLen = String(rptCurrentData[r][c]).length;
-                }
-            }
-            colWidths.push({ wch: Math.min(maxLen + 4, 40) });
-        }
-        ws['!cols'] = colWidths;
-
-        XLSX.utils.book_append_sheet(wb, ws, 'Report');
-
-        // Summary sheet
-        var range = getDateRange();
-        var summaryData = [
-            ['Report Summary'],
-            ['Title', rptCurrentTitle],
-            ['From Date', range.from],
-            ['To Date', range.to],
-            ['Total Records', rptCurrentData.length],
-            ['Generated By', APP.currentUser ? APP.currentUser.name : 'System'],
-            ['Generated At', formatDateTime(new Date())]
-        ];
-        var ws2 = XLSX.utils.aoa_to_sheet(summaryData);
-        ws2['!cols'] = [{ wch: 20 }, { wch: 50 }];
-        XLSX.utils.book_append_sheet(wb, ws2, 'Summary');
-
-        XLSX.writeFile(wb, rptCurrentTitle.replace(/[^a-zA-Z0-9 ]/g, '') + '.xlsx');
-        showToast('Excel downloaded successfully!', 'success');
-        logAction('Reports', 'EXCEL_DOWNLOAD', 'Downloaded Excel: ' + rptCurrentTitle);
-    } catch (err) {
-        showToast('Excel download error: ' + err.message, 'error');
-    }
-}
-
-// ==================== PDF DOWNLOAD ====================
-function downloadReportPDF() {
-    if (rptCurrentData.length === 0) {
-        showToast('No data to export', 'warning');
-        return;
-    }
-    try {
-        var jsPDF = window.jspdf.jsPDF;
-        var doc = new jsPDF('l', 'mm', 'a4');
-        var pageW = doc.internal.pageSize.getWidth();
-        var range = getDateRange();
-
-        // Header
-        doc.setFillColor(7, 11, 20);
-        doc.rect(0, 0, pageW, 40, 'F');
-        doc.setTextColor(0, 229, 160);
-        doc.setFontSize(18);
-        doc.setFont('helvetica', 'bold');
-        doc.text('VIP INDUSTRIES LIMITED (MD20)', 14, 16);
-        doc.setTextColor(150, 160, 180);
-        doc.setFontSize(10);
-        doc.setFont('helvetica', 'normal');
-        doc.text('Warehouse Management System — ' + rptCurrentTitle, 14, 26);
-        doc.text('Period: ' + range.from + ' to ' + range.to + '  |  Generated: ' + formatDateTime(new Date()) + '  |  By: ' + (APP.currentUser ? APP.currentUser.name : 'System'), 14, 34);
-
-        // Green accent line
-        doc.setDrawColor(0, 229, 160);
-        doc.setLineWidth(0.8);
-        doc.line(14, 42, pageW - 14, 42);
-
-        // Table
-        var startY = 48;
-        var tableData = rptCurrentData.map(function(row) {
-            return row.map(function(cell) { return String(cell); });
-        });
-
-        doc.autoTable({
-            head: [rptCurrentColumns],
-            body: tableData,
-            startY: startY,
-            margin: { left: 14, right: 14 },
-            styles: {
-                fontSize: 7.5,
-                cellPadding: 2.5,
-                lineColor: [40, 50, 70],
-                lineWidth: 0.2,
-                font: 'helvetica',
-                textColor: [30, 40, 55],
-                fillColor: [255, 255, 255]
-            },
-            headStyles: {
-                fillColor: [15, 23, 42],
-                textColor: [0, 229, 160],
-                fontSize: 7.5,
-                fontStyle: 'bold',
-                halign: 'center'
-            },
-            alternateRowStyles: {
-                fillColor: [245, 247, 250]
-            },
-            didParseCell: function(data) {
-                // Color status cells
-                if (data.section === 'body') {
-                    var colIdx = data.column.index;
-                    var colName = rptCurrentColumns[colIdx];
-                    if (colName === 'Status' || colName === 'Type') {
-                        var val = String(data.cell.raw);
-                        if (val === 'Posted' || val === 'Unloaded' || val === 'EXCESS' || val === 'Logged Out' || val === 'Loaded') {
-                            data.cell.styles.textColor = [16, 185, 129];
-                            data.cell.styles.fontStyle = 'bold';
-                        } else if (val === 'Unload Pending' || val === 'Assigned' || val === 'Pending' || val === 'SHORT' || val === 'Rejected') {
-                            data.cell.styles.textColor = [239, 68, 68];
-                            data.cell.styles.fontStyle = 'bold';
-                        } else if (val === 'Active') {
-                            data.cell.styles.textColor = [0, 150, 105];
-                            data.cell.styles.fontStyle = 'bold';
-                        }
-                    }
-                    if (colName === 'Difference') {
-                        var numV = parseInt(data.cell.raw);
-                        if (!isNaN(numV)) {
-                            data.cell.styles.fontStyle = 'bold';
-                            data.cell.styles.textColor = numV < 0 ? [239, 68, 68] : [16, 185, 129];
-                        }
-                    }
-                }
-            },
-            didDrawPage: function(data) {
-                // Footer on each page
-                doc.setFillColor(7, 11, 20);
-                doc.rect(0, doc.internal.pageSize.getHeight() - 15, pageW, 15, 'F');
-                doc.setTextColor(150, 160, 180);
-                doc.setFontSize(7);
-                doc.text('VIP INDUSTRIES LIMITED MD20 — Confidential', 14, doc.internal.pageSize.getHeight() - 6);
-                doc.text('Page ' + doc.internal.getNumberOfPages(), pageW - 14, doc.internal.pageSize.getHeight() - 6, { align: 'right' });
-            }
-        });
-
-        // Summary at bottom
-        var finalY = doc.lastAutoTable.finalY + 10;
-        if (finalY < doc.internal.pageSize.getHeight() - 30) {
-            doc.setFillColor(240, 242, 245);
-            doc.roundedRect(14, finalY, pageW - 28, 20, 3, 3, 'F');
-            doc.setTextColor(50, 60, 75);
-            doc.setFontSize(8);
-            doc.setFont('helvetica', 'bold');
-            doc.text('Total Records: ' + rptCurrentData.length, 20, finalY + 8);
-            doc.text('Generated By: ' + (APP.currentUser ? APP.currentUser.name : 'System'), 20, finalY + 15);
-            doc.setFont('helvetica', 'normal');
-            doc.text('Date: ' + formatDateTime(new Date()), 120, finalY + 8);
-            doc.text('Report: ' + rptCurrentTitle, 120, finalY + 15);
-        }
-
-        var fileName = rptCurrentTitle.replace(/[^a-zA-Z0-9 ]/g, '') + '.pdf';
-        doc.save(fileName);
-        showToast('PDF downloaded successfully!', 'success');
-        logAction('Reports', 'PDF_DOWNLOAD', 'Downloaded PDF: ' + rptCurrentTitle);
-    } catch (err) {
-        showToast('PDF download error: ' + err.message, 'error');
-    }
-}
-
-/* ============================================================
-   CRITICAL FIX: Real-time re-render wiping scan area
-   ============================================================ */
-
-// Add flag to prevent re-render during active sessions
-APP.isScanning = false;
-APP.isLoading = false;
-APP.isPickingActive = false;
-
-// Override the real-time sync to check flag FIRST
-// Find and replace the old real-time listener
-if (supabaseClient) {
-    try {
-        // Unsubscribe from old channel first
-        supabaseClient.removeAllChannels();
-        
-        // Re-subscribe with fix
-        supabaseClient.channel('db-live-sync-fixed')
-        .on('postgres_changes', 
-            { event: '*', schema: 'public', table: 'app_data' }, 
-            function(payload) {
-                if (payload.new && payload.new.key && payload.new.value) {
-                    // Save to local storage
-                    localStorage.setItem('wms_' + payload.new.key, JSON.stringify(payload.new.value));
-                    
-                    // FIX: Don't re-render if user is in active scanning/loading/picking session
-                    if (APP.isScanning || APP.isLoading || APP.isPickingActive) {
-                        console.log('Real-time update received but skipped (active session)');
-                        return;
-                    }
-                    
-                    if (APP.currentUser && APP.currentSection) {
-                        // Small delay to prevent rapid re-renders
-                        clearTimeout(APP._renderTimeout);
-                        APP._renderTimeout = setTimeout(function() {
-                            renderSection(APP.currentSection, APP.currentSub);
-                            showToast('Live Update: Data changed', 'info');
-                        }, 2000);
-                    }
-                }
-            }
-        )
-        .subscribe(function(status) {
-            console.log('Real-time sync status:', status);
-        });
-    } catch(e) {
-        console.log('Real-time sync error:', e);
-    }
-}
-
-
-
-/* ============================================================
-   FINAL FIX: Putaway + PIV Scan (EAN + Rack) — Complete
-   ============================================================ */
-
-// ==================== MASTER SCANNER ENGINE ====================
-var _scannerInstance = null;
-var _scannerCallback = null;
-
-// Open scanner modal (works for ALL scan types)
-function openMyScanner(callback) {
-    _scannerCallback = callback;
-    var modal = document.getElementById('scannerModal');
-    if (!modal) {
-        // Create modal if not exists
-        modal = document.createElement('div');
-        modal.id = 'scannerModal';
-        modal.className = 'modal-overlay';
-        modal.style.cssText = 'z-index:99999;display:none;';
-        modal.innerHTML = '<div class="modal-container" style="max-width:420px"><div class="modal-header"><h3><i class="bx bx-qr-scan"></i> Scan Code</h3><button class="modal-close" onclick="closeMyScanner()"><i class="bx bx-x"></i></button></div><div class="modal-body" style="text-align:center;padding:10px"><div style="margin-bottom:15px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap"><button class="btn btn-primary btn-sm" onclick="startMyCamera()"><i class="bx bx-camera"></i> Camera Scan</button><button class="btn btn-secondary btn-sm" onclick="startMyBluetooth()"><i class="bx bx-bluetooth"></i> Bluetooth/USB</button></div><div id="myQrReader" style="width:100%;border-radius:8px;overflow:hidden;background:#000;min-height:50px"></div><p style="color:var(--text-muted);margin-top:10px;font-size:12px">Camera open hone pe barcode ko saamne rakhna</p></div></div>';
-        document.body.appendChild(modal);
-    }
-    modal.style.display = 'flex';
-    var readerDiv = document.getElementById('myQrReader');
-    if (readerDiv) {
-        readerDiv.innerHTML = '<div style="padding:30px;text-align:center;color:var(--text-muted)"><i class="bx bx-camera" style="font-size:40px;display:block;margin-bottom:10px;opacity:.4"></i>Click <strong>Camera Scan</strong> to start</div>';
-    }
-}
-
-function closeMyScanner() {
-    var modal = document.getElementById('scannerModal');
-    if (modal) modal.style.display = 'none';
-    if (_scannerInstance) {
-        try { _scannerInstance.stop(); } catch(e) {}
-        _scannerInstance = null;
-    }
-    var readerDiv = document.getElementById('myQrReader');
-    if (readerDiv) readerDiv.innerHTML = '';
-}
-
-function startMyCamera() {
-    var readerDiv = document.getElementById('myQrReader');
-    if (!readerDiv) return;
-    readerDiv.innerHTML = '<div style="padding:30px;text-align:center;color:var(--accent)"><i class="bx bx-loader-circle bx-spin" style="font-size:36px;display:block;margin-bottom:10px"></i>Camera starting...</div>';
-
-    // Stop previous
-    if (_scannerInstance) {
-        try { _scannerInstance.stop(); } catch(e) {}
-        _scannerInstance = null;
-    }
-
-    setTimeout(function() {
-        try {
-            _scannerInstance = new Html5Qrcode('myQrReader');
-            _scannerInstance.start(
-                { facingMode: 'environment' },
-                { fps: 10, qrbox: { width: 250, height: 150 }, aspectRatio: 1.5 },
-                function(decodedText) {
-                    // SCAN SUCCESS
-                    try { _scannerInstance.stop(); } catch(e) {}
-                    _scannerInstance = null;
-                    closeMyScanner();
-                    if (_scannerCallback) {
-                        setTimeout(function() { _scannerCallback(decodedText); }, 200);
-                    }
-                },
-                function() { /* scanning... */ }
-            ).then(function() {
-                console.log('Camera started');
-            }).catch(function(err) {
-                readerDiv.innerHTML = '<div style="padding:20px;text-align:center;color:var(--danger)"><i class="bx bx-error-circle" style="font-size:36px;display:block;margin-bottom:10px"></i><strong>Camera Error</strong><br><small style="color:var(--text-muted)">' + escapeHtml(String(err)) + '</small><br><br><button class="btn btn-secondary btn-sm" onclick="startMyCamera()"><i class="bx bx-refresh"></i> Retry</button></div>';
-            });
-        } catch(e) {
-            readerDiv.innerHTML = '<div style="padding:20px;text-align:center;color:var(--danger)"><i class="bx bx-error" style="font-size:36px;display:block;margin-bottom:10px"></i>Scanner failed<br><small>' + escapeHtml(String(e)) + '</small></div>';
-        }
-    }, 300);
-}
-
-function startMyBluetooth() {
-    closeMyScanner();
-    // Remove old
-    var old = document.getElementById('btScanInput');
-    if (old) old.remove();
-
-    // Create big visible input at top
-    var input = document.createElement('input');
-    input.id = 'btScanInput';
-    input.type = 'text';
-    input.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:60px;background:linear-gradient(135deg,#00E5A0,#00B87A);color:#000;font-size:20px;font-weight:800;text-align:center;z-index:999999;padding:12px;border:none;outline:none;letter-spacing:1px';
-    input.placeholder = '|||| SCANNING — SCAN BARCODE NOW ||||';
-    document.body.appendChild(input);
-
-    setTimeout(function() { input.focus(); }, 100);
-
-    input.addEventListener('keydown', function(e) {
-        if (e.key === 'Enter') {
-            var val = input.value.trim();
-            input.remove();
-            if (val && _scannerCallback) {
-                _scannerCallback(val);
-            }
-        }
-    });
-
-    // Auto-remove after 30 seconds
-    setTimeout(function() {
-        var el = document.getElementById('btScanInput');
-        if (el) el.remove();
-    }, 30000);
-
-    showToast('Bluetooth scanner ready! Scan now...', 'info');
-}
-
-
-// ==================== PUTAWAY WITH WORKING SCANS ====================
-function renderPutaway() {
-    var html = '<div class="section-header"><h2><i class="bx bxs-package"></i> Putaway</h2>';
-    html += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
-    html += '<button class="btn btn-primary btn-sm" onclick="clearPutawayBuffer()"><i class="bx bx-plus"></i> New</button>';
-    html += '<button class="btn btn-success btn-sm" onclick="savePutawayBuffer()"><i class="bx bx-save"></i> Save All</button>';
-    html += '<label class="btn btn-warning btn-sm" style="cursor:pointer"><i class="bx bx-upload"></i> Bulk Upload<input type="file" accept=".xlsx,.xls,.csv" style="display:none" onchange="bulkUploadPutaway(this)"></label>';
-    html += '</div></div>';
-
-    // Mode toggle
-    html += '<div class="card" style="margin-bottom:16px"><div class="form-group">';
-    html += '<div style="display:flex;gap:12px;flex-wrap:wrap">';
-    html += '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:10px 20px;border:2px solid var(--accent);border-radius:8px;background:var(--accent-dim);font-weight:600;color:var(--accent)"><input type="radio" name="putMode" value="without" checked style="accent-color:var(--accent);width:16px;height:16px"> WITHOUT Invoice</label>';
-    html += '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:10px 20px;border:2px solid var(--border);border-radius:8px;font-weight:600;color:var(--text-secondary)"><input type="radio" name="putMode" value="with" style="accent-color:var(--info);width:16px;height:16px"> WITH Invoice</label>';
-    html += '</div></div>';
-    html += '<div id="putInvSel" style="display:none;margin-top:12px"><select id="putawayInvoiceSelect" class="form-input" onchange="loadPutawayInvoiceMaterials()"><option value="">-- Select Invoice --</option>';
-    var pInvs = DB.filter('invoices', function(inv) { return inv.status === 'Posted'; });
-    for (var i = 0; i < pInvs.length; i++) {
-        var pv = DB.find('vehicles', pInvs[i].vehicleId);
-        html += '<option value="' + pInvs[i].id + '">' + escapeHtml(pInvs[i].invoiceNo) + ' — ' + escapeHtml(pv ? pv.vehicleNo : '') + '</option>';
-    }
-    html += '</select><div id="putawayInvoiceMaterials" style="margin-top:8px"></div></div></div>';
-
-    // ===== SCAN FORM WITH ALL SCAN BUTTONS =====
-    html += '<div class="card" style="border:2px solid var(--accent);margin-bottom:16px">';
-    html += '<div class="card-title" style="color:var(--accent)"><i class="bx bx-scan"></i> Scan & Putaway</div>';
-    html += '<div class="form-row">';
-
-    // EAN with SCAN
-    html += '<div class="form-group"><label>EAN / Barcode <span class="req">*</span></label>';
-    html += '<div style="display:flex;gap:6px;flex-wrap:wrap">';
-    html += '<input type="text" id="putEanInput" class="form-input" placeholder="Scan or type EAN..." style="flex:1;min-width:180px" onkeydown="if(event.key===\'Enter\')doPutawayScan()">';
-    html += '<button class="btn btn-primary btn-sm" onclick="doPutawayScan()"><i class="bx bx-plus"></i></button>';
-    html += '<button class="btn btn-secondary btn-sm scan-btn" style="background:var(--accent-dim);color:var(--accent);border:1px solid var(--accent)" onclick="doPutawayEanScan()"><i class="bx bx-camera"></i> Scan</button>';
-    html += '</div></div>';
-
-    // Material (auto)
-    html += '<div class="form-group"><label>Material (Auto)</label><input type="text" id="putMaterial" class="form-input" placeholder="Auto from master" style="background:var(--bg-secondary)"></div>';
-
-    // Description (auto)
-    html += '<div class="form-group"><label>Description (Auto)</label><input type="text" id="putDesc" class="form-input" placeholder="Auto from master" style="background:var(--bg-secondary)"></div>';
-
-    // RACK WITH SCAN
-    html += '<div class="form-group"><label>Rack / Location <span class="req">*</span></label>';
-    html += '<div style="display:flex;gap:6px;flex-wrap:wrap">';
-    html += '<select id="putRack" class="form-input" style="flex:1;min-width:150px"><option value="">-- Select Rack --</option>';
-    var racks = DB.get('rack_master');
-    for (var r = 0; r < racks.length; r++) {
-        html += '<option value="' + escapeHtml(racks[r].rack) + '">' + escapeHtml(racks[r].rack) + '</option>';
-    }
-    html += '</select>';
-    html += '<button class="btn btn-secondary btn-sm scan-btn" style="background:var(--accent2-dim);color:var(--accent2);border:1px solid var(--accent2)" onclick="doPutawayRackScan()"><i class="bx bx-qr"></i> Scan Rack</button>';
-    html += '</div></div>';
-
-    // Qty
-    html += '<div class="form-group"><label>Qty <span class="req">*</span></label><input type="number" id="putQty" class="form-input" value="1" min="1" style="max-width:100px"></div>';
-
-    // Packing
-    html += '<div class="form-group"><label>Packing</label><select id="putPacking" class="form-input"><option value="Bag">Bag</option><option value="Box">Box</option><option value="Carton">Carton</option><option value="Pallet">Pallet</option><option value="Bottle">Bottle</option><option value="Pouch">Pouch</option><option value="Loose">Loose</option></select></div>';
-
-    // Box No
-    html += '<div class="form-group"><label>Box No</label><input type="text" id="putBoxNo" class="form-input" placeholder="e.g. B001"></div>';
-    html += '</div>';
-
-    html += '<div class="form-actions"><button class="btn btn-primary" onclick="doPutawayScan()"><i class="bx bx-plus-circle"></i> Add to Buffer</button></div>';
-    html += '</div>';
-
-    // Buffer
-    html += '<div class="card"><div class="card-title">Putaway Buffer (<span id="putBufCnt">' + putawayBuffer.length + '</span>)</div>';
-    html += '<div id="putBufTable"></div>';
-    if (putawayBuffer.length > 0) {
-        html += '<div class="form-actions" style="margin-top:12px"><button class="btn btn-success" onclick="savePutawayBuffer()"><i class="bx bx-save"></i> Save All to Bin</button><button class="btn btn-danger" onclick="clearPutawayBuffer()"><i class="bx bx-trash"></i> Clear</button></div>';
-    }
-    html += '</div>';
-
-    // Today's putaway
-    var tPut = DB.filter('location_master', function(l) { return l.action === 'PUTAWAY' && l.date === today(); });
-    if (tPut.length > 0) {
-        html += '<div class="card" style="margin-top:16px"><div class="card-title">Today (' + tPut.length + ')</div>';
-        html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>Time</th><th>EAN</th><th>Material</th><th>Rack</th><th>Qty</th><th>User</th></tr></thead><tbody>';
-        for (var t = 0; t < tPut.length; t++) {
-            html += '<tr><td>' + (t+1) + '</td><td style="font-size:11px">' + formatDateTime(tPut[t].dateTime) + '</td><td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(tPut[t].ean) + '</td><td>' + escapeHtml(tPut[t].material) + '</td><td><span class="badge badge-accent">' + escapeHtml(tPut[t].rack) + '</span></td><td><strong>' + tPut[t].quantity + '</strong></td><td>' + escapeHtml(tPut[t].user) + '</td></tr>';
-        }
-        html += '</tbody></table></div></div>';
-    }
-
-    // Mode toggle binding
-    document.getElementById('section-putaway').innerHTML = html;
-
-    // Bind mode toggle
-    var modeRadios = document.querySelectorAll('input[name="putMode"]');
-    for (var mr = 0; mr < modeRadios.length; mr++) {
-        modeRadios[mr].addEventListener('change', function() {
-            var sel = document.getElementById('putInvSel');
-            if (sel) sel.style.display = this.value === 'with' ? 'block' : 'none';
-        });
-    }
-
-    renderPutawayBuffer();
-}
-
-// PUTAWAY: EAN Scan button
-function doPutawayEanScan() {
-    openMyScanner(function(code) {
-        var el = document.getElementById('putEanInput');
-        if (el) el.value = code;
-        // Auto-fill material
-        var matMaster = DB.get('material_master');
-        for (var i = 0; i < matMaster.length; i++) {
-            if (matMaster[i].ean === code || matMaster[i].material.toUpperCase() === code.toUpperCase()) {
-                var mEl = document.getElementById('putMaterial');
-                var dEl = document.getElementById('putDesc');
-                if (mEl) mEl.value = matMaster[i].material;
-                if (dEl) dEl.value = matMaster[i].description;
-                if (el) el.value = matMaster[i].ean || code;
-                break;
-            }
-        }
-        showToast('EAN Scanned: ' + code, 'success');
-    });
-}
-
-// PUTAWAY: Rack Scan button
-function doPutawayRackScan() {
-    openMyScanner(function(code) {
-        var sel = document.getElementById('putRack');
-        if (!sel) return;
-        var rackCode = code.toUpperCase().trim();
-        var found = false;
-        for (var i = 0; i < sel.options.length; i++) {
-            if (sel.options[i].value.toUpperCase() === rackCode || sel.options[i].value.toUpperCase().indexOf(rackCode) > -1) {
-                sel.selectedIndex = i;
-                found = true;
-                break;
-            }
-        }
-        if (found) {
-            showToast('Rack Selected: ' + sel.value, 'success');
-        } else {
-            showToast('Rack "' + rackCode + '" not found. Select manually.', 'warning');
-        }
-    });
-}
-
-// PUTAWAY: Add item (from scan or manual)
-function doPutawayScan() {
-    var ean = document.getElementById('putEanInput').value.trim();
-    var rack = document.getElementById('putRack').value;
-    var qty = parseInt(document.getElementById('putQty').value) || 0;
-    var packing = document.getElementById('putPacking').value;
-    var boxNo = document.getElementById('putBoxNo').value.trim();
-    var material = document.getElementById('putMaterial').value.trim();
-    var desc = document.getElementById('putDesc').value.trim();
-
-    if (!ean) { showToast('Scan or enter EAN first', 'error'); return; }
-    if (!rack) { showToast('Select or scan a rack', 'error'); return; }
-    if (qty <= 0) { showToast('Enter valid qty', 'error'); return; }
-
-    // Auto-fill if still empty
-    if (!material || !desc) {
-        var matMaster = DB.get('material_master');
-        for (var i = 0; i < matMaster.length; i++) {
-            if (matMaster[i].ean === ean || matMaster[i].material.toUpperCase() === ean.toUpperCase()) {
-                material = material || matMaster[i].material;
-                desc = desc || matMaster[i].description;
-                ean = matMaster[i].ean || ean;
-                break;
-            }
-        }
-    }
-
-    // Get invoice if in "with" mode
-    var invId = '', invNo = '';
-    var modeRadio = document.querySelector('input[name="putMode"]:checked');
-    if (modeRadio && modeRadio.value === 'with') {
-        var selInv = document.getElementById('putawayInvoiceSelect');
-        if (selInv && selInv.value) {
-            invId = selInv.value;
-            var inv = DB.find('invoices', invId);
-            invNo = inv ? inv.invoiceNo : '';
-        }
-    }
-
-    putawayBuffer.push({
-        id: DB.uid(), date: today(), ean: ean, material: material || 'UNKNOWN',
-        description: desc || '-', rack: rack, quantity: qty, packing: packing,
-        box: boxNo || '-', action: 'PUTAWAY', user: APP.currentUser ? APP.currentUser.name : 'System',
-        invoiceId: invId, invoiceNo: invNo, dateTime: new Date().toISOString()
-    });
-
-    // Clear
-    document.getElementById('putEanInput').value = '';
-    document.getElementById('putMaterial').value = '';
-    document.getElementById('putDesc').value = '';
-    document.getElementById('putQty').value = '1';
-    document.getElementById('putBoxNo').value = '';
-    document.getElementById('putEanInput').focus();
-
-    renderPutawayBuffer();
-    showToast('Added: ' + (material || ean) + ' → ' + rack, 'success');
-}
-
-function renderPutawayBuffer() {
-    var c = document.getElementById('putBufTable');
-    var cnt = document.getElementById('putBufCnt');
-    if (cnt) cnt.textContent = putawayBuffer.length;
-    if (!c) return;
-    if (putawayBuffer.length === 0) { c.innerHTML = '<div style="text-align:center;color:var(--text-muted);padding:20px">Buffer empty — scan items above</div>'; return; }
-    var h = '<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>EAN</th><th>Material</th><th>Rack</th><th>Qty</th><th>Packing</th><th>Box</th><th>Action</th></tr></thead><tbody>';
-    for (var i = 0; i < putawayBuffer.length; i++) {
-        var p = putawayBuffer[i];
-        h += '<tr><td>' + (i+1) + '</td><td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(p.ean) + '</td><td>' + escapeHtml(p.material) + '</td><td><span class="badge badge-accent">' + escapeHtml(p.rack) + '</span></td><td><strong>' + p.quantity + '</strong></td><td>' + escapeHtml(p.packing) + '</td><td>' + escapeHtml(p.box) + '</td><td><button class="btn btn-danger btn-sm" onclick="putawayBuffer.splice(' + i + ',1);renderPutawayBuffer()"><i class="bx bx-trash"></i></button></td></tr>';
-    }
-    h += '</tbody></table></div>';
-    c.innerHTML = h;
-}
-
-function clearPutawayBuffer() {
-    if (putawayBuffer.length > 0 && !confirm('Clear ' + putawayBuffer.length + ' items?')) return;
-    putawayBuffer = [];
-    renderPutaway();
-}
-
-function savePutawayBuffer() {
-    if (putawayBuffer.length === 0) { showToast('Buffer empty!', 'error'); return; }
-    for (var i = 0; i < putawayBuffer.length; i++) {
-        var item = Object.assign({}, putawayBuffer[i]);
-        delete item.id;
-        DB.add('location_master', item);
+    initGlobalSearch();
+}
+
+// ==================== INIT ====================
+(function init(){
+    // Apply theme
+    document.documentElement.setAttribute('data-theme',APP.theme);
+    var themeIcon=document.getElementById('themeToggle').querySelector('i');
+    if(themeIcon)themeIcon.className=APP.theme==='dark'?'bx bx-moon':'bx bx-sun';
+
+    // Apply saved accent
+    var savedAccent=localStorage.getItem('wms_accent');
+    if(savedAccent){
+        var r=parseInt(savedAccent.slice(1,3),16),g=parseInt(savedAccent.slice(3,5),16),b=parseInt(savedAccent.slice(5,7),16);
+        document.documentElement.style.setProperty('--accent',savedAccent);
+        document.documentElement.style.setProperty('--accent-rgb',r+','+g+','+b);
+        document.documentElement.style.setProperty('--accent-dim','rgba('+r+','+g+','+b+',.1)');
+    }
+
+    // Seed data
+    seedData();
+
+    // Init login
+    initMatrix();
+    initEvents();
+
+    // Check existing session
+    var session=localStorage.getItem('wms_session');
+    if(session){
+        try{
+            var s=JSON.parse(session);
+            var user=DB.find('users',s.userId);
+            if(user){
+                APP.currentUser=user;APP.sessionStart=Date.now();
+                document.getElementById('loginPage').style.display='none';
+                document.getElementById('mainApp').style.display='flex';
+                if(window._matrixInterval)clearInterval(window._matrixInterval);
+                document.getElementById('userAvatar').textContent=user.name.charAt(0).toUpperCase();
+                document.getElementById('userName').textContent=user.name;
+                pullAll();
+                renderSidebar();initBottomNav();navTo('dashboard');initSessionTimeout();
+            }
+        }catch(e){}
     }
-    var cnt = putawayBuffer.length;
-    logAction('Putaway', 'SAVE', 'Saved ' + cnt + ' items to bin');
-    showToast(cnt + ' items saved to Bin Master!', 'success');
-    putawayBuffer = [];
-    renderPutaway();
-    addNotification(cnt + ' putaway items by ' + (APP.currentUser ? APP.currentUser.name : ''), 'success');
-}
-
-
-// ==================== PIV WITH WORKING SCANS ====================
-function renderPIV() {
-    var html = '<div class="section-header"><h2><i class="bx bxs-clipboard"></i> PIV (Physical Inventory Verification)</h2>';
-    html += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
-    html += '<button class="btn btn-primary btn-sm" onclick="togglePivLive()"><i class="bx bx-play"></i> <span id="pivLiveTxt">Start Live Scan</span></button>';
-    html += '<button class="btn btn-success btn-sm" onclick="savePivData()"><i class="bx bx-save"></i> Save to Bin</button>';
-    html += '<label class="btn btn-warning btn-sm" style="cursor:pointer"><i class="bx bx-upload"></i> Bulk Upload<input type="file" accept=".xlsx,.xls,.csv" style="display:none" onchange="bulkUploadPIV(this)"></label>';
-    html += '</div></div>';
-
-    // Live indicator
-    html += '<div id="pivLiveInd" style="display:none;padding:10px;background:var(--accent2-dim);border:1px solid var(--accent2);border-radius:8px;margin-bottom:16px;text-align:center;color:var(--accent2);font-weight:700;animation:pulse 1.5s infinite"><i class="bx bx-broadcast"></i> LIVE SCAN MODE — Each scan saves directly to Bin</div>';
-
-    // ===== SCAN FORM WITH ALL SCAN BUTTONS =====
-    html += '<div class="card" style="border:2px solid var(--accent2);margin-bottom:16px">';
-    html += '<div class="card-title" style="color:var(--accent2)"><i class="bx bx-scan"></i> PIV Scan Entry</div>';
-    html += '<div class="form-row">';
-
-    // EAN with SCAN
-    html += '<div class="form-group"><label>EAN / Barcode <span class="req">*</span></label>';
-    html += '<div style="display:flex;gap:6px;flex-wrap:wrap">';
-    html += '<input type="text" id="pivEanInput" class="form-input" placeholder="Scan or type EAN..." style="flex:1;min-width:180px" onkeydown="if(event.key===\'Enter\')doPivScan()">';
-    html += '<button class="btn btn-primary btn-sm" onclick="doPivScan()"><i class="bx bx-plus"></i></button>';
-    html += '<button class="btn btn-secondary btn-sm scan-btn" style="background:var(--accent-dim);color:var(--accent);border:1px solid var(--accent)" onclick="doPivEanScan()"><i class="bx bx-camera"></i> Scan</button>';
-    html += '</div></div>';
-
-    // Material (auto)
-    html += '<div class="form-group"><label>Material (Auto)</label><input type="text" id="pivMaterial" class="form-input" placeholder="Auto from master" style="background:var(--bg-secondary)"></div>';
-
-    // Description (auto)
-    html += '<div class="form-group"><label>Description (Auto)</label><input type="text" id="pivDesc" class="form-input" placeholder="Auto from master" style="background:var(--bg-secondary)"></div>';
-
-    // RACK WITH SCAN
-    html += '<div class="form-group"><label>Rack / Location</label>';
-    html += '<div style="display:flex;gap:6px;flex-wrap:wrap">';
-    html += '<select id="pivRack" class="form-input" style="flex:1;min-width:150px"><option value="">-- Select Rack --</option>';
-    var racks = DB.get('rack_master');
-    for (var r = 0; r < racks.length; r++) {
-        html += '<option value="' + escapeHtml(racks[r].rack) + '">' + escapeHtml(racks[r].rack) + '</option>';
-    }
-    html += '</select>';
-    html += '<button class="btn btn-secondary btn-sm scan-btn" style="background:var(--accent2-dim);color:var(--accent2);border:1px solid var(--accent2)" onclick="doPivRackScan()"><i class="bx bx-qr"></i> Scan Rack</button>';
-    html += '</div></div>';
-
-    // Qty
-    html += '<div class="form-group"><label>Qty</label><input type="number" id="pivQty" class="form-input" value="1" min="1" style="max-width:100px"></div>';
-
-    // Packing
-    html += '<div class="form-group"><label>Packing</label><select id="pivPacking" class="form-input"><option value="Bag">Bag</option><option value="Box">Box</option><option value="Carton">Carton</option><option value="Pallet">Pallet</option><option value="Bottle">Bottle</option><option value="Pouch">Pouch</option><option value="Loose">Loose</option></select></div>';
-
-    // Box No
-    html += '<div class="form-group"><label>Box No</label><input type="text" id="pivBoxNo" class="form-input" placeholder="e.g. B001"></div>';
-    html += '</div>';
-
-    html += '<div class="form-actions"><button class="btn btn-primary" onclick="doPivScan()"><i class="bx bx-plus-circle"></i> Add PIV Entry</button></div>';
-    html += '</div>';
-
-    // PIV items
-    html += '<div class="card"><div class="card-title">PIV Entries (Session: <span id="pivSesCnt">' + pivLiveItems.length + '</span>)</div>';
-    html += '<div id="pivItemsTbl"></div></div>';
-
-    // Today's PIV
-    var tPiv = DB.filter('location_master', function(l) { return l.action === 'PIV' && l.date === today(); });
-    if (tPiv.length > 0) {
-        html += '<div class="card" style="margin-top:16px"><div class="card-title">Today (' + tPiv.length + ')</div>';
-        html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>Time</th><th>EAN</th><th>Material</th><th>Rack</th><th>Qty</th><th>User</th></tr></thead><tbody>';
-        for (var t = 0; t < tPiv.length; t++) {
-            html += '<tr><td>' + (t+1) + '</td><td style="font-size:11px">' + formatDateTime(tPiv[t].dateTime) + '</td><td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(tPiv[t].ean) + '</td><td>' + escapeHtml(tPiv[t].material) + '</td><td><span class="badge badge-accent">' + escapeHtml(tPiv[t].rack) + '</span></td><td><strong>' + tPiv[t].quantity + '</strong></td><td>' + escapeHtml(tPiv[t].user) + '</td></tr>';
-        }
-        html += '</tbody></table></div></div>';
-    }
-
-    document.getElementById('section-piv').innerHTML = html;
-    renderPivItems();
-}
-
-// PIV: EAN Scan button
-function doPivEanScan() {
-    openMyScanner(function(code) {
-        var el = document.getElementById('pivEanInput');
-        if (el) el.value = code;
-        var matMaster = DB.get('material_master');
-        for (var i = 0; i < matMaster.length; i++) {
-            if (matMaster[i].ean === code || matMaster[i].material.toUpperCase() === code.toUpperCase()) {
-                var mEl = document.getElementById('pivMaterial');
-                var dEl = document.getElementById('pivDesc');
-                if (mEl) mEl.value = matMaster[i].material;
-                if (dEl) dEl.value = matMaster[i].description;
-                if (el) el.value = matMaster[i].ean || code;
-                break;
-            }
-        }
-        showToast('EAN Scanned: ' + code, 'success');
-    });
-}
-
-// PIV: Rack Scan button
-function doPivRackScan() {
-    openMyScanner(function(code) {
-        var sel = document.getElementById('pivRack');
-        if (!sel) return;
-        var rackCode = code.toUpperCase().trim();
-        var found = false;
-        for (var i = 0; i < sel.options.length; i++) {
-            if (sel.options[i].value.toUpperCase() === rackCode || sel.options[i].value.toUpperCase().indexOf(rackCode) > -1) {
-                sel.selectedIndex = i;
-                found = true;
-                break;
-            }
-        }
-        if (found) {
-            showToast('Rack Selected: ' + sel.value, 'success');
-        } else {
-            showToast('Rack "' + rackCode + '" not found. Select manually.', 'warning');
-        }
-    });
-}
-
-// PIV: Add item
-function doPivScan() {
-    var ean = document.getElementById('pivEanInput').value.trim();
-    var rack = document.getElementById('pivRack').value || 'UNASSIGNED';
-    var qty = parseInt(document.getElementById('pivQty').value) || 1;
-    var packing = document.getElementById('pivPacking').value;
-    var boxNo = document.getElementById('pivBoxNo').value.trim();
-    var material = document.getElementById('pivMaterial').value.trim();
-    var desc = document.getElementById('pivDesc').value.trim();
-
-    if (!ean) { showToast('Scan or enter EAN', 'error'); return; }
-
-    if (!material || !desc) {
-        var matMaster = DB.get('material_master');
-        for (var i = 0; i < matMaster.length; i++) {
-            if (matMaster[i].ean === ean || matMaster[i].material.toUpperCase() === ean.toUpperCase()) {
-                material = material || matMaster[i].material;
-                desc = desc || matMaster[i].description;
-                ean = matMaster[i].ean || ean;
-                break;
-            }
-        }
-    }
-
-    var item = {
-        id: DB.uid(), date: today(), ean: ean, material: material || 'UNKNOWN',
-        description: desc || '-', rack: rack, quantity: qty, packing: packing,
-        box: boxNo || '-', action: 'PIV', user: APP.currentUser ? APP.currentUser.name : 'System',
-        dateTime: new Date().toISOString()
-    };
-
-    if (pivLiveActive) {
-        // LIVE: Save directly
-        delete item.id;
-        DB.add('location_master', item);
-        logAction('PIV', 'LIVE_SCAN', 'Live: ' + item.material + ' qty=' + qty + ' at ' + rack);
-        showToast('LIVE SAVED: ' + (material || ean), 'success');
-    } else {
-        // BUFFER: Add to session
-        pivLiveItems.push(item);
-        renderPivItems();
-        showToast('Added: ' + (material || ean), 'success');
-    }
-
-    // Clear
-    document.getElementById('pivEanInput').value = '';
-    document.getElementById('pivMaterial').value = '';
-    document.getElementById('pivDesc').value = '';
-    document.getElementById('pivQty').value = '1';
-    document.getElementById('pivBoxNo').value = '';
-    document.getElementById('pivEanInput').focus();
-}
-
-function togglePivLive() {
-    pivLiveActive = !pivLiveActive;
-    var txt = document.getElementById('pivLiveTxt');
-    var ind = document.getElementById('pivLiveInd');
-    if (pivLiveActive) {
-        if (txt) txt.textContent = 'Stop Live Scan';
-        if (ind) ind.style.display = 'block';
-        document.getElementById('pivEanInput').focus();
-        showToast('LIVE MODE ON — Scans save directly!', 'warning');
-    } else {
-        if (txt) txt.textContent = 'Start Live Scan';
-        if (ind) ind.style.display = 'none';
-        showToast('Live scan stopped', 'info');
-    }
-}
-
-function renderPivItems() {
-    var c = document.getElementById('pivItemsTbl');
-    var cnt = document.getElementById('pivSesCnt');
-    if (cnt) cnt.textContent = pivLiveItems.length;
-    if (!c) return;
-    if (pivLiveItems.length === 0) { c.innerHTML = '<div style="text-align:center;color:var(--text-muted);padding:20px">' + (pivLiveActive ? 'Live ON — just scan!' : 'No entries yet') + '</div>'; return; }
-    var h = '<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>EAN</th><th>Material</th><th>Rack</th><th>Qty</th><th>Packing</th><th>Box</th><th>Action</th></tr></thead><tbody>';
-    for (var i = 0; i < pivLiveItems.length; i++) {
-        var p = pivLiveItems[i];
-        h += '<tr><td>' + (i+1) + '</td><td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(p.ean) + '</td><td>' + escapeHtml(p.material) + '</td><td><span class="badge badge-accent">' + escapeHtml(p.rack) + '</span></td><td><strong>' + p.quantity + '</strong></td><td>' + escapeHtml(p.packing) + '</td><td>' + escapeHtml(p.box) + '</td><td><button class="btn btn-danger btn-sm" onclick="pivLiveItems.splice(' + i + ',1);renderPivItems()"><i class="bx bx-trash"></i></button></td></tr>';
-    }
-    h += '</tbody></table></div>';
-    c.innerHTML = h;
-}
-
-function savePivData() {
-    if (pivLiveItems.length === 0) { showToast('No PIV entries!', 'error'); return; }
-    for (var i = 0; i < pivLiveItems.length; i++) {
-        var item = Object.assign({}, pivLiveItems[i]);
-        delete item.id;
-        DB.add('location_master', item);
-    }
-    var cnt = pivLiveItems.length;
-    logAction('PIV', 'SAVE', 'Saved ' + cnt + ' PIV items');
-    showToast(cnt + ' PIV items saved!', 'success');
-    pivLiveItems = [];
-    renderPIV();
-}
-
-function bulkUploadPIV(input) {
-    if (!input.files[0]) return;
-    var reader = new FileReader();
-    reader.onload = function(e) {
-        try {
-            var wb = XLSX.read(e.target.result, { type: 'array' });
-            var ws = wb.Sheets[wb.SheetNames[0]];
-            var data = XLSX.utils.sheet_to_json(ws, { header: 1 });
-            var startRow = (String(data[0][0] || '').toLowerCase().indexOf('ean') > -1 || String(data[0][0] || '').toLowerCase().indexOf('date') > -1) ? 1 : 0;
-            var count = 0;
-            for (var k = startRow; k < data.length; k++) {
-                var r = data[k]; if (!r || !r[1]) continue;
-                DB.add('location_master', {
-                    date: String(r[0] || today()), ean: String(r[1] || '').trim(),
-                    material: String(r[2] || '').trim(), description: String(r[3] || '').trim(),
-                    quantity: parseInt(r[4]) || 0, packing: String(r[5] || 'Bag').trim(),
-                    box: String(r[6] || '-').trim(), rack: 'UNASSIGNED',
-                    action: 'PIV', user: APP.currentUser ? APP.currentUser.name : 'System',
-                    dateTime: new Date().toISOString()
-                });
-                count++;
-            }
-            logAction('PIV', 'BULK', 'Bulk ' + count + ' items');
-            showToast('PIV Bulk: ' + count + ' items!', 'success');
-            renderPIV();
-        } catch(err) { showToast('Error: ' + err.message, 'error'); }
-    };
-    reader.readAsArrayBuffer(input.files[0]);
-    input.value = '';
-}
-/* ============================================================
-   FIX: Rack=Scan+Manual only, Packing=Manual only, No Camera on Desktop
-   ============================================================ */
-
-// ==================== DETECT DESKTOP (No Camera) ====================
-var IS_DESKTOP = false;
-try {
-    // Check if no camera available (desktop without webcam)
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        IS_DESKTOP = true;
-    }
-    // Also check by screen size hint
-    if (window.innerWidth > 1024 && !('ontouchstart' in window)) {
-        IS_DESKTOP = true;
-    }
-} catch(e) {}
-
-// Override scanner modal for desktop — NO camera button
-function openMyScanner(callback) {
-    _scannerCallback = callback;
-    var modal = document.getElementById('scannerModal');
-    if (!modal) {
-        modal = document.createElement('div');
-        modal.id = 'scannerModal';
-        modal.className = 'modal-overlay';
-        modal.style.cssText = 'z-index:99999;display:none;';
-        modal.innerHTML = '<div class="modal-container" style="max-width:400px"><div class="modal-header"><h3><i class="bx bx-qr-scan"></i> Scan Code</h3><button class="modal-close" onclick="closeMyScanner()"><i class="bx bx-x"></i></button></div><div class="modal-body" id="scannerModalBody" style="text-align:center;padding:16px"></div></div>';
-        document.body.appendChild(modal);
-    }
-    modal.style.display = 'flex';
-    var body = document.getElementById('scannerModalBody');
-    if (body) {
-        if (IS_DESKTOP) {
-            // DESKTOP: Only Bluetooth/USB, NO camera
-            body.innerHTML = '<div style="margin-bottom:16px"><i class="bx bx-desktop" style="font-size:48px;color:var(--text-muted);display:block;margin-bottom:10px"></i><p style="color:var(--text-muted);margin-bottom:16px">Desktop detected — Camera not available</p></div>' +
-                '<button class="btn btn-primary" style="width:100%;padding:16px;font-size:15px" onclick="startMyBluetooth()"><i class="bx bx-bluetooth"></i> Start Bluetooth / USB Scanner</button>' +
-                '<div style="margin-top:16px;background:var(--bg-secondary);padding:12px;border-radius:8px;font-size:12px;color:var(--text-muted)"><strong>Instructions:</strong><br>1. Click button above<br>2. Green bar appears at top<br>3. Scan barcode with your scanner<br>4. It auto-fills the field</div>';
-        } else {
-            // MOBILE/TABLET: Camera + Bluetooth both
-            body.innerHTML = '<div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-bottom:16px">' +
-                '<button class="btn btn-primary" style="padding:14px 24px;font-size:14px" onclick="startMyCamera()"><i class="bx bx-camera"></i> Camera Scan</button>' +
-                '<button class="btn btn-secondary" style="padding:14px 24px;font-size:14px" onclick="startMyBluetooth()"><i class="bx bx-bluetooth"></i> Bluetooth/USB</button></div>' +
-                '<div id="myQrReader" style="width:100%;border-radius:8px;overflow:hidden;background:#000;min-height:50px"></div>' +
-                '<p style="color:var(--text-muted);margin-top:10px;font-size:12px">Camera open hone pe barcode ko saamne rakhna</p>';
-        }
-    }
-}
-
-function closeMyScanner() {
-    var modal = document.getElementById('scannerModal');
-    if (modal) modal.style.display = 'none';
-    if (_scannerInstance) {
-        try { _scannerInstance.stop(); } catch(e) {}
-        _scannerInstance = null;
-    }
-}
-
-
-// ==================== PUTAWAY — Rack=Scan+Manual, Packing=Manual ====================
-function renderPutaway() {
-    var html = '<div class="section-header"><h2><i class="bx bxs-package"></i> Putaway</h2>';
-    html += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
-    html += '<button class="btn btn-primary btn-sm" onclick="clearPutawayBuffer()"><i class="bx bx-plus"></i> New</button>';
-    html += '<button class="btn btn-success btn-sm" onclick="savePutawayBuffer()"><i class="bx bx-save"></i> Save All</button>';
-    html += '<label class="btn btn-warning btn-sm" style="cursor:pointer"><i class="bx bx-upload"></i> Bulk Upload<input type="file" accept=".xlsx,.xls,.csv" style="display:none" onchange="bulkUploadPutaway(this)"></label>';
-    html += '</div></div>';
-
-    // Mode toggle
-    html += '<div class="card" style="margin-bottom:16px"><div class="form-group">';
-    html += '<div style="display:flex;gap:12px;flex-wrap:wrap">';
-    html += '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:10px 20px;border:2px solid var(--accent);border-radius:8px;background:var(--accent-dim);font-weight:600;color:var(--accent)"><input type="radio" name="putMode" value="without" checked style="accent-color:var(--accent);width:16px;height:16px"> WITHOUT Invoice</label>';
-    html += '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:10px 20px;border:2px solid var(--border);border-radius:8px;font-weight:600;color:var(--text-secondary)"><input type="radio" name="putMode" value="with" style="accent-color:var(--info);width:16px;height:16px"> WITH Invoice</label>';
-    html += '</div></div>';
-    html += '<div id="putInvSel" style="display:none;margin-top:12px"><select id="putawayInvoiceSelect" class="form-input" onchange="loadPutawayInvoiceMaterials()"><option value="">-- Select Invoice --</option>';
-    var pInvs = DB.filter('invoices', function(inv) { return inv.status === 'Posted'; });
-    for (var i = 0; i < pInvs.length; i++) {
-        var pv = DB.find('vehicles', pInvs[i].vehicleId);
-        html += '<option value="' + pInvs[i].id + '">' + escapeHtml(pInvs[i].invoiceNo) + ' — ' + escapeHtml(pv ? pv.vehicleNo : '') + '</option>';
-    }
-    html += '</select><div id="putawayInvoiceMaterials" style="margin-top:8px"></div></div></div>';
-
-    // ===== SCAN FORM =====
-    html += '<div class="card" style="border:2px solid var(--accent);margin-bottom:16px">';
-    html += '<div class="card-title" style="color:var(--accent)"><i class="bx bx-scan"></i> Scan & Putaway</div>';
-    html += '<div class="form-row">';
-
-    // EAN with SCAN
-    html += '<div class="form-group"><label>EAN / Barcode <span class="req">*</span></label>';
-    html += '<div style="display:flex;gap:6px;flex-wrap:wrap">';
-    html += '<input type="text" id="putEanInput" class="form-input" placeholder="Scan or type EAN..." style="flex:1;min-width:180px" onkeydown="if(event.key===\'Enter\')doPutawayScan()">';
-    html += '<button class="btn btn-primary btn-sm" onclick="doPutawayScan()"><i class="bx bx-plus"></i></button>';
-    html += '<button class="btn btn-secondary btn-sm scan-btn" style="background:var(--accent-dim);color:var(--accent);border:1px solid var(--accent)" onclick="doPutawayEanScan()"><i class="bx bx-qr"></i> Scan</button>';
-    html += '</div></div>';
-
-    // Material (auto)
-    html += '<div class="form-group"><label>Material (Auto)</label><input type="text" id="putMaterial" class="form-input" placeholder="Auto from master" style="background:var(--bg-secondary)"></div>';
-
-    // Description (auto)
-    html += '<div class="form-group"><label>Description (Auto)</label><input type="text" id="putDesc" class="form-input" placeholder="Auto from master" style="background:var(--bg-secondary)"></div>';
-
-    // RACK — ONLY Scan Button + Manual Text Input, NO DROPDOWN
-    html += '<div class="form-group"><label>Rack / Location <span class="req">*</span></label>';
-    html += '<div style="display:flex;gap:6px;flex-wrap:wrap">';
-    html += '<input type="text" id="putRackInput" class="form-input" placeholder="Type rack name or scan..." style="flex:1;min-width:150px;text-transform:uppercase" onkeydown="if(event.key===\'Enter\')doPutawayScan()">';
-    html += '<button class="btn btn-secondary btn-sm scan-btn" style="background:var(--accent2-dim);color:var(--accent2);border:1px solid var(--accent2);white-space:nowrap" onclick="doPutawayRackScan()"><i class="bx bx-qr"></i> Scan Rack</button>';
-    html += '</div></div>';
-
-    // Qty
-    html += '<div class="form-group"><label>Qty <span class="req">*</span></label><input type="number" id="putQty" class="form-input" value="1" min="1" style="max-width:100px"></div>';
-
-    // PACKING — ONLY Manual Text Input, NO DROPDOWN
-    html += '<div class="form-group"><label>Packing</label>';
-    html += '<input type="text" id="putPackingInput" class="form-input" placeholder="Type: Bag, Box, Carton, Pallet, Bottle...">';
-    html += '</div>';
-
-    // Box No
-    html += '<div class="form-group"><label>Box No</label><input type="text" id="putBoxNo" class="form-input" placeholder="e.g. B001"></div>';
-    html += '</div>';
-
-    html += '<div class="form-actions"><button class="btn btn-primary" onclick="doPutawayScan()"><i class="bx bx-plus-circle"></i> Add to Buffer</button></div>';
-    html += '</div>';
-
-    // Buffer
-    html += '<div class="card"><div class="card-title">Putaway Buffer (<span id="putBufCnt">' + putawayBuffer.length + '</span>)</div>';
-    html += '<div id="putBufTable"></div>';
-    if (putawayBuffer.length > 0) {
-        html += '<div class="form-actions" style="margin-top:12px"><button class="btn btn-success" onclick="savePutawayBuffer()"><i class="bx bx-save"></i> Save All to Bin</button><button class="btn btn-danger" onclick="clearPutawayBuffer()"><i class="bx bx-trash"></i> Clear</button></div>';
-    }
-    html += '</div>';
-
-    // Today's putaway
-    var tPut = DB.filter('location_master', function(l) { return l.action === 'PUTAWAY' && l.date === today(); });
-    if (tPut.length > 0) {
-        html += '<div class="card" style="margin-top:16px"><div class="card-title">Today (' + tPut.length + ')</div>';
-        html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>Time</th><th>EAN</th><th>Material</th><th>Rack</th><th>Qty</th><th>Packing</th><th>User</th></tr></thead><tbody>';
-        for (var t = 0; t < tPut.length; t++) {
-            html += '<tr><td>' + (t+1) + '</td><td style="font-size:11px">' + formatDateTime(tPut[t].dateTime) + '</td><td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(tPut[t].ean) + '</td><td>' + escapeHtml(tPut[t].material) + '</td><td><span class="badge badge-accent">' + escapeHtml(tPut[t].rack) + '</span></td><td><strong>' + tPut[t].quantity + '</strong></td><td>' + escapeHtml(tPut[t].packing) + '</td><td>' + escapeHtml(tPut[t].user) + '</td></tr>';
-        }
-        html += '</tbody></table></div></div>';
-    }
-
-    document.getElementById('section-putaway').innerHTML = html;
-
-    // Bind mode toggle
-    var modeRadios = document.querySelectorAll('input[name="putMode"]');
-    for (var mr = 0; mr < modeRadios.length; mr++) {
-        modeRadios[mr].addEventListener('change', function() {
-            var sel = document.getElementById('putInvSel');
-            if (sel) sel.style.display = this.value === 'with' ? 'block' : 'none';
-        });
-    }
-    renderPutawayBuffer();
-}
-
-// PUTAWAY: EAN Scan
-function doPutawayEanScan() {
-    openMyScanner(function(code) {
-        var el = document.getElementById('putEanInput');
-        if (el) el.value = code;
-        var matMaster = DB.get('material_master');
-        for (var i = 0; i < matMaster.length; i++) {
-            if (matMaster[i].ean === code || matMaster[i].material.toUpperCase() === code.toUpperCase()) {
-                var mEl = document.getElementById('putMaterial');
-                var dEl = document.getElementById('putDesc');
-                if (mEl) mEl.value = matMaster[i].material;
-                if (dEl) dEl.value = matMaster[i].description;
-                if (el) el.value = matMaster[i].ean || code;
-                break;
-            }
-        }
-        showToast('EAN Scanned: ' + code, 'success');
-    });
-}
-
-// PUTAWAY: Rack Scan
-function doPutawayRackScan() {
-    openMyScanner(function(code) {
-        var el = document.getElementById('putRackInput');
-        if (el) el.value = code.toUpperCase();
-        showToast('Rack Scanned: ' + code.toUpperCase(), 'success');
-    });
-}
-
-// PUTAWAY: Add item
-function doPutawayScan() {
-    var ean = document.getElementById('putEanInput').value.trim();
-    var rack = document.getElementById('putRackInput').value.trim().toUpperCase();
-    var qty = parseInt(document.getElementById('putQty').value) || 0;
-    var packing = document.getElementById('putPackingInput').value.trim() || 'Bag';
-    var boxNo = document.getElementById('putBoxNo').value.trim();
-    var material = document.getElementById('putMaterial').value.trim();
-    var desc = document.getElementById('putDesc').value.trim();
-
-    if (!ean) { showToast('Scan or enter EAN first', 'error'); return; }
-    if (!rack) { showToast('Type or scan rack name', 'error'); return; }
-    if (qty <= 0) { showToast('Enter valid qty', 'error'); return; }
-
-    // Auto-fill material if empty
-    if (!material || !desc) {
-        var matMaster = DB.get('material_master');
-        for (var i = 0; i < matMaster.length; i++) {
-            if (matMaster[i].ean === ean || matMaster[i].material.toUpperCase() === ean.toUpperCase()) {
-                material = material || matMaster[i].material;
-                desc = desc || matMaster[i].description;
-                ean = matMaster[i].ean || ean;
-                break;
-            }
-        }
-    }
-
-    // Invoice check
-    var invId = '', invNo = '';
-    var modeRadio = document.querySelector('input[name="putMode"]:checked');
-    if (modeRadio && modeRadio.value === 'with') {
-        var selInv = document.getElementById('putawayInvoiceSelect');
-        if (selInv && selInv.value) {
-            invId = selInv.value;
-            var inv = DB.find('invoices', invId);
-            invNo = inv ? inv.invoiceNo : '';
-        }
-    }
-
-    putawayBuffer.push({
-        id: DB.uid(), date: today(), ean: ean, material: material || 'UNKNOWN',
-        description: desc || '-', rack: rack, quantity: qty, packing: packing,
-        box: boxNo || '-', action: 'PUTAWAY', user: APP.currentUser ? APP.currentUser.name : 'System',
-        invoiceId: invId, invoiceNo: invNo, dateTime: new Date().toISOString()
-    });
-
-    // Clear inputs
-    document.getElementById('putEanInput').value = '';
-    document.getElementById('putMaterial').value = '';
-    document.getElementById('putDesc').value = '';
-    document.getElementById('putRackInput').value = '';
-    document.getElementById('putQty').value = '1';
-    document.getElementById('putPackingInput').value = '';
-    document.getElementById('putBoxNo').value = '';
-    document.getElementById('putEanInput').focus();
-
-    renderPutawayBuffer();
-    showToast('Added: ' + (material || ean) + ' → ' + rack, 'success');
-}
-
-function renderPutawayBuffer() {
-    var c = document.getElementById('putBufTable');
-    var cnt = document.getElementById('putBufCnt');
-    if (cnt) cnt.textContent = putawayBuffer.length;
-    if (!c) return;
-    if (putawayBuffer.length === 0) { c.innerHTML = '<div style="text-align:center;color:var(--text-muted);padding:20px">Buffer empty — scan items above</div>'; return; }
-    var h = '<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>EAN</th><th>Material</th><th>Rack</th><th>Qty</th><th>Packing</th><th>Box</th><th>Action</th></tr></thead><tbody>';
-    for (var i = 0; i < putawayBuffer.length; i++) {
-        var p = putawayBuffer[i];
-        h += '<tr><td>' + (i+1) + '</td><td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(p.ean) + '</td><td>' + escapeHtml(p.material) + '</td><td><span class="badge badge-accent">' + escapeHtml(p.rack) + '</span></td><td><strong>' + p.quantity + '</strong></td><td>' + escapeHtml(p.packing) + '</td><td>' + escapeHtml(p.box) + '</td><td><button class="btn btn-danger btn-sm" onclick="putawayBuffer.splice(' + i + ',1);renderPutawayBuffer()"><i class="bx bx-trash"></i></button></td></tr>';
-    }
-    h += '</tbody></table></div>';
-    c.innerHTML = h;
-}
-
-function clearPutawayBuffer() {
-    if (putawayBuffer.length > 0 && !confirm('Clear ' + putawayBuffer.length + ' items?')) return;
-    putawayBuffer = [];
-    renderPutaway();
-}
-
-function savePutawayBuffer() {
-    if (putawayBuffer.length === 0) { showToast('Buffer empty!', 'error'); return; }
-    for (var i = 0; i < putawayBuffer.length; i++) {
-        var item = Object.assign({}, putawayBuffer[i]);
-        delete item.id;
-        DB.add('location_master', item);
-    }
-    var cnt = putawayBuffer.length;
-    logAction('Putaway', 'SAVE', 'Saved ' + cnt + ' items to bin');
-    showToast(cnt + ' items saved to Bin Master!', 'success');
-    putawayBuffer = [];
-    renderPutaway();
-    addNotification(cnt + ' putaway items by ' + (APP.currentUser ? APP.currentUser.name : ''), 'success');
-}
-
-
-// ==================== PIV — Rack=Scan+Manual, Packing=Manual ====================
-function renderPIV() {
-    var html = '<div class="section-header"><h2><i class="bx bxs-clipboard"></i> PIV (Physical Inventory Verification)</h2>';
-    html += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
-    html += '<button class="btn btn-primary btn-sm" onclick="togglePivLive()"><i class="bx bx-play"></i> <span id="pivLiveTxt">Start Live Scan</span></button>';
-    html += '<button class="btn btn-success btn-sm" onclick="savePivData()"><i class="bx bx-save"></i> Save to Bin</button>';
-    html += '<label class="btn btn-warning btn-sm" style="cursor:pointer"><i class="bx bx-upload"></i> Bulk Upload<input type="file" accept=".xlsx,.xls,.csv" style="display:none" onchange="bulkUploadPIV(this)"></label>';
-    html += '</div></div>';
-
-    // Live indicator
-    html += '<div id="pivLiveInd" style="display:none;padding:10px;background:var(--accent2-dim);border:1px solid var(--accent2);border-radius:8px;margin-bottom:16px;text-align:center;color:var(--accent2);font-weight:700;animation:pulse 1.5s infinite"><i class="bx bx-broadcast"></i> LIVE SCAN MODE — Each scan saves directly to Bin</div>';
-
-    // ===== SCAN FORM =====
-    html += '<div class="card" style="border:2px solid var(--accent2);margin-bottom:16px">';
-    html += '<div class="card-title" style="color:var(--accent2)"><i class="bx bx-scan"></i> PIV Scan Entry</div>';
-    html += '<div class="form-row">';
-
-    // EAN with SCAN
-    html += '<div class="form-group"><label>EAN / Barcode <span class="req">*</span></label>';
-    html += '<div style="display:flex;gap:6px;flex-wrap:wrap">';
-    html += '<input type="text" id="pivEanInput" class="form-input" placeholder="Scan or type EAN..." style="flex:1;min-width:180px" onkeydown="if(event.key===\'Enter\')doPivScan()">';
-    html += '<button class="btn btn-primary btn-sm" onclick="doPivScan()"><i class="bx bx-plus"></i></button>';
-    html += '<button class="btn btn-secondary btn-sm scan-btn" style="background:var(--accent-dim);color:var(--accent);border:1px solid var(--accent)" onclick="doPivEanScan()"><i class="bx bx-qr"></i> Scan</button>';
-    html += '</div></div>';
-
-    // Material (auto)
-    html += '<div class="form-group"><label>Material (Auto)</label><input type="text" id="pivMaterial" class="form-input" placeholder="Auto from master" style="background:var(--bg-secondary)"></div>';
-
-    // Description (auto)
-    html += '<div class="form-group"><label>Description (Auto)</label><input type="text" id="pivDesc" class="form-input" placeholder="Auto from master" style="background:var(--bg-secondary)"></div>';
-
-    // RACK — ONLY Scan Button + Manual Text Input, NO DROPDOWN
-    html += '<div class="form-group"><label>Rack / Location</label>';
-    html += '<div style="display:flex;gap:6px;flex-wrap:wrap">';
-    html += '<input type="text" id="pivRackInput" class="form-input" placeholder="Type rack name or scan..." style="flex:1;min-width:150px;text-transform:uppercase" onkeydown="if(event.key===\'Enter\')doPivScan()">';
-    html += '<button class="btn btn-secondary btn-sm scan-btn" style="background:var(--accent2-dim);color:var(--accent2);border:1px solid var(--accent2);white-space:nowrap" onclick="doPivRackScan()"><i class="bx bx-qr"></i> Scan Rack</button>';
-    html += '</div></div>';
-
-    // Qty
-    html += '<div class="form-group"><label>Qty</label><input type="number" id="pivQty" class="form-input" value="1" min="1" style="max-width:100px"></div>';
-
-    // PACKING — ONLY Manual Text Input, NO DROPDOWN
-    html += '<div class="form-group"><label>Packing</label>';
-    html += '<input type="text" id="pivPackingInput" class="form-input" placeholder="Type: Bag, Box, Carton, Pallet, Bottle...">';
-    html += '</div>';
-
-    // Box No
-    html += '<div class="form-group"><label>Box No</label><input type="text" id="pivBoxNo" class="form-input" placeholder="e.g. B001"></div>';
-    html += '</div>';
-
-    html += '<div class="form-actions"><button class="btn btn-primary" onclick="doPivScan()"><i class="bx bx-plus-circle"></i> Add PIV Entry</button></div>';
-    html += '</div>';
-
-    // PIV items
-    html += '<div class="card"><div class="card-title">PIV Entries (Session: <span id="pivSesCnt">' + pivLiveItems.length + '</span>)</div>';
-    html += '<div id="pivItemsTbl"></div></div>';
-
-    // Today's PIV
-    var tPiv = DB.filter('location_master', function(l) { return l.action === 'PIV' && l.date === today(); });
-    if (tPiv.length > 0) {
-        html += '<div class="card" style="margin-top:16px"><div class="card-title">Today (' + tPiv.length + ')</div>';
-        html += '<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>Time</th><th>EAN</th><th>Material</th><th>Rack</th><th>Qty</th><th>Packing</th><th>User</th></tr></thead><tbody>';
-        for (var t = 0; t < tPiv.length; t++) {
-            html += '<tr><td>' + (t+1) + '</td><td style="font-size:11px">' + formatDateTime(tPiv[t].dateTime) + '</td><td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(tPiv[t].ean) + '</td><td>' + escapeHtml(tPiv[t].material) + '</td><td><span class="badge badge-accent">' + escapeHtml(tPiv[t].rack) + '</span></td><td><strong>' + tPiv[t].quantity + '</strong></td><td>' + escapeHtml(tPiv[t].packing) + '</td><td>' + escapeHtml(tPiv[t].user) + '</td></tr>';
-        }
-        html += '</tbody></table></div></div>';
-    }
-
-    document.getElementById('section-piv').innerHTML = html;
-    renderPivItems();
-}
-
-// PIV: EAN Scan
-function doPivEanScan() {
-    openMyScanner(function(code) {
-        var el = document.getElementById('pivEanInput');
-        if (el) el.value = code;
-        var matMaster = DB.get('material_master');
-        for (var i = 0; i < matMaster.length; i++) {
-            if (matMaster[i].ean === code || matMaster[i].material.toUpperCase() === code.toUpperCase()) {
-                var mEl = document.getElementById('pivMaterial');
-                var dEl = document.getElementById('pivDesc');
-                if (mEl) mEl.value = matMaster[i].material;
-                if (dEl) dEl.value = matMaster[i].description;
-                if (el) el.value = matMaster[i].ean || code;
-                break;
-            }
-        }
-        showToast('EAN Scanned: ' + code, 'success');
-    });
-}
-
-// PIV: Rack Scan
-function doPivRackScan() {
-    openMyScanner(function(code) {
-        var el = document.getElementById('pivRackInput');
-        if (el) el.value = code.toUpperCase();
-        showToast('Rack Scanned: ' + code.toUpperCase(), 'success');
-    });
-}
-
-// PIV: Add item
-function doPivScan() {
-    var ean = document.getElementById('pivEanInput').value.trim();
-    var rack = document.getElementById('pivRackInput').value.trim().toUpperCase() || 'UNASSIGNED';
-    var qty = parseInt(document.getElementById('pivQty').value) || 1;
-    var packing = document.getElementById('pivPackingInput').value.trim() || 'Bag';
-    var boxNo = document.getElementById('pivBoxNo').value.trim();
-    var material = document.getElementById('pivMaterial').value.trim();
-    var desc = document.getElementById('pivDesc').value.trim();
-
-    if (!ean) { showToast('Scan or enter EAN', 'error'); return; }
-
-    if (!material || !desc) {
-        var matMaster = DB.get('material_master');
-        for (var i = 0; i < matMaster.length; i++) {
-            if (matMaster[i].ean === ean || matMaster[i].material.toUpperCase() === ean.toUpperCase()) {
-                material = material || matMaster[i].material;
-                desc = desc || matMaster[i].description;
-                ean = matMaster[i].ean || ean;
-                break;
-            }
-        }
-    }
-
-    var item = {
-        id: DB.uid(), date: today(), ean: ean, material: material || 'UNKNOWN',
-        description: desc || '-', rack: rack, quantity: qty, packing: packing,
-        box: boxNo || '-', action: 'PIV', user: APP.currentUser ? APP.currentUser.name : 'System',
-        dateTime: new Date().toISOString()
-    };
-
-    if (pivLiveActive) {
-        delete item.id;
-        DB.add('location_master', item);
-        logAction('PIV', 'LIVE_SCAN', 'Live: ' + item.material + ' qty=' + qty + ' at ' + rack);
-        showToast('LIVE SAVED: ' + (material || ean), 'success');
-    } else {
-        pivLiveItems.push(item);
-        renderPivItems();
-        showToast('Added: ' + (material || ean), 'success');
-    }
-
-    // Clear
-    document.getElementById('pivEanInput').value = '';
-    document.getElementById('pivMaterial').value = '';
-    document.getElementById('pivDesc').value = '';
-    document.getElementById('pivRackInput').value = '';
-    document.getElementById('pivQty').value = '1';
-    document.getElementById('pivPackingInput').value = '';
-    document.getElementById('pivBoxNo').value = '';
-    document.getElementById('pivEanInput').focus();
-}
-
-function togglePivLive() {
-    pivLiveActive = !pivLiveActive;
-    var txt = document.getElementById('pivLiveTxt');
-    var ind = document.getElementById('pivLiveInd');
-    if (pivLiveActive) {
-        if (txt) txt.textContent = 'Stop Live Scan';
-        if (ind) ind.style.display = 'block';
-        document.getElementById('pivEanInput').focus();
-        showToast('LIVE MODE ON!', 'warning');
-    } else {
-        if (txt) txt.textContent = 'Start Live Scan';
-        if (ind) ind.style.display = 'none';
-        showToast('Live scan stopped', 'info');
-    }
-}
-
-function renderPivItems() {
-    var c = document.getElementById('pivItemsTbl');
-    var cnt = document.getElementById('pivSesCnt');
-    if (cnt) cnt.textContent = pivLiveItems.length;
-    if (!c) return;
-    if (pivLiveItems.length === 0) { c.innerHTML = '<div style="text-align:center;color:var(--text-muted);padding:20px">' + (pivLiveActive ? 'Live ON — just scan!' : 'No entries yet') + '</div>'; return; }
-    var h = '<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>EAN</th><th>Material</th><th>Rack</th><th>Qty</th><th>Packing</th><th>Box</th><th>Action</th></tr></thead><tbody>';
-    for (var i = 0; i < pivLiveItems.length; i++) {
-        var p = pivLiveItems[i];
-        h += '<tr><td>' + (i+1) + '</td><td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(p.ean) + '</td><td>' + escapeHtml(p.material) + '</td><td><span class="badge badge-accent">' + escapeHtml(p.rack) + '</span></td><td><strong>' + p.quantity + '</strong></td><td>' + escapeHtml(p.packing) + '</td><td>' + escapeHtml(p.box) + '</td><td><button class="btn btn-danger btn-sm" onclick="pivLiveItems.splice(' + i + ',1);renderPivItems()"><i class="bx bx-trash"></i></button></td></tr>';
-    }
-    h += '</tbody></table></div>';
-    c.innerHTML = h;
-}
-
-function savePivData() {
-    if (pivLiveItems.length === 0) { showToast('No PIV entries!', 'error'); return; }
-    for (var i = 0; i < pivLiveItems.length; i++) {
-        var item = Object.assign({}, pivLiveItems[i]);
-        delete item.id;
-        DB.add('location_master', item);
-    }
-    var cnt = pivLiveItems.length;
-    logAction('PIV', 'SAVE', 'Saved ' + cnt + ' PIV items');
-    showToast(cnt + ' PIV items saved!', 'success');
-    pivLiveItems = [];
-    renderPIV();
-}
-
-function bulkUploadPIV(input) {
-    if (!input.files[0]) return;
-    var reader = new FileReader();
-    reader.onload = function(e) {
-        try {
-            var wb = XLSX.read(e.target.result, { type: 'array' });
-            var ws = wb.Sheets[wb.SheetNames[0]];
-            var data = XLSX.utils.sheet_to_json(ws, { header: 1 });
-            var startRow = (String(data[0][0] || '').toLowerCase().indexOf('ean') > -1 || String(data[0][0] || '').toLowerCase().indexOf('date') > -1) ? 1 : 0;
-            var count = 0;
-            for (var k = startRow; k < data.length; k++) {
-                var r = data[k]; if (!r || !r[1]) continue;
-                DB.add('location_master', {
-                    date: String(r[0] || today()), ean: String(r[1] || '').trim(),
-                    material: String(r[2] || '').trim(), description: String(r[3] || '').trim(),
-                    quantity: parseInt(r[4]) || 0, packing: String(r[5] || 'Bag').trim(),
-                    box: String(r[6] || '-').trim(), rack: 'UNASSIGNED',
-                    action: 'PIV', user: APP.currentUser ? APP.currentUser.name : 'System',
-                    dateTime: new Date().toISOString()
-                });
-                count++;
-            }
-            logAction('PIV', 'BULK', 'Bulk ' + count + ' items');
-            showToast('PIV Bulk: ' + count + ' items!', 'success');
-            renderPIV();
-        } catch(err) { showToast('Error: ' + err.message, 'error'); }
-    };
-    reader.readAsArrayBuffer(input.files[0]);
-    input.value = '';
-}
-
-// Also fix loadPutawayInvoiceMaterials
-function loadPutawayInvoiceMaterials() {
-    var invId = document.getElementById('putawayInvoiceSelect').value;
-    var container = document.getElementById('putawayInvoiceMaterials');
-    if (!invId) { if (container) container.innerHTML = ''; return; }
-    var mats = DB.filter('invoice_materials', function(m) { return m.invoiceId === invId; });
-    if (mats.length === 0) { container.innerHTML = '<div style="padding:10px;color:var(--text-muted);font-size:12px">No materials in this invoice</div>'; return; }
-    var html = '<div class="table-wrapper" style="margin-top:8px"><table class="data-table"><thead><tr><th>Material</th><th>EAN</th><th>Inv Qty</th><th>Unloaded</th><th>Remaining</th></tr></thead><tbody>';
-    for (var i = 0; i < mats.length; i++) {
-        var m = mats[i];
-        var putDone = 0;
-        var allLoc = DB.get('location_master');
-        for (var j = 0; j < allLoc.length; j++) {
-            if (allLoc[j].invoiceId === invId && allLoc[j].material === m.material && allLoc[j].action === 'PUTAWAY') {
-                putDone += allLoc[j].quantity;
-            }
-        }
-        var remaining = (m.unloadedQty || 0) - putDone;
-        html += '<tr><td>' + escapeHtml(m.material) + '</td><td style="font-family:var(--font-display);font-size:11px">' + escapeHtml(m.ean || '-') + '</td>';
-        html += '<td>' + m.qty + '</td><td>' + (m.unloadedQty || 0) + '</td>';
-        html += '<td class="' + (remaining > 0 ? 'qty-match' : 'qty-mismatch') + '">' + remaining + '</td></tr>';
-    }
-    html += '</tbody></table></div>';
-    container.innerHTML = html;
-}
-// ============================================================
-// NUCLEAR FIX — Location Master Bulk Upload
-// Paste at END of script.js
-// ============================================================
-
-(function(){
-    'use strict';
-
-    // --- Override renderLocationMaster ---
-    var _origRenderLoc = (typeof renderLocationMaster === 'function') ? renderLocationMaster : null;
-
-    window.renderLocationMaster = function() {
-        var locations = DB.get('location_master');
-        var search = (document.getElementById('locSearchInput') || {}).value || '';
-        search = String(search).trim().toLowerCase();
-        var filterRack = (document.getElementById('locRackFilter') || {}).value || '';
-        var filterAction = (document.getElementById('locActionFilter') || {}).value || '';
-
-        var filtered = locations;
-        if (search) {
-            filtered = filtered.filter(function(l) {
-                return String(l.rack||'').toLowerCase().indexOf(search) > -1 ||
-                    String(l.material||'').toLowerCase().indexOf(search) > -1 ||
-                    String(l.ean||'').toLowerCase().indexOf(search) > -1 ||
-                    String(l.description||'').toLowerCase().indexOf(search) > -1 ||
-                    String(l.quantity||'').indexOf(search) > -1;
-            });
-        }
-        if (filterRack) filtered = filtered.filter(function(l){ return l.rack === filterRack; });
-        if (filterAction) filtered = filtered.filter(function(l){ return l.action === filterAction; });
-
-        filtered.sort(function(a,b){ return new Date(b.createdAt||b.dateTime||0) - new Date(a.createdAt||a.dateTime||0); });
-
-        var pg = paginate(filtered, APP.locPage, APP.locPerPage);
-        var racks = DB.get('rack_master');
-        var rackOpts = '<option value="">All Racks</option>';
-        for(var r=0;r<racks.length;r++){
-            rackOpts += '<option value="'+escapeHtml(racks[r].rack)+'"'+(filterRack===racks[r].rack?' selected':'')+'>'+escapeHtml(racks[r].rack)+'</option>';
-        }
-
-        var totalQty = 0;
-        for(var tq=0;tq<locations.length;tq++) totalQty += (Number(locations[tq].quantity) || 0);
-
-        var html = '<div class="section-header"><h2><i class="bx bxs-map-pin"></i> Location Master</h2>';
-        html += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
-        html += '<button class="btn btn-primary" onclick="showAddLocationForm()"><i class="bx bx-plus"></i> Add Location</button>';
-        html += '<button class="btn btn-warning" onclick="window._bulkLocUploadNEW()"><i class="bx bx-upload"></i> Bulk Upload</button>';
-        html += '<button class="btn btn-secondary" onclick="exportLocationMaster()"><i class="bx bx-download"></i> Export Excel</button>';
-        html += '</div></div>';
-
-        html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;margin-bottom:20px">';
-        html += '<div class="kpi-card"><div class="kpi-value">'+locations.length+'</div><div class="kpi-label">Total Records</div></div>';
-        html += '<div class="kpi-card"><div class="kpi-value" style="color:var(--accent)">'+totalQty+'</div><div class="kpi-label">Total Qty in Warehouse</div></div>';
-        html += '<div class="kpi-card"><div class="kpi-value">'+filtered.length+'</div><div class="kpi-label">Filtered</div></div>';
-        html += '</div>';
-
-        html += '<div class="card" style="margin-bottom:16px"><div style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">';
-        html += '<div class="form-group" style="flex:1;min-width:200px"><label>Search</label><input type="text" id="locSearchInput" class="form-input" placeholder="Rack, Material, EAN..." value="'+escapeHtml(search)+'" oninput="APP.locPage=1;renderLocationMaster()"></div>';
-        html += '<div class="form-group" style="min-width:160px"><label>Rack</label><select id="locRackFilter" class="form-input" onchange="APP.locPage=1;renderLocationMaster()">'+rackOpts+'</select></div>';
-        html += '<div class="form-group" style="min-width:130px"><label>Action</label><select id="locActionFilter" class="form-input" onchange="APP.locPage=1;renderLocationMaster()"><option value="">All</option><option value="PUTAWAY"'+(filterAction==='PUTAWAY'?' selected':'')+'>PUTAWAY</option><option value="PIV"'+(filterAction==='PIV'?' selected':'')+'>PIV</option></select></div>';
-        html += '<button class="btn btn-sm btn-secondary" onclick="APP.locPage=1;document.getElementById(\'locSearchInput\').value=\'\';document.getElementById(\'locRackFilter\').value=\'\';document.getElementById(\'locActionFilter\').value=\'\';renderLocationMaster()"><i class="bx bx-refresh"></i> Clear</button>';
-        html += '</div></div>';
-
-        html += '<div class="card"><div class="card-title">Records ('+pg.total+')</div><div class="table-wrapper"><table class="data-table"><thead><tr>';
-        html += '<th>#</th><th>Date</th><th>Rack</th><th>EAN</th><th>Material</th><th>Description</th><th style="color:var(--accent);font-size:13px">QTY</th><th>Packing</th><th>Box</th><th>Action</th><th>User</th><th>Actions</th>';
-        html += '</tr></thead><tbody>';
-
-        if(pg.items.length === 0){
-            html += '<tr><td colspan="12" style="text-align:center;color:var(--text-muted);padding:40px"><i class="bx bx-inbox" style="font-size:32px;display:block;margin-bottom:8px"></i>No records</td></tr>';
-        } else {
-            for(var i=0;i<pg.items.length;i++){
-                var l = pg.items[i];
-                var rowNum = (APP.locPage-1)*APP.locPerPage + i + 1;
-                var qv = Number(l.quantity) || 0;
-                html += '<tr>';
-                html += '<td>'+rowNum+'</td>';
-                html += '<td style="font-size:12px">'+escapeHtml(l.date||'-')+'</td>';
-                html += '<td><strong style="color:var(--accent)">'+escapeHtml(l.rack||'-')+'</strong></td>';
-                html += '<td style="font-family:var(--font-display);font-size:11px">'+escapeHtml(l.ean||'-')+'</td>';
-                html += '<td>'+escapeHtml(l.material||'-')+'</td>';
-                html += '<td style="font-size:12px;color:var(--text-secondary)">'+escapeHtml(l.description||'-')+'</td>';
-                html += '<td style="font-size:18px;font-weight:900;color:'+(qv>0?'var(--accent)':'var(--danger)')+'">'+qv+'</td>';
-                html += '<td>'+escapeHtml(l.packing||'-')+'</td>';
-                html += '<td>'+escapeHtml(l.box||'-')+'</td>';
-                html += '<td><span class="badge badge-'+(l.action==='PUTAWAY'?'success':'info')+'">'+escapeHtml(l.action||'-')+'</span></td>';
-                html += '<td style="font-size:12px;color:var(--text-muted)">'+escapeHtml(l.user||'-')+'</td>';
-                html += '<td><div class="table-actions">';
-                html += '<button class="btn-icon" title="Edit" onclick="showEditLocation(\''+l.id+'\')"><i class="bx bx-edit"></i></button>';
-                html += '<button class="btn-icon danger" title="Delete" onclick="deleteLocation(\''+l.id+'\')"><i class="bx bx-trash"></i></button>';
-                html += '</div></td></tr>';
-            }
-        }
-        html += '</tbody></table></div>';
-        html += renderPagination(APP.locPage, pg.pages, 'goLocPage');
-        html += '</div>';
-
-        var sec = document.getElementById('section-location');
-        if(sec) sec.innerHTML = html;
-    };
-
-    // --- Override goLocPage ---
-    window.goLocPage = function(p){
-        if(p<1) return;
-        APP.locPage = p;
-        renderLocationMaster();
-    };
-
-    // --- NEW BULK UPLOAD (completely independent) ---
-    var _parsedRows = [];
-
-    window._bulkLocUploadNEW = function() {
-        _parsedRows = [];
-        var html = '';
-        html += '<div class="form-group"><label>Choose Excel File</label>';
-        html += '<label class="btn btn-warning" style="cursor:pointer;display:inline-flex"><i class="bx bx-upload"></i> Select File (.xlsx/.xls/.csv)';
-        html += '<input type="file" id="_blFileInput" accept=".xlsx,.xls,.csv" style="display:none"></label>';
-        html += ' <span id="_blFileName" style="font-size:12px;color:var(--text-muted)">No file</span></div>';
-
-        html += '<div style="background:var(--warning-dim);border:1px dashed var(--warning);padding:12px;border-radius:8px;font-size:12px;color:var(--warning);margin:12px 0">';
-        html += '<strong>Required Columns (Header Row):</strong><br>';
-        html += '<code style="display:block;margin-top:6px;padding:6px 10px;background:var(--bg-input);border-radius:4px;color:var(--accent);font-size:11px">Date | Rack | EAN | Material | Description | Quantity | Packing | Box | Action</code>';
-        html += '<br>Minimum required: <strong>Rack</strong> + <strong>Quantity</strong>';
-        html += '</div>';
-
-        html += '<div id="_blStep2" style="display:none">';
-        html += '<button class="btn btn-secondary btn-sm" onclick="window._blParseFile()" style="margin-bottom:12px"><i class="bx bx-search"></i> Step 1: Parse & Preview</button>';
-        html += '</div>';
-
-        html += '<div id="_blPreview"></div>';
-
-        html += '<div id="_blManualCol" style="display:none;margin-top:12px;padding:12px;background:var(--danger-dim);border:1px solid var(--danger);border-radius:8px">';
-        html += '<strong style="color:var(--danger)"><i class="bx bx-error"></i> Auto-detect failed! Manually select column numbers:</strong>';
-        html += '<div class="form-row" style="margin-top:8px">';
-        html += '<div class="form-group"><label>Rack Column #</label><input type="number" id="_blMRack" class="form-input" min="0" placeholder="0,1,2..."></div>';
-        html += '<div class="form-group"><label>Material Column #</label><input type="number" id="_blMMat" class="form-input" min="0" placeholder="0,1,2..."></div>';
-        html += '<div class="form-group"><label>Quantity Column #</label><input type="number" id="_blMQty" class="form-input" min="0" placeholder="0,1,2..." style="border-color:var(--danger)"></div>';
-        html += '</div>';
-        html += '<button class="btn btn-danger btn-sm" onclick="window._blParseManual()"><i class="bx bx-check"></i> Parse with Manual Columns</button>';
-        html += '</div>';
-
-        showModal('<i class="bx bx-upload"></i> Bulk Upload — Location Master', html, 'lg',
-            '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-            '<button id="_blSaveBtn" class="btn btn-primary" disabled onclick="window._blSaveAll()"><i class="bx bx-check-double"></i> Confirm & Save All</button>'
-        );
-
-        // Bind file input
-        setTimeout(function(){
-            var fi = document.getElementById('_blFileInput');
-            if(fi) fi.addEventListener('change', function(){
-                var fn = document.getElementById('_blFileName');
-                if(fn && this.files[0]) fn.innerText = this.files[0].name;
-                document.getElementById('_blStep2').style.display = 'block';
-            });
-        }, 100);
-    };
-
-    // --- Parse file ---
-    window._blParseFile = function() {
-        var fi = document.getElementById('_blFileInput');
-        if(!fi || !fi.files[0]){ showToast('Select file first','error'); return; }
-
-        var reader = new FileReader();
-        reader.onload = function(e) {
-            try {
-                var wb = XLSX.read(e.target.result, {type:'array'});
-                var ws = wb.Sheets[wb.SheetNames[0]];
-                var raw = XLSX.utils.sheet_to_json(ws, {header:1});
-
-                console.log('=== RAW EXCEL DATA ===');
-                console.log('Total rows (including header):', raw.length);
-                console.log('Header:', raw[0]);
-                if(raw.length > 1) console.log('Row 1 (first data):', raw[1]);
-                if(raw.length > 2) console.log('Row 2:', raw[2]);
-
-                if(raw.length < 2){ showToast('File is empty (only header, no data)','error'); return; }
-
-                // Dynamic column mapping
-                var hdr = raw[0].map(function(h){ return String(h||'').trim().toLowerCase().replace(/[^a-z0-9]/g,''); });
-                console.log('Normalized headers:', hdr);
-
-                var colMap = {};
-                                var mapDef = {
-                    date:      ['date','dt'],
-                    rack:      ['rack','rackno','racknumber','location','loc'],
-                    ean:       ['ean','eancode','barcode','scancode','barcodescan'],
-                    material:  ['material','materialcode','materialname','matcode','item','itemcode','product','productcode','itemname','productname','sku','skucode'],
-                    description:['description','desc','materialdesc','itemdesc','productdesc','itemdescription'],
-                    quantity:  ['quantity','qty','quant','units','stock','balance','amount','nos','pieces','pcs','noofpcs','totalqty','qty'],
-                    packing:   ['packing','pack','uom','unit','packtype','packingtype'],
-                    box:       ['box','boxno','boxnumber','carton','cartonno','boxno'],
-                    action:    ['action','actiontype','type','transactiontype','transaction','movetype','movementtype','process','processtype','activity']
-                };
-
-                for(var field in mapDef){
-                    for(var a=0; a<mapDef[field].length; a++){
-                        var idx = hdr.indexOf(mapDef[field][a]);
-                        if(idx > -1){ colMap[field] = idx; break; }
-                    }
-                }
-
-                console.log('=== COLUMN MAPPING ===', colMap);
-
-                // Check critical
-                if(colMap.rack === undefined && colMap.quantity === undefined){
-                    // Show manual column selector
-                    document.getElementById('_blManualCol').style.display = 'block';
-                    document.getElementById('_blManualCol').dataset_raw = JSON.stringify(raw);
-                    showToast('Could not auto-detect Rack/Qty columns. Use manual selection below.','warning');
-                    return;
-                }
-
-                _blDoParse(raw, colMap);
-
-            } catch(err){
-                console.error('Parse error:', err);
-                showToast('Error: ' + err.message, 'error');
-            }
-        };
-        reader.readAsArrayBuffer(fi.files[0]);
-    };
-
-    window._blParseManual = function() {
-        var raw = JSON.parse(document.getElementById('_blManualCol').dataset_raw);
-        var colMap = {
-            rack: parseInt(document.getElementById('_blMRack').value),
-            material: parseInt(document.getElementById('_blMMat').value),
-            quantity: parseInt(document.getElementById('_blMQty').value)
-        };
-        if(isNaN(colMap.quantity)){ showToast('Quantity column # is required','error'); return; }
-        _blDoParse(raw, colMap);
-    };
-
-        function _blDoParse(raw, colMap) {
-        _parsedRows = [];
-        var warnings = [];
-
-        for(var k=1; k<raw.length; k++){
-            var r = raw[k];
-            if(!r) continue;
-
-            // Skip empty rows
-            var isEmpty = true;
-            for(var ci=0; ci<r.length; ci++){
-                if(r[ci] !== null && r[ci] !== undefined && String(r[ci]).trim() !== ''){ isEmpty=false; break; }
-            }
-            if(isEmpty) continue;
-
-            // ===== QUANTITY PARSING =====
-            var rawQtyVal = (colMap.quantity !== undefined) ? r[colMap.quantity] : 0;
-            var finalQty = 0;
-
-            if(rawQtyVal !== null && rawQtyVal !== undefined && String(rawQtyVal).trim() !== ''){
-                if(typeof rawQtyVal === 'number'){
-                    finalQty = rawQtyVal;
-                } else {
-                    var cleanStr = String(rawQtyVal).replace(/[,₹$₽€£\s]/g, '').trim();
-                    finalQty = Number(cleanStr);
-                }
-                if(isNaN(finalQty) || !isFinite(finalQty)) finalQty = 0;
-                if(finalQty < 0) finalQty = 0;
-            }
-
-            // ===== ACTION PARSING — FIXED =====
-            var actRaw = (colMap.action !== undefined) ? String(r[colMap.action] || '').trim() : '';
-            var actVal = '';
-
-            if(!actRaw){
-                // No action column ya empty — default PUTAWAY
-                actVal = 'PUTAWAY';
-            } else {
-                var actUpper = actRaw.toUpperCase().replace(/[\s\-_]/g, '');
-
-                // Match known values — flexible
-                if(actUpper.indexOf('PUTAWAY') > -1 || actUpper.indexOf('PUTAW') > -1 || actUpper === 'PUT' || actUpper === 'PA' || actUpper.indexOf('INBOUND') > -1 || actUpper.indexOf('RECEIVE') > -1 || actUpper.indexOf('GRN') > -1){
-                    actVal = 'PUTAWAY';
-                } else if(actUpper.indexOf('PIV') > -1 || actUpper.indexOf('PHYSICAL') > -1 || actUpper.indexOf('INVENTORY') > -1 || actUpper.indexOf('VERIFICATION') > -1 || actUpper.indexOf('VERIFY') > -1 || actUpper === 'PV' || actUpper === 'IV'){
-                    actVal = 'PIV';
-                } else if(actUpper.indexOf('PICK') > -1){
-                    actVal = 'PICKING';
-                } else if(actUpper.indexOf('LOAD') > -1){
-                    actVal = 'LOADING';
-                } else if(actUpper.indexOf('TRANSFER') > -1 || actUpper.indexOf('MOVEMENT') > -1){
-                    actVal = 'TRANSFER';
-                } else if(actUpper.indexOf('RETURN') > -1){
-                    actVal = 'RETURN';
-                } else {
-                    // Unknown value — JO BHI USER NE LIKHA HAI WOHI SAVE KARO
-                    actVal = actRaw.toUpperCase().substring(0, 20);
-                    warnings.push('Row '+(k+1)+': Unknown action "'+actRaw+'" → saved as "'+actVal+'"');
-                }
-            }
-
-            console.log('Row', k, '- Action raw: "'+actRaw+'" → Parsed: "'+actVal+'"');
-
-            var rackVal = (colMap.rack !== undefined) ? String(r[colMap.rack] || '').trim() : '';
-            var matVal = (colMap.material !== undefined) ? String(r[colMap.material] || '').trim() : '';
-            var eanVal = (colMap.ean !== undefined) ? String(r[colMap.ean] || '').trim() : '';
-            var descVal = (colMap.description !== undefined) ? String(r[colMap.description] || '').trim() : '';
-            var dateVal = (colMap.date !== undefined) ? String(r[colMap.date] || '').trim() : today();
-            var packVal = (colMap.packing !== undefined) ? String(r[colMap.packing] || '').trim() : '';
-            var boxVal = (colMap.box !== undefined) ? String(r[colMap.box] || '').trim() : '';
-
-            // Fix date formats
-            if(dateVal && dateVal.indexOf('/') > -1){
-                var dp = dateVal.split('/');
-                if(dp.length === 3){
-                    var td = new Date(dp[2], dp[1]-1, dp[0]);
-                    if(!isNaN(td.getTime())) dateVal = td.toISOString().split('T')[0];
-                }
-            } else if(dateVal && dateVal.indexOf('-') === -1){
-                var ed = Number(dateVal);
-                if(!isNaN(ed) && ed > 40000 && ed < 60000){
-                    dateVal = new Date((ed-25569)*86400*1000).toISOString().split('T')[0];
-                }
-            }
-            if(!dateVal || dateVal === 'undefined' || dateVal === 'NaN-NaN-NaN') dateVal = today();
-
-            if(!rackVal){
-                warnings.push('Row '+(k+1)+': No rack — skipped');
-                continue;
-            }
-
-            _parsedRows.push({
-                date: dateVal,
-                rack: rackVal,
-                ean: eanVal,
-                material: matVal,
-                description: descVal,
-                quantity: finalQty,
-                packing: packVal,
-                box: boxVal,
-                action: actVal  // <== JO BHI PARSE HUA WOHI
-            });
-        }
-
-        console.log('=== PARSED RESULT ===');
-        console.log('Total parsed rows:', _parsedRows.length);
-        if(_parsedRows.length > 0) console.log('First row:', JSON.stringify(_parsedRows[0]));
-
-        if(_parsedRows.length === 0){
-            showToast('No valid rows! Check console (F12) for details.','error');
-            return;
-        }
-
-        // Build preview
-        var ph = '<div style="margin-top:12px">';
-        ph += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
-        ph += '<strong style="color:var(--accent)"><i class="bx bx-check-circle"></i> '+_parsedRows.length+' rows ready</strong>';
-        ph += '<span style="font-size:11px;color:var(--text-muted)">Columns: '+JSON.stringify(colMap)+'</span>';
-        ph += '</div>';
-
-        if(warnings.length > 0){
-            ph += '<div style="background:var(--warning-dim);padding:8px;border-radius:6px;margin-bottom:8px;font-size:11px;color:var(--warning);max-height:80px;overflow-y:auto">';
-            for(var w=0;w<Math.min(warnings.length,8);w++) ph += '• '+escapeHtml(warnings[w])+'<br>';
-            if(warnings.length>8) ph += '• ...+'+(warnings.length-8)+' more';
-            ph += '</div>';
-        }
-
-        // Action summary
-        var actSummary = {};
-        for(var as=0;as<_parsedRows.length;as++){
-            var av = _parsedRows[as].action;
-            if(!actSummary[av]) actSummary[av] = 0;
-            actSummary[av]++;
-        }
-        ph += '<div style="background:var(--info-dim);padding:8px 12px;border-radius:6px;margin-bottom:8px;font-size:12px;color:var(--info)">';
-        ph += '<strong>Action Summary:</strong> ';
-        var actParts = [];
-        for(var ak in actSummary) actParts.push(ak + ': ' + actSummary[ak]);
-        ph += actParts.join(' | ');
-        ph += '</div>';
-
-        ph += '<div class="table-wrapper" style="max-height:280px;overflow-y:auto"><table class="data-table"><thead><tr>';
-        ph += '<th>#</th><th>Date</th><th>Rack</th><th>EAN</th><th>Material</th><th style="color:var(--accent);font-size:14px">QTY</th><th>Pack</th><th>Box</th><th>Action</th>';
-        ph += '</tr></thead><tbody>';
-
-        for(var pi=0;pi<_parsedRows.length;pi++){
-            var pr = _parsedRows[pi];
-            var qc = pr.quantity > 0 ? 'color:var(--accent)' : 'color:var(--danger)';
-            var actBadge = 'badge-info';
-            if(pr.action === 'PUTAWAY') actBadge = 'badge-success';
-            else if(pr.action === 'PIV') actBadge = 'badge-warning';
-            else actBadge = 'badge-accent';
-
-            ph += '<tr>';
-            ph += '<td>'+(pi+1)+'</td>';
-            ph += '<td style="font-size:11px">'+escapeHtml(pr.date)+'</td>';
-            ph += '<td><strong>'+escapeHtml(pr.rack)+'</strong></td>';
-            ph += '<td style="font-size:11px">'+escapeHtml(pr.ean)+'</td>';
-            ph += '<td>'+escapeHtml(pr.material)+'</td>';
-            ph += '<td style="font-size:18px;font-weight:900;'+qc+'">'+pr.quantity+'</td>';
-            ph += '<td>'+escapeHtml(pr.packing)+'</td>';
-            ph += '<td>'+escapeHtml(pr.box)+'</td>';
-            ph += '<td><span class="badge '+actBadge+'">'+escapeHtml(pr.action)+'</span></td>';
-            ph += '</tr>';
-        }
-        ph += '</tbody></table></div></div>';
-
-        document.getElementById('_blPreview').innerHTML = ph;
-        document.getElementById('_blSaveBtn').disabled = false;
-        document.getElementById('_blManualCol').style.display = 'none';
-
-        showToast('Preview ready! Check Action column.','info');
-    }
-
-    // Also update the column mapping to catch more action column names
-    // Find this line in _blParseFile and replace the mapDef:
-
-    // --- SAVE ALL ---
-    window._blSaveAll = function() {
-        if(_parsedRows.length === 0){ showToast('Nothing to save','error'); return; }
-
-        var allLoc = DB.get('location_master');
-        var added = 0, updated = 0, totalQ = 0;
-
-        for(var i=0; i<_parsedRows.length; i++){
-            var row = _parsedRows[i];
-            var qty = Number(row.quantity); // EXPLICIT Number() call
-            if(isNaN(qty)) qty = 0;
-            totalQ += qty;
-
-            // Find existing
-            var found = -1;
-            for(var j=0; j<allLoc.length; j++){
-                if(allLoc[j].rack === row.rack && allLoc[j].ean === row.ean && row.ean !== ''){
-                    found = j; break;
-                }
-            }
-
-            if(found > -1){
-                var oldQ = Number(allLoc[found].quantity) || 0;
-                allLoc[found].quantity = oldQ + qty;
-                allLoc[found].date = row.date;
-                allLoc[found].material = row.material;
-                allLoc[found].description = row.description;
-                allLoc[found].packing = row.packing;
-                allLoc[found].box = row.box;
-                allLoc[found].action = row.action;
-                allLoc[found].user = APP.currentUser ? APP.currentUser.name : 'Admin';
-                allLoc[found].updatedAt = new Date().toISOString();
-                updated++;
-            } else {
-                allLoc.push({
-                    id: DB.uid(),
-                    date: row.date,
-                    rack: row.rack,
-                    ean: row.ean,
-                    material: row.material,
-                    description: row.description,
-                    quantity: qty,
-                    packing: row.packing,
-                    box: row.box,
-                    action: row.action,
-                    user: APP.currentUser ? APP.currentUser.name : 'Admin',
-                    dateTime: new Date().toISOString(),
-                    createdAt: new Date().toISOString()
-                });
-                added++;
-            }
-        }
-
-        // Save
-        DB.set('location_master', allLoc);
-
-        // VERIFY — Read back and check
-        var verify = DB.get('location_master');
-        var verifyQty = 0;
-        for(var v=0; v<verify.length; v++) verifyQty += (Number(verify[v].quantity) || 0);
-
-        console.log('=== AFTER SAVE VERIFICATION ===');
-        console.log('Total records now:', verify.length);
-        console.log('Total quantity in DB:', verifyQty);
-        console.log('Last 3 records:', verify.slice(-3));
-
-        logAction('Location Master', 'BULK_UPLOAD_FIXED', added+' added, '+updated+' updated. Total qty uploaded: '+totalQ+'. Verified total in DB: '+verifyQty);
-        showToast('DONE! '+added+' new, '+updated+' updated. Qty uploaded: '+totalQ+'. DB total: '+verifyQty, 'success');
-
-        _parsedRows = [];
-        closeModal();
-        renderLocationMaster();
-    }
-
-    console.log('[NUCLEAR FIX] Location Master bulk upload override loaded successfully.');
-
-})();
-// ============================================================
-// SESSION SECURITY FIX — Force login on every device
-// Paste at VERY END of script.js
-// ============================================================
-
-(function() {
-    'use strict';
-
-    // ===== PAGE LOAD — SESSION GUARD =====
-    function checkSessionOnLoad() {
-        var sessionStr = localStorage.getItem('wms_session');
-        
-        // No session found → show login
-        if (!sessionStr) {
-            showLoginPage();
-            return;
-        }
-
-        try {
-            var session = JSON.parse(sessionStr);
-            
-            // Check session timeout (30 min)
-            if (session.loginTime) {
-                var loginMs = new Date(session.loginTime).getTime();
-                var elapsed = Date.now() - loginMs;
-                if (elapsed > APP.SESSION_TIMEOUT) {
-                    console.log('[AUTH] Session expired on load');
-                    localStorage.removeItem('wms_session');
-                    showLoginPage();
-                    return;
-                }
-            }
-
-            // Check if user still exists in DB
-            var users = DB.get('users');
-            var foundUser = null;
-            for (var i = 0; i < users.length; i++) {
-                if (users[i].id === session.userId) {
-                    foundUser = users[i];
-                    break;
-                }
-            }
-
-            if (!foundUser) {
-                console.log('[AUTH] User not found in DB');
-                localStorage.removeItem('wms_session');
-                showLoginPage();
-                return;
-            }
-
-            // Valid session — show app
-            console.log('[AUTH] Valid session for:', foundUser.name);
-            APP.currentUser = foundUser;
-            APP.sessionStart = loginMs || Date.now();
-
-            // Pull latest data from Supabase THEN show app
-            showLoader();
-            document.getElementById('loginPage').style.display = 'none';
-            document.getElementById('mainApp').style.display = 'flex';
-
-            var pullPromise = (typeof pullAllServerData === 'function') ? pullAllServerData() : Promise.resolve();
-            
-            pullPromise.then(function() {
-                hideLoader();
-                finishAppInit(foundUser);
-            }).catch(function() {
-                hideLoader();
-                finishAppInit(foundUser);
-            });
-
-        } catch(e) {
-            console.error('[AUTH] Session parse error:', e);
-            localStorage.removeItem('wms_session');
-            showLoginPage();
-        }
-    }
-
-    function showLoginPage() {
-        document.getElementById('loginPage').style.display = 'flex';
-        document.getElementById('mainApp').style.display = 'none';
-        // Stop matrix animation if running
-        var canvas = document.getElementById('matrixCanvas');
-        if (canvas && !canvas.dataset.started) {
-            startMatrix();
-            canvas.dataset.started = '1';
-        }
-    }
-
-    function finishAppInit(user) {
-        document.getElementById('userAvatar').textContent = (user.name || 'A').charAt(0).toUpperCase();
-        document.getElementById('userName').textContent = user.name || 'Admin';
-        
-        if (typeof renderSidebar === 'function') renderSidebar();
-        if (typeof navigateTo === 'function') navigateTo('dashboard');
-        if (typeof updateNotifBadge === 'function') updateNotifBadge();
-        if (typeof initBottomNav === 'function') initBottomNav();
-        if (typeof updateBottomNav === 'function') updateBottomNav('dashboard');
-
-        // Session timeout checker
-        setInterval(function() {
-            if (APP.sessionStart && Date.now() - APP.sessionStart > APP.SESSION_TIMEOUT) {
-                showToast('Session expired! Please login again.', 'warning');
-                if (typeof logout === 'function') logout();
-            }
-        }, 30000);
-    }
-
-    // ===== OVERRIDE LOGOUT TO CLEAR PROPERLY =====
-    var _origLogout = window.logout;
-    window.logout = function() {
-        if (APP.currentUser) {
-            if (typeof logAction === 'function') {
-                logAction('Auth', 'LOGOUT', 'User ' + APP.currentUser.name + ' logged out');
-            }
-            var sessions = DB.get('user_sessions');
-            for (var i = sessions.length - 1; i >= 0; i--) {
-                if (sessions[i].userId === APP.currentUser.id && !sessions[i].logoutTime) {
-                    DB.update('user_sessions', sessions[i].id, { logoutTime: new Date().toISOString(), status: 'Logged Out' });
-                    break;
-                }
-            }
-        }
-        APP.currentUser = null;
-        APP.sessionStart = null;
-        localStorage.removeItem('wms_session');
-        showLoginPage();
-    };
-
-    // ===== RUN ON PAGE LOAD =====
-    // Wait for DOM + existing script to finish
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', function() {
-            setTimeout(checkSessionOnLoad, 300);
-        });
-    } else {
-        setTimeout(checkSessionOnLoad, 300);
-    }
-
-    console.log('[SESSION GUARD] Active — Login required on every device');
-
 })();

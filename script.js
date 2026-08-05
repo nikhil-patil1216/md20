@@ -854,128 +854,111 @@ function renderUnloadingScreen(){
     setHtml(h);
 }
 
-// --- Start Unload (Clean Scan-Only Screen) ---
+// --- Start Unload (Screenshot Format — Manual + Scan + Editable History) ---
 function startUnload(vehId,existingData){
     var v=DB.find('vehicles',vehId);if(!v)return;
     var invs=DB.filter('invoices',function(i){return i.vehicleId===vehId;});
 
-    // === SILENT BACKGROUND LOOKUP — Operator ko kuch nahi dikhega ===
-    var materialEntries=[];
-    var eanIndex={};
-    var matIndex={};
-
+    // === SILENT BACKGROUND LOOKUP — Operator ko KUCH nahi dikhega ===
+    var materialEntries=[],eanIndex={},matIndex={};
     invs.forEach(function(inv){
         DB.filter('invoice_materials',function(m){return m.invoiceId===inv.id;}).forEach(function(m){
             var ean=(m.ean||'').toUpperCase();
             var matUp=(m.material||'').toUpperCase();
-            // Same EAN across invoices? Merge
             var idx=eanIndex[ean];
-            // Different EAN same material name? Merge
             if(idx===undefined) idx=matIndex[matUp];
-
             if(idx!==undefined){
                 materialEntries[idx].totalQty+=m.qty;
                 materialEntries[idx].baseRemaining+=(m.qty-(m.unloadedQty||0));
                 if(!materialEntries[idx].ean&&ean){materialEntries[idx].ean=ean;eanIndex[ean]=idx;}
             }else{
                 idx=materialEntries.length;
-                materialEntries.push({
-                    material:m.material,
-                    description:m.description||'',
-                    ean:ean,
-                    uom:'PCS',
-                    totalQty:m.qty,
-                    baseRemaining:m.qty-(m.unloadedQty||0),
-                    sessionScanned:0
-                });
+                materialEntries.push({material:m.material,description:m.description||'',ean:ean,uom:'PCS',totalQty:m.qty,baseRemaining:m.qty-(m.unloadedQty||0),sessionScanned:0});
                 if(ean)eanIndex[ean]=idx;
                 if(matUp)matIndex[matUp]=idx;
             }
         });
     });
 
-    // Resume se scan history restore
+    // Resume se restore
     var scanHistory=[];
     if(existingData&&existingData.scanHistory){
         scanHistory=existingData.scanHistory||[];
         scanHistory.forEach(function(sh){
-            var idx=sh.ean?eanIndex[sh.ean]:undefined;
-            if(idx===undefined&&sh.material) idx=matIndex[sh.material.toUpperCase()];
-            if(idx!==undefined&&materialEntries[idx]) materialEntries[idx].sessionScanned+=sh.qty;
+            if(sh.matched&&sh.entryIdx!==undefined&&sh.entryIdx!==null&&materialEntries[sh.entryIdx]){
+                materialEntries[sh.entryIdx].sessionScanned+=sh.qty;
+            }
         });
     }
 
-    window._unloadData={
-        vehId:vehId,vehicleNo:v.vehicleNo,lrNo:v.lrNo,
-        materialEntries:materialEntries,eanIndex:eanIndex,matIndex:matIndex,
-        scanHistory:scanHistory,currentMatchIdx:null
-    };
+    window._unloadData={vehId:vehId,vehicleNo:v.vehicleNo,lrNo:v.lrNo,materialEntries:materialEntries,eanIndex:eanIndex,matIndex:matIndex,scanHistory:scanHistory,currentMatchIdx:null,editingIdx:-1};
 
-    var isResume=scanHistory.length>0;
-
-    // === BUILD CLEAN OPERATOR UI ===
+    // === BUILD UI ===
     var h='';
 
-    // Top bar — sirf vehicle info, koi expected data nahi
-    h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;flex-wrap:wrap;gap:8px">';
+    // Top bar
+    h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;flex-wrap:wrap;gap:8px">';
     h+='<div><strong style="color:var(--accent);font-size:20px;font-family:var(--font-display);letter-spacing:1.5px">'+esc(v.vehicleNo)+'</strong>';
-    h+=' <span style="color:var(--text-muted);font-size:12px;margin-left:6px">LR: '+esc(v.lrNo||'-')+'</span></div>';
-    if(isResume) h+='<span class="badge badge-info" style="font-size:11px"><i class="bx bx-refresh"></i> Resumed — '+scanHistory.length+' scans</span>';
-    else h+='<div style="font-size:11px;color:var(--text-muted)">Scans: <strong id="ulScanCount" style="color:var(--accent);font-size:14px">0</strong></div>';
+    h+=' <span style="color:var(--text-muted);font-size:12px;margin-left:6px">(LR: '+esc(v.lrNo||'-')+')</span></div>';
+    h+='<div style="font-size:11px;color:var(--text-muted)">Scans: <strong id="ulScanCount" style="color:var(--accent);font-size:14px">'+scanHistory.length+'</strong></div>';
     h+='</div>';
 
-    // EAN Scan Field
-    h+='<div style="margin-bottom:4px">';
-    h+='<label style="font-size:10px;font-weight:800;color:var(--text-muted);text-transform:uppercase;letter-spacing:1.5px;display:block;margin-bottom:5px"><i class="bx bx-barcode" style="margin-right:4px"></i>Scan EAN / Enter EAN</label>';
+    // SCAN EAN / ENTER EAN
+    h+='<div style="margin-bottom:6px">';
+    h+='<label style="font-size:10px;font-weight:800;color:var(--text-muted);text-transform:uppercase;letter-spacing:1.5px;display:block;margin-bottom:6px"><i class="bx bx-barcode" style="margin-right:4px"></i>SCAN EAN / ENTER EAN</label>';
     h+='<div class="search-box" style="max-width:100%;border-width:2px"><i class="bx bx-barcode"></i>';
     h+='<input type="text" id="ulScanEan" placeholder="Scan ya type karein..." style="font-family:var(--font-display);font-size:16px;letter-spacing:1.5px;padding:14px 14px 14px 42px"></div>';
     h+='</div>';
 
-    // OR Divider
-    h+='<div style="display:flex;align-items:center;gap:12px;margin:14px 0">';
+    // OR
+    h+='<div style="display:flex;align-items:center;gap:12px;margin:16px 0">';
     h+='<div style="flex:1;height:1px;background:var(--border)"></div>';
     h+='<span style="color:var(--text-muted);font-size:11px;font-weight:800;letter-spacing:3px">OR</span>';
     h+='<div style="flex:1;height:1px;background:var(--border)"></div>';
     h+='</div>';
 
-    // Material Code Field
-    h+='<div style="margin-bottom:18px">';
-    h+='<label style="font-size:10px;font-weight:800;color:var(--text-muted);text-transform:uppercase;letter-spacing:1.5px;display:block;margin-bottom:5px"><i class="bx bx-cube" style="margin-right:4px"></i>Enter Material Code</label>';
+    // ENTER MATERIAL CODE
+    h+='<div style="margin-bottom:20px">';
+    h+='<label style="font-size:10px;font-weight:800;color:var(--text-muted);text-transform:uppercase;letter-spacing:1.5px;display:block;margin-bottom:6px"><i class="bx bx-cube" style="margin-right:4px"></i>ENTER MATERIAL CODE</label>';
     h+='<div class="search-box" style="max-width:100%;border-width:2px"><i class="bx bx-cube"></i>';
     h+='<input type="text" id="ulScanMat" placeholder="Material code type karein..." style="font-size:14px;text-transform:uppercase;padding:14px 14px 14px 42px"></div>';
     h+='</div>';
 
-    // Auto-Fill Section (Read-Only)
-    h+='<div id="ulAutoBox" style="background:var(--bg-secondary);border-radius:var(--radius);padding:14px;margin-bottom:16px;border:2px solid var(--border);transition:border-color .3s">';
-    h+='<div style="font-size:9px;font-weight:800;color:var(--text-muted);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:8px"><i class="bx bx-info-circle" style="margin-right:3px"></i>Material Details (Auto Fill)</div>';
-    h+='<div class="form-row" style="margin-bottom:8px">';
-    h+='<div class="form-group" style="margin-bottom:0"><label style="font-size:9px;color:var(--text-muted)">Material</label><div class="form-input" id="ulAutoMat" style="background:var(--bg-card);color:var(--text-muted);font-size:14px;font-weight:700;padding:10px 12px;transition:all .3s">—</div></div>';
-    h+='<div class="form-group" style="flex:2;margin-bottom:0"><label style="font-size:9px;color:var(--text-muted)">Material Description</label><div class="form-input" id="ulAutoDesc" style="background:var(--bg-card);color:var(--text-muted);font-size:13px;padding:10px 12px;transition:all .3s">—</div></div>';
+    // MATERIAL DETAILS (AUTO FILL) — INPUTS jo auto-fill bhi honge aur manual bhi
+    h+='<div style="background:var(--bg-secondary);border-radius:var(--radius);padding:16px;margin-bottom:16px;border:2px solid var(--border);transition:border-color .3s" id="ulAutoBox">';
+    h+='<div style="font-size:9px;font-weight:800;color:var(--text-muted);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:10px"><i class="bx bx-info-circle" style="margin-right:3px"></i>MATERIAL DETAILS (AUTO FILL)</div>';
+    h+='<div class="form-row" style="margin-bottom:10px">';
+    h+='<div class="form-group" style="margin-bottom:0"><label style="font-size:9px;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px">Material</label>';
+    h+='<input type="text" id="ulAutoMat" class="form-input" placeholder="—" style="background:var(--bg-card);color:var(--text-muted);font-size:14px;font-weight:700;padding:10px 12px;transition:all .3s"></div>';
+    h+='<div class="form-group" style="flex:2;margin-bottom:0"><label style="font-size:9px;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px">Material Description</label>';
+    h+='<input type="text" id="ulAutoDesc" class="form-input" placeholder="—" style="background:var(--bg-card);color:var(--text-muted);font-size:13px;padding:10px 12px;transition:all .3s"></div>';
     h+='</div>';
     h+='<div class="form-row" style="margin-bottom:0">';
-    h+='<div class="form-group" style="margin-bottom:0"><label style="font-size:9px;color:var(--text-muted)">UOM</label><div class="form-input" id="ulAutoUom" style="background:var(--bg-card);color:var(--text-muted);font-size:14px;font-weight:600;padding:10px 12px;transition:all .3s">—</div></div>';
-    h+='<div class="form-group" style="margin-bottom:0"><label style="font-size:9px;color:var(--text-muted)">Remaining Qty</label><div class="form-input" id="ulAutoRem" style="background:var(--bg-card);color:var(--text-muted);font-size:16px;font-weight:800;padding:10px 12px;font-family:var(--font-display);transition:all .3s">—</div></div>';
-    h+='</div>';
+    h+='<div class="form-group" style="margin-bottom:0;max-width:140px"><label style="font-size:9px;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px">UOM</label>';
+    h+='<input type="text" id="ulAutoUom" class="form-input" placeholder="—" style="background:var(--bg-card);color:var(--text-muted);font-size:14px;font-weight:600;padding:10px 12px;transition:all .3s"></div>';
+    h+='<div class="form-group" style="margin-bottom:0"><label style="font-size:9px;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px">Remaining Qty</label>';
+    h+='<div class="form-input" id="ulAutoRem" style="background:var(--bg-card);color:var(--text-muted);font-size:18px;font-weight:900;padding:10px 12px;font-family:var(--font-display);transition:all .3s">—</div></div>';
+    h+='</div></div>';
+
+    // SCAN QTY / MANUAL QTY
+    h+='<div style="margin-bottom:14px">';
+    h+='<label style="font-size:10px;font-weight:800;color:var(--text-muted);text-transform:uppercase;letter-spacing:1.5px;display:block;margin-bottom:6px"><i class="bx bx-list-ol" style="margin-right:4px"></i>SCAN QTY / MANUAL QTY</label>';
+    h+='<input type="number" id="ulScanQty" class="form-input" value="1" min="1" style="text-align:center;font-size:22px;font-weight:900;font-family:var(--font-display);letter-spacing:2px;padding:14px;max-width:200px">';
     h+='</div>';
 
-    // Qty Field
-    h+='<div style="margin-bottom:12px">';
-    h+='<label style="font-size:10px;font-weight:800;color:var(--text-muted);text-transform:uppercase;letter-spacing:1.5px;display:block;margin-bottom:5px"><i class="bx bx-list-ol" style="margin-right:4px"></i>Scan Qty / Manual Qty</label>';
-    h+='<input type="number" id="ulScanQty" class="form-input" value="1" min="1" style="text-align:center;font-size:20px;font-weight:800;font-family:var(--font-display);letter-spacing:2px;padding:14px;max-width:200px">';
-    h+='</div>';
+    // SUBMIT
+    h+='<button class="btn btn-primary" id="ulBtnSubmit" style="width:100%;padding:16px;font-size:16px;font-weight:800;letter-spacing:1px;margin-bottom:10px"><i class="bx bx-check-circle"></i> SUBMIT</button>';
 
-    // Submit Button — Full Width, Prominent
-    h+='<button class="btn btn-primary" id="ulBtnSubmit" disabled style="width:100%;padding:16px;font-size:16px;font-weight:800;letter-spacing:1px;margin-bottom:10px;opacity:.4;transition:all .3s"><i class="bx bx-check-circle"></i> SUBMIT</button>';
-
-    // Scanner Button
-    h+='<button class="btn btn-glass" id="ulBtnScanner" style="width:100%;padding:12px;font-size:13px;margin-bottom:20px"><i class="bx bx-qr"></i> Open Scanner</button>';
+    // Scanner
+    h+='<button class="btn btn-glass" id="ulBtnScanner" style="width:100%;padding:12px;font-size:13px;margin-bottom:22px"><i class="bx bx-qr"></i> Open Scanner</button>';
 
     // Recent Scan History
     h+='<div style="border-top:2px solid var(--border);padding-top:14px">';
-    h+='<div style="font-size:11px;font-weight:800;color:var(--text-muted);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:10px"><i class="bx bx-history" style="margin-right:4px"></i>Recent Scan History</div>';
-    h+='<div id="ulScanHistory" style="max-height:260px;overflow-y:auto"></div>';
+    h+='<div style="font-size:11px;font-weight:800;color:var(--text-muted);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:10px"><i class="bx bx-history" style="margin-right:4px"></i>RECENT SCAN HISTORY</div>';
+    h+='<div id="ulScanHistory" style="max-height:320px;overflow-y:auto"></div>';
     h+='</div>';
 
+    // Footer
     var footer='';
     footer+='<button class="btn btn-warning" id="ulBtnSave"><i class="bx bx-save"></i> SAVE & BACK</button>';
     footer+='<button class="btn btn-glass" onclick="closeModal()">CANCEL</button>';
@@ -984,236 +967,206 @@ function startUnload(vehId,existingData){
     showModal('Unloading — '+v.vehicleNo,h,'xl',footer);
     renderScanHistory();
 
-    // === SAB EVENT LISTENERS YAHAN ===
+    // === EVENT LISTENERS ===
     setTimeout(function(){
         var el;
-
-        // EAN input — Enter se lookup
         el=document.getElementById('ulScanEan');
-        if(el){
-            el.addEventListener('keydown',function(e){
-                if(e.key==='Enter'){e.preventDefault();e.stopPropagation();doLookupScan('ean');}
-            });
-            el.addEventListener('input',function(){clearAutoFill();});
-        }
-
-        // Material input — Enter se lookup
+        if(el)el.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();e.stopPropagation();doLookupScan('ean');}});
         el=document.getElementById('ulScanMat');
-        if(el){
-            el.addEventListener('keydown',function(e){
-                if(e.key==='Enter'){e.preventDefault();e.stopPropagation();doLookupScan('mat');}
-            });
-            el.addEventListener('input',function(){clearAutoFill();});
-        }
-
-        // Submit button
+        if(el)el.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();e.stopPropagation();doLookupScan('mat');}});
         el=document.getElementById('ulBtnSubmit');
         if(el)el.addEventListener('click',function(){doSubmitScan();});
-
-        // Qty field — Enter se submit
         el=document.getElementById('ulScanQty');
-        if(el)el.addEventListener('keydown',function(e){
-            if(e.key==='Enter'){e.preventDefault();e.stopPropagation();doSubmitScan();}
-        });
-
-        // Scanner button
+        if(el)el.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();e.stopPropagation();doSubmitScan();}});
         el=document.getElementById('ulBtnScanner');
-        if(el)el.addEventListener('click',function(){
-            openScanner(function(code){
-                var inp=document.getElementById('ulScanEan');
-                if(inp)inp.value=code;
-                doLookupScan('ean');
-            });
-        });
-
-        // Save partial
+        if(el)el.addEventListener('click',function(){openScanner(function(code){var inp=document.getElementById('ulScanEan');if(inp)inp.value=code;doLookupScan('ean');});});
         el=document.getElementById('ulBtnSave');
         if(el)el.addEventListener('click',function(){savePartialUnload();});
-
-        // Finish unloading
         el=document.getElementById('ulBtnFinish');
         if(el)el.addEventListener('click',function(){finishUnloading();});
-
-        // Focus EAN input
-        var eanInp=document.getElementById('ulScanEan');
-        if(eanInp)eanInp.focus();
+        var eanInp=document.getElementById('ulScanEan');if(eanInp)eanInp.focus();
     },250);
 }
 
-// --- Lookup: EAN ya Material Code se silent search ---
+// --- Lookup: Silent background search ---
 function doLookupScan(type){
     var ud=window._unloadData;if(!ud)return;
     var val='';
     if(type==='ean') val=(document.getElementById('ulScanEan').value||'').trim().toUpperCase();
     else val=(document.getElementById('ulScanMat').value||'').trim().toUpperCase();
-
     if(!val){showToast('EAN ya Material Code dalein','error');return;}
 
-    // Priority 1: EAN match
     var matchIdx=ud.eanIndex[val];
-    // Priority 2: Material Code match (fallback agar EAN nahi mila)
     if(matchIdx===undefined) matchIdx=ud.matIndex[val];
 
     if(matchIdx!==undefined&&ud.materialEntries[matchIdx]){
         var entry=ud.materialEntries[matchIdx];
         ud.currentMatchIdx=matchIdx;
 
-        // === AUTO FILL — Read Only ===
         var matEl=document.getElementById('ulAutoMat');
         var descEl=document.getElementById('ulAutoDesc');
         var uomEl=document.getElementById('ulAutoUom');
         var remEl=document.getElementById('ulAutoRem');
         var boxEl=document.getElementById('ulAutoBox');
 
-        matEl.textContent=entry.material;
-        matEl.style.color='var(--accent)';
-        matEl.style.background='var(--accent-dim)';
-
-        descEl.textContent=entry.description;
-        descEl.style.color='var(--text-primary)';
-        descEl.style.background='var(--accent-dim)';
-
-        uomEl.textContent=entry.uom;
-        uomEl.style.color='var(--accent)';
-        uomEl.style.background='var(--accent-dim)';
+        matEl.value=entry.material;matEl.style.color='var(--accent)';matEl.style.background='var(--accent-dim)';
+        descEl.value=entry.description;descEl.style.color='var(--text-primary)';descEl.style.background='var(--accent-dim)';
+        uomEl.value=entry.uom;uomEl.style.color='var(--accent)';uomEl.style.background='var(--accent-dim)';
 
         var rem=entry.baseRemaining-entry.sessionScanned;
-        if(rem>0){
-            remEl.textContent=rem;
-            remEl.style.color='var(--accent)';
-            remEl.style.background='var(--accent-dim)';
-        }else if(rem===0){
-            remEl.textContent='COMPLETE';
-            remEl.style.color='var(--success)';
-            remEl.style.background='rgba(0,255,136,.1)';
-        }else{
-            remEl.textContent='EXCESS (+'+Math.abs(rem)+')';
-            remEl.style.color='var(--danger)';
-            remEl.style.background='rgba(255,107,107,.1)';
-        }
-
+        if(rem>0){remEl.textContent=rem;remEl.style.color='var(--accent)';remEl.style.background='var(--accent-dim)';}
+        else if(rem===0){remEl.textContent='COMPLETE';remEl.style.color='var(--success)';remEl.style.background='rgba(0,255,136,.1)';}
+        else{remEl.textContent='EXCESS (+'+Math.abs(rem)+')';remEl.style.color='var(--danger)';remEl.style.background='rgba(255,107,107,.1)';}
         boxEl.style.borderColor='var(--accent)';
 
-        // Enable Submit button
-        var subBtn=document.getElementById('ulBtnSubmit');
-        subBtn.disabled=false;
-        subBtn.style.opacity='1';
-
-        // Qty field pe focus
-        var qtyEl=document.getElementById('ulScanQty');
-        qtyEl.focus();
-        qtyEl.select();
+        document.getElementById('ulScanQty').focus();
+        document.getElementById('ulScanQty').select();
     }else{
-        // === NOT FOUND — Error Popup ===
         ud.currentMatchIdx=null;
         clearAutoFill();
         showToast('Material Not Found in Any Invoice of This Vehicle.','error');
-
-        // Input field red flash
         var inp=type==='ean'?document.getElementById('ulScanEan'):document.getElementById('ulScanMat');
-        if(inp){
-            inp.style.borderColor='var(--danger)';
-            inp.style.boxShadow='0 0 12px rgba(255,107,107,.4)';
-            setTimeout(function(){inp.style.borderColor='';inp.style.boxShadow='';},1000);
-        }
+        if(inp){inp.style.borderColor='var(--danger)';inp.style.boxShadow='0 0 12px rgba(255,107,107,.4)';setTimeout(function(){inp.style.borderColor='';inp.style.boxShadow='';},1000);}
+        document.getElementById('ulAutoMat').focus();
     }
 }
 
-// --- Auto Fill Fields Clear ---
+// --- Clear auto-fill ---
 function clearAutoFill(){
     var ud=window._unloadData;if(ud)ud.currentMatchIdx=null;
-    var ids=['ulAutoMat','ulAutoDesc','ulAutoUom','ulAutoRem'];
-    ids.forEach(function(id){
-        var el=document.getElementById(id);
-        if(el){el.textContent='—';el.style.color='var(--text-muted)';el.style.background='var(--bg-card)';}
+    ['ulAutoMat','ulAutoDesc','ulAutoUom'].forEach(function(id){
+        var el=document.getElementById(id);if(el){el.value='';el.style.color='var(--text-muted)';el.style.background='var(--bg-card)';}
     });
-    var box=document.getElementById('ulAutoBox');
-    if(box)box.style.borderColor='var(--border)';
-    var subBtn=document.getElementById('ulBtnSubmit');
-    if(subBtn){subBtn.disabled=true;subBtn.style.opacity='.4';}
+    var remEl=document.getElementById('ulAutoRem');if(remEl){remEl.textContent='—';remEl.style.color='var(--text-muted)';remEl.style.background='var(--bg-card)';}
+    var box=document.getElementById('ulAutoBox');if(box)box.style.borderColor='var(--border)';
 }
 
-// --- Submit Scan Entry ---
+// --- Submit scan ---
 function doSubmitScan(){
     var ud=window._unloadData;if(!ud)return;
-    if(ud.currentMatchIdx===null){showToast('Pehle material scan karein','error');return;}
+    var eanVal=(document.getElementById('ulScanEan').value||'').trim().toUpperCase();
+    var matVal=(document.getElementById('ulAutoMat').value||'').trim();
+    var descVal=(document.getElementById('ulAutoDesc').value||'').trim();
+    var uomVal=(document.getElementById('ulAutoUom').value||'').trim()||'PCS';
+    var qtyVal=parseInt(document.getElementById('ulScanQty').value)||0;
 
-    var qty=parseInt(document.getElementById('ulScanQty').value)||1;
-    if(qty<1){showToast('Minimum 1 qty dalein','error');return;}
+    if(!matVal){showToast('Material name dalein','error');document.getElementById('ulAutoMat').focus();return;}
+    if(qtyVal<1){showToast('Minimum 1 qty dalein','error');document.getElementById('ulScanQty').focus();return;}
 
-    var entry=ud.materialEntries[ud.currentMatchIdx];
-    var remBefore=entry.baseRemaining-entry.sessionScanned;
+    var matched=ud.currentMatchIdx!==null;
+    var entryIdx=ud.currentMatchIdx;
 
-    // Scan history mein record karo
-    ud.scanHistory.push({
-        ts:new Date().toISOString(),
-        material:entry.material,
-        ean:entry.ean,
-        description:entry.description,
-        qty:qty,
-        remainingBefore:remBefore,
-        remainingAfter:remBefore-qty
-    });
+    ud.scanHistory.push({ts:new Date().toISOString(),ean:eanVal,material:matVal,description:descVal,uom:uomVal,qty:qtyVal,matched:matched,entryIdx:entryIdx});
 
-    // Remaining qty reduce karo
-    entry.sessionScanned+=qty;
+    if(matched&&entryIdx!==null&&ud.materialEntries[entryIdx]) ud.materialEntries[entryIdx].sessionScanned+=qtyVal;
 
-    // Scan count update
-    var countEl=document.getElementById('ulScanCount');
-    if(countEl)countEl.textContent=ud.scanHistory.length;
+    var countEl=document.getElementById('ulScanCount');if(countEl)countEl.textContent=ud.scanHistory.length;
 
-    // Toast with status
-    var remAfter=remBefore-qty;
-    if(remAfter>0) showToast(entry.material+' — '+qty+' unloaded (Remaining: '+remAfter+')','success');
-    else if(remAfter===0) showToast(entry.material+' — '+qty+' unloaded (COMPLETE!)','success');
-    else showToast(entry.material+' — '+qty+' unloaded (EXCESS: +'+Math.abs(remAfter)+')','warning');
+    if(matched) showToast(matVal+' — '+qtyVal+' '+uomVal+' submitted','success');
+    else showToast(matVal+' — '+qtyVal+' '+uomVal+' (Manual Entry)','warning');
 
-    // Inputs clear karo — next scan ke liye ready
     document.getElementById('ulScanEan').value='';
     document.getElementById('ulScanMat').value='';
     document.getElementById('ulScanQty').value='1';
     clearAutoFill();
-
-    // History re-render
     renderScanHistory();
-
-    // EAN input pe wapas focus
-    var eanInp=document.getElementById('ulScanEan');
-    if(eanInp)eanInp.focus();
+    var eanInp=document.getElementById('ulScanEan');if(eanInp)eanInp.focus();
 }
 
-// --- Render Scan History ---
+// --- Render scan history with edit/delete ---
 function renderScanHistory(){
     var ud=window._unloadData;if(!ud)return;
     var container=document.getElementById('ulScanHistory');if(!container)return;
 
     if(!ud.scanHistory.length){
-        container.innerHTML='<div style="text-align:center;color:var(--text-muted);padding:28px 12px;font-size:12px"><i class="bx bx-inbox" style="font-size:28px;display:block;margin-bottom:8px;opacity:.5"></i>No scans yet<br><span style="font-size:10px">EAN scan karein ya Material Code dalein</span></div>';
+        container.innerHTML='<div style="text-align:center;color:var(--text-muted);padding:30px 12px;font-size:12px"><i class="bx bx-inbox" style="font-size:30px;display:block;margin-bottom:8px;opacity:.4"></i>No scans yet<br><span style="font-size:10px">EAN scan karein ya manually dalein</span></div>';
         return;
     }
 
     var h='';
-    // Newest first
     for(var i=ud.scanHistory.length-1;i>=0;i--){
         var s=ud.scanHistory[i];
-        var remColor,remText,bgColor;
-        if(s.remainingAfter>0){remColor='var(--accent)';remText='Rem: '+s.remainingAfter;bgColor='var(--accent-dim)';}
-        else if(s.remainingAfter===0){remColor='var(--success)';remText='DONE';bgColor='rgba(0,255,136,.08)';}
-        else{remColor='var(--danger)';remText='EXCESS';bgColor='rgba(255,107,107,.08)';}
+        if(ud.editingIdx===i){
+            // === EDIT MODE ===
+            h+='<div style="padding:12px;background:var(--bg-secondary);border:2px solid var(--accent);border-radius:var(--radius);margin-bottom:6px">';
+            h+='<div style="font-size:8px;font-weight:800;color:var(--accent);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px"><i class="bx bx-pencil"></i> Edit Entry</div>';
+            h+='<div class="form-row" style="margin-bottom:8px">';
+            h+='<div class="form-group" style="margin-bottom:0"><label style="font-size:8px;color:var(--text-muted)">Material</label><input type="text" class="form-input" id="edM_'+i+'" value="'+esc(s.material)+'" style="font-size:12px;padding:6px 8px"></div>';
+            h+='<div class="form-group" style="flex:2;margin-bottom:0"><label style="font-size:8px;color:var(--text-muted)">Description</label><input type="text" class="form-input" id="edD_'+i+'" value="'+esc(s.description)+'" style="font-size:12px;padding:6px 8px"></div>';
+            h+='</div>';
+            h+='<div class="form-row" style="margin-bottom:10px">';
+            h+='<div class="form-group" style="margin-bottom:0;max-width:100px"><label style="font-size:8px;color:var(--text-muted)">Qty</label><input type="number" class="form-input" id="edQ_'+i+'" value="'+s.qty+'" min="1" style="font-size:16px;font-weight:800;text-align:center;padding:6px 8px;font-family:var(--font-display)"></div>';
+            h+='<div class="form-group" style="margin-bottom:0;max-width:80px"><label style="font-size:8px;color:var(--text-muted)">UOM</label><input type="text" class="form-input" id="edU_'+i+'" value="'+esc(s.uom)+'" style="font-size:12px;padding:6px 8px;text-transform:uppercase"></div>';
+            h+='</div>';
+            h+='<div style="display:flex;gap:6px;justify-content:flex-end">';
+            h+='<button class="btn btn-glass btn-sm" id="edC_'+i+'"><i class="bx bx-x"></i> Cancel</button>';
+            h+='<button class="btn btn-primary btn-sm" id="edS_'+i+'"><i class="bx bx-check"></i> Save</button>';
+            h+='</div></div>';
+        }else{
+            // === NORMAL MODE ===
+            var bc=s.matched?'var(--accent)':'var(--danger)';
+            var bg=s.matched?'var(--accent-dim)':'rgba(255,107,107,.06)';
+            var ic=s.matched?'var(--accent)':'var(--danger)';
+            var ix=s.matched?'bx-check':'bx-x';
 
-        h+='<div style="display:flex;align-items:center;gap:10px;padding:10px 8px;border-bottom:1px solid var(--border);background:'+bgColor+';border-radius:var(--radius-sm);margin-bottom:4px">';
-        h+='<div style="width:32px;height:32px;border-radius:50%;background:var(--accent-dim);display:flex;align-items:center;justify-content:center;flex-shrink:0;border:2px solid var(--accent)"><i class="bx bx-check" style="color:var(--accent);font-size:16px"></i></div>';
-        h+='<div style="flex:1;min-width:0">';
-        h+='<div style="font-weight:700;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text-primary)">'+esc(s.material)+'</div>';
-        h+='<div style="font-size:10px;color:var(--text-muted);margin-top:2px">'+esc(s.ean)+' &bull; '+fmtDT(s.ts)+'</div>';
-        h+='</div>';
-        h+='<div style="text-align:right;flex-shrink:0;min-width:60px">';
-        h+='<div style="font-weight:900;color:var(--accent);font-size:18px;font-family:var(--font-display);line-height:1">-'+s.qty+'</div>';
-        h+='<div style="font-size:9px;color:'+remColor+';font-weight:700;margin-top:2px">'+remText+'</div>';
-        h+='</div>';
-        h+='</div>';
+            h+='<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:'+bg+';border:1px solid '+bc+';border-radius:var(--radius);margin-bottom:6px">';
+            h+='<div style="width:34px;height:34px;border-radius:50%;background:'+bg+';display:flex;align-items:center;justify-content:center;flex-shrink:0;border:2px solid '+ic+'"><i class="bx '+ix+'" style="color:'+ic+';font-size:16px"></i></div>';
+            h+='<div style="flex:1;min-width:0">';
+            h+='<div style="font-weight:700;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text-primary)">'+esc(s.material)+'</div>';
+            if(s.description)h+='<div style="font-size:10px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px">'+esc(s.description)+'</div>';
+            h+='<div style="font-size:9px;color:var(--text-muted);margin-top:2px">'+esc(s.ean||'Manual')+' &bull; '+fmtDT(s.ts)+'</div>';
+            h+='</div>';
+            h+='<div style="text-align:right;flex-shrink:0;display:flex;align-items:center;gap:8px">';
+            h+='<div><div style="font-weight:900;color:var(--accent);font-size:20px;font-family:var(--font-display);line-height:1">-'+s.qty+'</div>';
+            h+='<div style="font-size:9px;color:var(--text-muted)">'+esc(s.uom)+'</div></div>';
+            h+='<div style="display:flex;flex-direction:column;gap:3px">';
+            h+='<button class="btn btn-glass btn-sm" id="ebE_'+i+'" style="width:28px;height:28px;padding:0;min-width:28px"><i class="bx bx-pencil" style="font-size:12px"></i></button>';
+            h+='<button class="btn btn-danger btn-sm" id="ebD_'+i+'" style="width:28px;height:28px;padding:0;min-width:28px"><i class="bx bx-trash" style="font-size:12px"></i></button>';
+            h+='</div></div></div>';
+        }
     }
     container.innerHTML=h;
+
+    // Listeners
+    ud.scanHistory.forEach(function(s,i){
+        var el;
+        el=document.getElementById('ebE_'+i);if(el)el.addEventListener('click',function(){ud.editingIdx=i;renderScanHistory();});
+        el=document.getElementById('ebD_'+i);if(el)el.addEventListener('click',function(){deleteScanEntry(i);});
+        el=document.getElementById('edS_'+i);if(el)el.addEventListener('click',function(){saveEditScan(i);});
+        el=document.getElementById('edC_'+i);if(el)el.addEventListener('click',function(){ud.editingIdx=-1;renderScanHistory();});
+        ['edM_'+i,'edD_'+i,'edQ_'+i,'edU_'+i].forEach(function(fid){
+            var fe=document.getElementById(fid);if(fe)fe.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();saveEditScan(i);}});
+        });
+    });
+}
+
+// --- Delete scan entry ---
+function deleteScanEntry(idx){
+    var ud=window._unloadData;if(!ud)return;
+    var s=ud.scanHistory[idx];if(!s)return;
+    if(s.matched&&s.entryIdx!==null&&s.entryIdx!==undefined&&ud.materialEntries[s.entryIdx]){
+        ud.materialEntries[s.entryIdx].sessionScanned=Math.max(0,ud.materialEntries[s.entryIdx].sessionScanned-s.qty);
+    }
+    ud.scanHistory.splice(idx,1);ud.editingIdx=-1;
+    var countEl=document.getElementById('ulScanCount');if(countEl)countEl.textContent=ud.scanHistory.length;
+    renderScanHistory();showToast('Entry removed','warning');
+}
+
+// --- Save edited scan entry ---
+function saveEditScan(idx){
+    var ud=window._unloadData;if(!ud)return;
+    var s=ud.scanHistory[idx];if(!s)return;
+    var newM=(document.getElementById('edM_'+idx).value||'').trim();
+    var newD=(document.getElementById('edD_'+idx).value||'').trim();
+    var newQ=parseInt(document.getElementById('edQ_'+idx).value)||0;
+    var newU=(document.getElementById('edU_'+idx).value||'').trim()||'PCS';
+    if(!newM){showToast('Material name required','error');return;}
+    if(newQ<1){showToast('Minimum 1 qty','error');return;}
+    if(s.matched&&s.entryIdx!==null&&s.entryIdx!==undefined&&ud.materialEntries[s.entryIdx]){
+        ud.materialEntries[s.entryIdx].sessionScanned=Math.max(0,ud.materialEntries[s.entryIdx].sessionScanned-s.qty+newQ);
+    }
+    s.material=newM;s.description=newD;s.qty=newQ;s.uom=newU;
+    ud.editingIdx=-1;renderScanHistory();showToast('Entry updated','success');
 }
 
 // --- Resume Partial ---
@@ -1227,90 +1180,48 @@ function resumePartialUnload(vehId){
 function savePartialUnload(){
     var ud=window._unloadData;if(!ud)return;
     if(!ud.scanHistory.length){showToast('Kam se kam ek scan karein','error');return;}
-
+    ud.editingIdx=-1;
     var existing=DB.filter('partial_unloads',function(p){return p.vehicleId===ud.vehId;});
-    if(existing.length>0){
-        DB.update('partial_unloads',existing[0].id,{scanHistory:ud.scanHistory,savedAt:new Date().toISOString(),savedBy:APP.currentUser?APP.currentUser.name:'Unknown'});
-    }else{
-        DB.add('partial_unloads',{vehicleId:ud.vehId,vehicleNo:ud.vehicleNo,lrNo:ud.lrNo,scanHistory:ud.scanHistory,savedAt:new Date().toISOString(),savedBy:APP.currentUser?APP.currentUser.name:'Unknown'});
-    }
+    if(existing.length>0) DB.update('partial_unloads',existing[0].id,{scanHistory:ud.scanHistory,savedAt:new Date().toISOString(),savedBy:APP.currentUser?APP.currentUser.name:'Unknown'});
+    else DB.add('partial_unloads',{vehicleId:ud.vehId,vehicleNo:ud.vehicleNo,lrNo:ud.lrNo,scanHistory:ud.scanHistory,savedAt:new Date().toISOString(),savedBy:APP.currentUser?APP.currentUser.name:'Unknown'});
     DB.update('vehicles',ud.vehId,{status:'Partial Unload'});
     logAction('Unloading','PARTIAL_SAVE','Partial saved for '+ud.vehicleNo+' ('+ud.scanHistory.length+' scans)');
-    showToast('Progress saved! Baad mein RESUME karo','success');
-    closeModal();renderUnloadingScreen();
+    showToast('Progress saved!','success');closeModal();renderUnloadingScreen();
 }
 
 // --- Discard Partial ---
 function discardPartialUnload(vehId){
     if(!confirm('Partial data delete ho jayega. Sure?'))return;
     DB.filter('partial_unloads',function(p){return p.vehicleId===vehId;}).forEach(function(p){DB.remove('partial_unloads',p.id);});
-    DB.update('vehicles',vehId,{status:'Assigned'});
-    showToast('Partial data discarded','warning');renderUnloadingScreen();
+    DB.update('vehicles',vehId,{status:'Assigned'});showToast('Discarded','warning');renderUnloadingScreen();
 }
 
 // --- Finish Unloading ---
 function finishUnloading(){
     var ud=window._unloadData;if(!ud)return;
     if(!ud.scanHistory.length){showToast('Kam se kam ek scan karein','error');return;}
-
+    ud.editingIdx=-1;
     var unloadNo=DB.unloadNo();
-    var materials=[],shortItems=[],excessItems=[];
-
-    // Saari materials ka final status banao — scanned + unscanned dono
+    var materials=[],shortItems=[],excessItems=[],wrongItems=[];
     ud.materialEntries.forEach(function(entry){
-        var scanned=entry.sessionScanned;
-        var expected=entry.totalQty;
-        var diff=expected-scanned;
-
-        // Invoice numbers find karo (silently, user ko nahi dikhega)
-        var invNos=[];
-        DB.filter('invoices',function(i){return i.vehicleId===ud.vehId;}).forEach(function(inv){
-            DB.filter('invoice_materials',function(m){return m.invoiceId===inv.id&&(m.ean||'').toUpperCase()===entry.ean;}).forEach(function(){
-                if(invNos.indexOf(inv.invoiceNo)===-1)invNos.push(inv.invoiceNo);
-            });
-        });
-
-        materials.push({
-            invoiceNo:invNos.join(', '),
-            material:entry.material,
-            ean:entry.ean,
-            expectedQty:expected,
-            scannedQty:scanned,
-            diff:diff,
-            match:true
-        });
-
-        if(scanned<expected) shortItems.push({invoiceNo:invNos.join(', '),material:entry.material,ean:entry.ean,expected:expected,scanned:scanned,short:expected-scanned});
-        if(scanned>expected) excessItems.push({invoiceNo:invNos.join(', '),material:entry.material,ean:entry.ean,expected:expected,scanned:scanned,excess:scanned-expected});
+        var scanned=entry.sessionScanned,expected=entry.totalQty;
+        materials.push({invoiceNo:'',material:entry.material,ean:entry.ean,expectedQty:expected,scannedQty:scanned,diff:expected-scanned,match:true});
+        if(scanned<expected) shortItems.push({invoiceNo:'',material:entry.material,ean:entry.ean,expected:expected,scanned:scanned,short:expected-scanned});
+        if(scanned>expected) excessItems.push({invoiceNo:'',material:entry.material,ean:entry.ean,expected:expected,scanned:scanned,excess:scanned-expected});
     });
+    ud.scanHistory.forEach(function(s){if(!s.matched) wrongItems.push({ean:s.ean,material:s.material,scannedQty:s.qty});});
 
     var partials=DB.filter('partial_unloads',function(p){return p.vehicleId===ud.vehId;});
-    var wasPartial=partials.length>0;
-    var partialSessions=wasPartial?partials.length:0;
+    var wasPartial=partials.length>0,partialSessions=wasPartial?partials.length:0;
 
-    // Unloading record save karo
-    DB.add('unloading_records',{
-        unloadNo:unloadNo,vehicleId:ud.vehId,vehicleNo:ud.vehicleNo,lrNo:ud.lrNo,
-        unloadedBy:APP.currentUser.id,unloadedByName:APP.currentUser.name,
-        unloadedAt:new Date().toISOString(),materials:materials,
-        status:'Posting Pending Approval',wasPartial:wasPartial,partialSessions:partialSessions
-    });
+    DB.add('unloading_records',{unloadNo:unloadNo,vehicleId:ud.vehId,vehicleNo:ud.vehicleNo,lrNo:ud.lrNo,unloadedBy:APP.currentUser.id,unloadedByName:APP.currentUser.name,unloadedAt:new Date().toISOString(),materials:materials,status:'Posting Pending Approval',wasPartial:wasPartial,partialSessions:partialSessions});
+    DB.update('vehicles',ud.vehId,{status:'Posting Pending Approval',unloadNo:unloadNo,unloadedBy:APP.currentUser.id,unloadedByName:APP.currentUser.name,unloadedAt:new Date().toISOString()});
 
-    // Vehicle status update
-    DB.update('vehicles',ud.vehId,{
-        status:'Posting Pending Approval',unloadNo:unloadNo,
-        unloadedBy:APP.currentUser.id,unloadedByName:APP.currentUser.name,
-        unloadedAt:new Date().toISOString()
-    });
-
-    // Invoice materials mein unloadedQty update — distribute across invoice lines
     ud.materialEntries.forEach(function(entry){
         if(entry.sessionScanned<=0)return;
         var remaining=entry.sessionScanned;
         var invIds=DB.filter('invoices',function(i){return i.vehicleId===ud.vehId;}).map(function(i){return i.id;});
-        DB.filter('invoice_materials',function(m){
-            return m.ean&&m.ean.toUpperCase()===entry.ean&&invIds.indexOf(m.invoiceId)>-1;
-        }).forEach(function(im){
+        DB.filter('invoice_materials',function(m){return m.ean&&m.ean.toUpperCase()===entry.ean&&invIds.indexOf(m.invoiceId)>-1;}).forEach(function(im){
             if(remaining<=0)return;
             var canUnload=im.qty-(im.unloadedQty||0);
             var toUnload=Math.min(remaining,canUnload);
@@ -1319,30 +1230,20 @@ function finishUnloading(){
         });
     });
 
-    // Partial data clean up
     partials.forEach(function(p){DB.remove('partial_unloads',p.id);});
 
-    // Short/Excess report generate karo (agar discrepancy hai)
-    var hasDiscrepancy=shortItems.length>0||excessItems.length>0;
+    var hasDiscrepancy=shortItems.length>0||excessItems.length>0||wrongItems.length>0;
     var reportId=null;
     if(hasDiscrepancy){
         var reportNo=generateSERNo();
         var totalExp=0,totalScn=0;
         materials.forEach(function(m){totalExp+=m.expectedQty;totalScn+=m.scannedQty;});
-        reportId=DB.add('short_excess_reports',{
-            reportNo:reportNo,vehicleNo:ud.vehicleNo,lrNo:ud.lrNo,unloadNo:unloadNo,
-            shortItems:shortItems,excessItems:excessItems,wrongItems:[],
-            totalExpected:totalExp,totalScanned:totalScn,
-            wasPartial:wasPartial,partialSessions:partialSessions,
-            createdBy:APP.currentUser.name,createdAt:new Date().toISOString()
-        }).id;
+        reportId=DB.add('short_excess_reports',{reportNo:reportNo,vehicleNo:ud.vehicleNo,lrNo:ud.lrNo,unloadNo:unloadNo,shortItems:shortItems,excessItems:excessItems,wrongItems:wrongItems,totalExpected:totalExp,totalScanned:totalScn,wasPartial:wasPartial,partialSessions:partialSessions,createdBy:APP.currentUser.name,createdAt:new Date().toISOString()}).id;
     }
 
     addNotif('Unloading '+unloadNo+' submitted for '+ud.vehicleNo,'warning');
     logAction('Unloading','SUBMIT',unloadNo+' for '+ud.vehicleNo);
-    showToast('Unloading submitted successfully!','success');
-    closeModal();
-
+    showToast('Unloading submitted!','success');closeModal();
     if(reportId)setTimeout(function(){showSEReport(reportId);},400);
     else renderUnloadingScreen();
 }
@@ -1361,14 +1262,14 @@ function showSEReport(reportId){
     h+='</div>';
     if(report.shortItems&&report.shortItems.length){
         h+='<div class="card-title" style="color:var(--warning);margin-top:8px"><i class="bx bx-minus-circle"></i> Short Items ('+report.shortItems.length+')</div>';
-        h+='<div class="table-wrapper" style="max-height:160px;overflow-y:auto"><table class="data-table"><thead><tr><th>Material</th><th>EAN</th><th>Invoice</th><th>Expected</th><th>Scanned</th><th>Short</th></tr></thead><tbody>';
-        report.shortItems.forEach(function(s){h+='<tr style="background:rgba(255,193,7,.05)"><td>'+esc(s.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(s.ean)+'</td><td style="font-size:10px">'+esc(s.invoiceNo)+'</td><td>'+s.expected+'</td><td>'+s.scanned+'</td><td><strong style="color:var(--danger)">-'+s.short+'</strong></td></tr>';});
+        h+='<div class="table-wrapper" style="max-height:160px;overflow-y:auto"><table class="data-table"><thead><tr><th>Material</th><th>EAN</th><th>Expected</th><th>Scanned</th><th>Short</th></tr></thead><tbody>';
+        report.shortItems.forEach(function(s){h+='<tr style="background:rgba(255,193,7,.05)"><td>'+esc(s.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(s.ean)+'</td><td>'+s.expected+'</td><td>'+s.scanned+'</td><td><strong style="color:var(--danger)">-'+s.short+'</strong></td></tr>';});
         h+='</tbody></table></div>';
     }
     if(report.excessItems&&report.excessItems.length){
         h+='<div class="card-title" style="color:var(--danger);margin-top:12px"><i class="bx bx-plus-circle"></i> Excess Items ('+report.excessItems.length+')</div>';
-        h+='<div class="table-wrapper" style="max-height:160px;overflow-y:auto"><table class="data-table"><thead><tr><th>Material</th><th>EAN</th><th>Invoice</th><th>Expected</th><th>Scanned</th><th>Excess</th></tr></thead><tbody>';
-        report.excessItems.forEach(function(s){h+='<tr style="background:rgba(255,107,107,.05)"><td>'+esc(s.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(s.ean)+'</td><td style="font-size:10px">'+esc(s.invoiceNo)+'</td><td>'+s.expected+'</td><td>'+s.scanned+'</td><td><strong style="color:var(--danger)">+'+s.excess+'</strong></td></tr>';});
+        h+='<div class="table-wrapper" style="max-height:160px;overflow-y:auto"><table class="data-table"><thead><tr><th>Material</th><th>EAN</th><th>Expected</th><th>Scanned</th><th>Excess</th></tr></thead><tbody>';
+        report.excessItems.forEach(function(s){h+='<tr style="background:rgba(255,107,107,.05)"><td>'+esc(s.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(s.ean)+'</td><td>'+s.expected+'</td><td>'+s.scanned+'</td><td><strong style="color:var(--danger)">+'+s.excess+'</strong></td></tr>';});
         h+='</tbody></table></div>';
     }
     if(report.wrongItems&&report.wrongItems.length){
@@ -2143,7 +2044,7 @@ function searchLoc(){
 // --- Delete Single Row ---
 function deleteLocRow(id){
     if(!confirm('Yeh row delete karein?'))return;
-    DB.delete('location_master',id);
+    DB.remove('location_master',id);
     showToast('Row deleted','warning');
     renderLocationMaster();
 }

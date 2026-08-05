@@ -594,7 +594,7 @@ function renderPendingVehicle(){
     allV.forEach(function(v){
         if(v.vehicleType!=='Unloading')return;
         if(v.status==='Posting Pending Approval')postPend.push(v);
-       else if(v.assignedTo&&v.status!=='Posted'&&v.status!=='Unloaded'&&v.status!=='Rejected')assigned.push(v);
+        else if(v.assignedTo&&v.status!=='Posted'&&v.status!=='Unloaded'&&v.status!=='Rejected')assigned.push(v);
         else if(v.status==='Unload Pending')unassigned.push(v);
     });
     var h='<div class="section-header"><h2><i class="bx bx-time-five"></i> Inbound Control Tower</h2>';
@@ -611,11 +611,11 @@ function renderPendingVehicle(){
         h+='</div></td></tr>';
     });
     h+='</tbody></table></div></div>';
-    h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-user-check"></i> Assigned Vehicles ('+assigned.length+')</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>Vehicle No</th><th>LR No</th><th>Assigned User ID</th><th>Invoices</th><th>Entry By</th><th>Actions</th></tr></thead><tbody>';
+    h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-user-check"></i> Assigned Vehicles ('+assigned.length+')</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>Vehicle No</th><th>LR No</th><th>Assigned User</th><th>Invoices</th><th>Entry By</th><th>Actions</th></tr></thead><tbody>';
     if(!assigned.length)h+='<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:20px">No assigned vehicles</td></tr>';
     else assigned.forEach(function(v){
         var invs=DB.filter('invoices',function(i){return i.vehicleId===v.id;});
-        h+='<tr><td><strong>'+esc(v.vehicleNo)+'</strong></td><td>'+esc(v.lrNo||'-')+'</td><td><span class="badge badge-accent" style="font-family:var(--font-display)">'+esc(v.assignedTo||'-')+'</span></td><td><span class="badge badge-info">'+invs.length+'</span></td><td style="font-size:11px;color:var(--text-secondary)">'+esc(v.entryByName||'-')+'</td><td><div class="table-actions">';
+        h+='<tr><td><strong>'+esc(v.vehicleNo)+'</strong></td><td>'+esc(v.lrNo||'-')+'</td><td><span class="badge badge-accent" style="font-family:var(--font-display)">'+esc(v.assignedToName||v.assignedTo||'-')+'</span></td><td><span class="badge badge-info">'+invs.length+'</span></td><td style="font-size:11px;color:var(--text-secondary)">'+esc(v.entryByName||'-')+'</td><td><div class="table-actions">';
         if(chkAct('canAssignVehicle'))h+='<button class="btn btn-danger btn-sm" onclick="unassignVehicle(\''+v.id+'\')"><i class="bx bx-user-minus"></i> Unassign</button>';
         h+='</div></td></tr>';
     });
@@ -633,15 +633,13 @@ function renderPendingVehicle(){
     setHtml(h);
 }
 
-// Upload Invoice
+// --- Upload Invoice ---
 function showUploadInvoice(vehId){
     var v=DB.find('vehicles',vehId);if(!v)return;
     var h='<div class="form-group"><label>Invoice Number <span class="req">*</span></label><input type="text" id="singleInvNo" class="form-input" placeholder="INV-2025-XXX" style="text-transform:uppercase"></div>';
     h+='<div class="form-group"><label>Customer</label><input type="text" id="singleInvCust" class="form-input" placeholder="Customer name"></div>';
     h+='<hr class="cyber-line"><div class="card-title"><i class="bx bx-list-plus"></i> Add Materials</div>';
-    h+='<div id="singleMatRows">';
-    h+=singleMatRow(0);
-    h+='</div>';
+    h+='<div id="singleMatRows">'+singleMatRow(0)+'</div>';
     h+='<button class="btn btn-glass btn-sm" onclick="addSingleMatRow()" style="margin-top:8px"><i class="bx bx-plus"></i> Add Material</button>';
     showModal('Upload Invoice — '+v.vehicleNo,h,'lg',
         '<button class="btn btn-glass" onclick="closeModal()">Cancel</button>'+
@@ -650,7 +648,7 @@ function showUploadInvoice(vehId){
 function singleMatRow(idx){
     var mats=DB.get('material_master');
     var opts='<option value="">Select Material</option>';
-    mats.forEach(function(m){opts+='<option value="'+esc(m.material)+'" data-ean="'+esc(m.ean||'')+'">'+esc(m.material)+' ('+esc(m.ean||'')+' )</option>';});
+    mats.forEach(function(m){opts+='<option value="'+esc(m.material)+'" data-ean="'+esc(m.ean||'')+'">'+esc(m.material)+' ('+esc(m.ean||'')+')</option>';});
     return '<div class="form-row" style="margin-bottom:8px" id="smr_'+idx+'"><div class="form-group" style="flex:2"><label>Material</label><select class="form-input smr-mat" onchange="smrChange(this,'+idx+')">'+opts+'</select></div><div class="form-group"><label>EAN</label><input type="text" class="form-input smr-ean" id="smrEan_'+idx+'" placeholder="Auto"></div><div class="form-group"><label>Qty</label><input type="number" class="form-input smr-qty" id="smrQty_'+idx+'" placeholder="0" min="1"></div><div class="form-group" style="display:flex;align-items:flex-end"><button class="btn btn-danger btn-sm" onclick="document.getElementById(\'smr_'+idx+'\').remove()"><i class="bx bx-trash"></i></button></div></div>';
 }
 var smrIdx=1;
@@ -668,7 +666,7 @@ function saveSingleInvoice(vehId){
     var invNo=document.getElementById('singleInvNo').value.trim().toUpperCase();
     if(!invNo){showToast('Invoice number required','error');return;}
     var exists=DB.filter('invoices',function(i){return i.vehicleId===vehId&&i.invoiceNo===invNo;});
-    if(exists.length>0){showToast('Invoice number already exists for this vehicle','error');return;}
+    if(exists.length>0){showToast('Invoice number already exists','error');return;}
     var cust=document.getElementById('singleInvCust').value.trim();
     var inv=DB.add('invoices',{vehicleId:vehId,invoiceNo:invNo,customer:cust,status:'Pending'});
     var matSels=document.querySelectorAll('.smr-mat');
@@ -677,17 +675,14 @@ function saveSingleInvoice(vehId){
         var row=sel.closest('.form-row');
         var ean=row.querySelector('.smr-ean').value.trim();
         var qty=parseInt(row.querySelector('.smr-qty').value)||0;
-        if(sel.value&&qty>0){
-            DB.add('invoice_materials',{invoiceId:inv.id,material:sel.value,ean:ean,qty:qty,unloadedQty:0});
-            count++;
-        }
+        if(sel.value&&qty>0){DB.add('invoice_materials',{invoiceId:inv.id,material:sel.value,ean:ean,qty:qty,unloadedQty:0});count++;}
     });
-    logAction('Inbound','INVOICE_UPLOAD','Invoice '+invNo+' uploaded for vehicle '+vehId+' with '+count+' materials');
+    logAction('Inbound','INVOICE_UPLOAD','Invoice '+invNo+' uploaded with '+count+' materials');
     showToast('Invoice '+invNo+' saved with '+count+' materials!','success');
     closeModal();renderInbound('pending-vehicle');
 }
 
-// Bulk Upload
+// --- Bulk Upload ---
 function showBulkUpload(){
     var h='<div class="form-group"><label>Upload Bulk Data (Excel) <span class="req">*</span></label>';
     h+='<label class="btn btn-glass btn-sm" style="cursor:pointer"><i class="bx bx-upload"></i> Choose File<input type="file" id="bulkFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="document.getElementById(\'bulkFName\').innerText=this.files[0].name"></label>';
@@ -731,48 +726,31 @@ function processBulkUpload(){
     reader.readAsArrayBuffer(fi.files[0]);
 }
 
-// --- Assign Unloading (SIMPLE — User ID Input) ---
+// --- Assign Unloading ---
 function showAssignUnloading(vehId){
     var v=DB.find('vehicles',vehId);if(!v)return;
     var invs=DB.filter('invoices',function(i){return i.vehicleId===vehId;});
     if(!invs.length){showToast('Upload invoices first!','error');return;}
-
-    // Saare users list banao dropdown ke liye
     var users=DB.get('users');
     var uOpts='<option value="">-- Select User --</option>';
-    users.forEach(function(u){
-        uOpts+='<option value="'+esc(u.id)+'">'+esc(u.name)+' ('+esc(u.username)+') — ID: '+esc(u.id)+'</option>';
-    });
-
+    users.forEach(function(u){uOpts+='<option value="'+esc(u.id)+'">'+esc(u.name)+' ('+esc(u.username)+') — '+esc(u.id)+'</option>';});
     var h='<div style="background:var(--accent-dim);padding:12px;border-radius:var(--radius-sm);margin-bottom:14px"><strong style="color:var(--accent)">'+esc(v.vehicleNo)+'</strong> — '+esc(v.lrNo||'')+' | Invoices: '+invs.length+'</div>';
-
-    // Dropdown se select ya manually ID type karo
-    h+='<div class="form-group"><label>Select User <span class="req">*</span></label>';
-    h+='<select id="assignUserSelect" class="form-input" onchange="document.getElementById(\'assignUserIdInput\').value=this.value">'+uOpts+'</select></div>';
-
-    // Ya manually User ID type karo
-    h+='<div class="form-group"><label>Ya User ID Type Karein <span class="req">*</span></label>';
-    h+='<input type="text" id="assignUserIdInput" class="form-input" placeholder="User ID paste karein ya type karein..." style="font-family:var(--font-display);font-size:13px" onkeydown="if(event.key===\'Enter\'){event.preventDefault();doAssignUnloading(\''+vehId+'\');}"></div>';
-
-    h+='<div style="background:var(--bg-secondary);padding:10px;border-radius:var(--radius-sm);font-size:11px;color:var(--text-muted);border:1px dashed var(--border)"><i class="bx bx-info-circle" style="color:var(--warning)"></i> Dropdown se select karein ya Admin panel se User ID copy karke yahan paste karein. Jo ID yahan hoga wahi save hogi.</div>';
-
+    h+='<div class="form-group"><label>Select User <span class="req">*</span></label><select id="assignUserSelect" class="form-input" onchange="document.getElementById(\'assignUserIdInput\').value=this.value">'+uOpts+'</select></div>';
+    h+='<div class="form-group"><label>Ya User ID Type Karein <span class="req">*</span></label><input type="text" id="assignUserIdInput" class="form-input" placeholder="User ID..." style="font-family:var(--font-display);font-size:13px" onkeydown="if(event.key===\'Enter\'){event.preventDefault();doAssignUnloading(\''+vehId+'\');}"></div>';
+    h+='<div style="background:var(--bg-secondary);padding:10px;border-radius:var(--radius-sm);font-size:11px;color:var(--text-muted);border:1px dashed var(--border)"><i class="bx bx-info-circle" style="color:var(--warning)"></i> Dropdown se select karein ya User ID type karein</div>';
     showModal('Assign Unloading — '+v.vehicleNo,h,'md',
         '<button class="btn btn-glass" onclick="closeModal()">Cancel</button>'+
         '<button class="btn btn-glass" onclick="doAssignUnloading(\''+vehId+'\')"><i class="bx bx-check"></i> Assign</button>');
-
     setTimeout(function(){document.getElementById('assignUserSelect').focus();},300);
 }
 function doAssignUnloading(vehId){
     var userId=document.getElementById('assignUserIdInput').value.trim();
     if(!userId){showToast('User ID select karein ya type karein','error');return;}
-
-    // User ka naam bhi nikal lo display ke liye
     var userObj=DB.find('users',userId);
     var userName=userObj?userObj.name:userId;
-
     DB.update('vehicles',vehId,{assignedTo:userId,assignedToName:userName,status:'Assigned'});
-    addNotif('Vehicle assigned to '+userName+' (ID: '+userId+')','info');
-    logAction('Inbound','ASSIGN','Vehicle '+vehId+' assigned to '+userName+' (ID:'+userId+')');
+    addNotif('Vehicle assigned to '+userName+' ('+userId+')','info');
+    logAction('Inbound','ASSIGN','Vehicle '+vehId+' assigned to '+userName);
     showToast('Vehicle assigned to '+userName,'success');
     closeModal();renderInbound('pending-vehicle');
 }
@@ -783,45 +761,30 @@ function unassignVehicle(vehId){
     showToast('Vehicle unassigned','success');renderInbound('pending-vehicle');
 }
 
-// --- Unloading Screen (PARTIAL UNLOAD SUPPORT) ---
+// --- Unloading Screen ---
 function renderUnloadingScreen(){
     if(!APP.currentUser){setHtml('<div class="card"><div class="empty-state"><i class="bx bx-lock-alt"></i><p>Login required</p></div></div>');return;}
     var myId=APP.currentUser.id;
-
-    // Jo abhi start hone wale hain
-    var pendingVehs=DB.filter('vehicles',function(v){
-        return v.assignedTo===myId&&(v.status==='Assigned'||v.status==='Unload Pending');
-    });
-    // Jo partial unload hain — resume karne ke liye
-    var partialVehs=DB.filter('vehicles',function(v){
-        return v.assignedTo===myId&&v.status==='Partial Unload';
-    });
-
+    var pendingVehs=DB.filter('vehicles',function(v){return v.assignedTo===myId&&(v.status==='Assigned'||v.status==='Unload Pending');});
+    var partialVehs=DB.filter('vehicles',function(v){return v.assignedTo===myId&&v.status==='Partial Unload';});
     var h='<div class="section-header"><h2><i class="bx bx-package"></i> My Unloading</h2>';
     h+='<div style="font-size:12px;color:var(--text-muted)">Pending: '+pendingVehs.length+' | Partial: '+partialVehs.length+'</div></div>';
-
-    // ===== PENDING START =====
     if(pendingVehs.length>0){
         h+='<div class="card" style="margin-bottom:16px"><div class="card-title"><i class="bx bx-time-five" style="color:var(--warning)"></i> Pending Start ('+pendingVehs.length+')</div>';
         pendingVehs.forEach(function(v){
             var invs=DB.filter('invoices',function(i){return i.vehicleId===v.id;});
             var matCount=0;invs.forEach(function(inv){matCount+=DB.filter('invoice_materials',function(m){return m.invoiceId===inv.id;}).length;});
-            h+='<div style="border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:10px;background:var(--bg-card);backdrop-filter:var(--glass-blur)">';
-            h+='<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">';
-            h+='<div>';
+            h+='<div style="border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:10px;background:var(--bg-card)">';
+            h+='<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px"><div>';
             h+='<div style="font-size:16px;font-weight:800;color:var(--accent);font-family:var(--font-display);letter-spacing:1px">'+esc(v.vehicleNo)+'</div>';
             h+='<div style="font-size:11px;color:var(--text-muted);margin-top:2px">LR: '+esc(v.lrNo||'-')+' | Invoices: '+invs.length+' | Materials: '+matCount+'</div>';
             h+='</div>';
-            if(chkAct('canStartUnloading'))
-                h+='<button class="btn btn-primary" onclick="startUnload(\''+v.id+'\')"><i class="bx bx-play-circle"></i> START UNLOADING</button>';
-            else
-                h+='<button class="btn btn-glass" disabled><i class="bx bx-block"></i> No Permission</button>';
+            if(chkAct('canStartUnloading'))h+='<button class="btn btn-primary" onclick="startUnload(\''+v.id+'\')"><i class="bx bx-play-circle"></i> START UNLOADING</button>';
+            else h+='<button class="btn btn-glass" disabled><i class="bx bx-block"></i> No Permission</button>';
             h+='</div></div>';
         });
         h+='</div>';
     }
-
-    // ===== PARTIAL — RESUME =====
     if(partialVehs.length>0){
         h+='<div class="card" style="margin-bottom:16px"><div class="card-title"><i class="bx bx-loader-circle" style="color:var(--info)"></i> Resume Unloading ('+partialVehs.length+')</div>';
         partialVehs.forEach(function(v){
@@ -830,29 +793,24 @@ function renderUnloadingScreen(){
             var latest=partials[0];
             var scanCount=latest?(latest.scanOrder||[]).length:0;
             var savedTime=latest?fmtDT(latest.savedAt):'-';
-
-            h+='<div style="border:2px solid var(--info);border-radius:var(--radius);padding:14px;margin-bottom:10px;background:rgba(var(--info-rgb),.05);backdrop-filter:var(--glass-blur)">';
-            h+='<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">';
-            h+='<div>';
-            h+='<div style="font-size:16px;font-weight:800;color:var(--info);font-family:var(--font-display);letter-spacing:1px">'+esc(v.vehicleNo)+' <span class="badge badge-warning" style="font-size:9px;vertical-align:middle">PARTIAL</span></div>';
-            h+='<div style="font-size:11px;color:var(--text-muted);margin-top:2px">LR: '+esc(v.lrNo||'-')+' | Saved: '+savedTime+' | Scanned: <strong style="color:var(--info)">'+scanCount+'</strong> items</div>';
-            h+='</div>';
-            h+='<div style="display:flex;gap:6px">';
+            h+='<div style="border:2px solid var(--info);border-radius:var(--radius);padding:14px;margin-bottom:10px;background:rgba(var(--info-rgb),.05)">';
+            h+='<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px"><div>';
+            h+='<div style="font-size:16px;font-weight:800;color:var(--info);font-family:var(--font-display)">'+esc(v.vehicleNo)+' <span class="badge badge-warning" style="font-size:9px;vertical-align:middle">PARTIAL</span></div>';
+            h+='<div style="font-size:11px;color:var(--text-muted);margin-top:2px">LR: '+esc(v.lrNo||'-')+' | Saved: '+savedTime+' | Scanned: <strong style="color:var(--info)">'+scanCount+'</strong></div>';
+            h+='</div><div style="display:flex;gap:6px">';
             h+='<button class="btn btn-info" onclick="resumePartialUnload(\''+v.id+'\')"><i class="bx bx-refresh"></i> RESUME</button>';
             h+='<button class="btn btn-danger btn-sm" onclick="discardPartialUnload(\''+v.id+'\')"><i class="bx bx-trash"></i> Discard</button>';
             h+='</div></div></div>';
         });
         h+='</div>';
     }
-
-    // ===== EMPTY =====
     if(!pendingVehs.length&&!partialVehs.length){
-        h+='<div class="card"><div class="empty-state"><i class="bx bx-inbox"></i><p style="font-size:15px;margin-bottom:6px">No vehicles assigned to you</p><p style="font-size:12px">Ask Admin to assign a vehicle for unloading</p></div></div>';
+        h+='<div class="card"><div class="empty-state"><i class="bx bx-inbox"></i><p style="font-size:15px;margin-bottom:6px">No vehicles assigned to you</p><p style="font-size:12px">Ask Admin to assign a vehicle</p></div></div>';
     }
     setHtml(h);
 }
 
-// --- Start Unload (fresh or with existing data for resume) ---
+// --- Start Unload ---
 function startUnload(vehId,existingData){
     var v=DB.find('vehicles',vehId);if(!v)return;
     var invs=DB.filter('invoices',function(i){return i.vehicleId===vehId;});
@@ -872,124 +830,216 @@ function startUnload(vehId,existingData){
             }
         });
     });
-
     var scanResults={},scanOrder=[];
-    if(existingData){
-        scanResults=existingData.scanResults||{};
-        scanOrder=existingData.scanOrder||[];
-    }
-
+    if(existingData){scanResults=existingData.scanResults||{};scanOrder=existingData.scanOrder||[];}
     window._unloadData={vehId:vehId,vehicleNo:v.vehicleNo,lrNo:v.lrNo,lookupMap:lookupMap,scanResults:scanResults,scanOrder:scanOrder};
-
     var expectedCount=Object.keys(lookupMap).length;
     var isResume=scanOrder.length>0;
 
+    // HTML banao — koi inline onclick/onkeydown NAHI
     var h='<div style="margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">';
     h+='<div><strong style="color:var(--accent);font-size:16px">'+esc(v.vehicleNo)+'</strong> <span style="color:var(--text-muted)">—</span> '+esc(v.lrNo||'')+'</div>';
-    if(isResume)h+='<span class="badge badge-info"><i class="bx bx-refresh"></i> Resumed — '+scanOrder.length+' items loaded</span>';
+    if(isResume)h+='<span class="badge badge-info"><i class="bx bx-refresh"></i> Resumed — '+scanOrder.length+' items</span>';
     else h+='<div style="font-size:11px;color:var(--text-muted)">Expected Items: <strong style="color:var(--accent)">'+expectedCount+'</strong></div>';
     h+='</div>';
 
-    h+='<div class="search-box" style="max-width:100%;margin-bottom:8px"><i class="bx bx-barcode"></i><input type="text" id="scanUnloadInput" placeholder="Scan ya type karein — EAN / Material..." onkeydown="if(event.key===\'Enter\'){event.preventDefault();addScanUnloadItem();}" style="font-family:var(--font-display);font-size:14px;letter-spacing:1px"></div>';
+    h+='<div class="search-box" style="max-width:100%;margin-bottom:8px"><i class="bx bx-barcode"></i><input type="text" id="scanUnloadInput" placeholder="EAN ya Material type karein..." style="font-family:var(--font-display);font-size:14px;letter-spacing:1px"></div>';
 
     h+='<div style="display:flex;gap:6px;margin-bottom:8px;align-items:center;flex-wrap:wrap">';
-    h+='<button class="btn btn-glass btn-sm" onclick="openScannerForUnload()"><i class="bx bx-qr"></i> Scanner</button>';
-    h+='<button class="btn btn-glass btn-sm" onclick="addScanUnloadItem()"><i class="bx bx-plus"></i> Add</button>';
-    h+='<div style="margin-left:auto;display:flex;align-items:center;gap:6px"><label style="font-size:11px;color:var(--text-muted)">Qty/Scan:</label><input type="number" id="scanQtyPerScan" class="form-input" value="1" min="1" style="width:60px;text-align:center;font-size:12px;padding:4px 8px"></div>';
+    h+='<button class="btn btn-glass btn-sm" id="ulBtnScanner"><i class="bx bx-qr"></i> Scanner</button>';
+    h+='<button class="btn btn-glass btn-sm" id="ulBtnAdd"><i class="bx bx-plus"></i> Add</button>';
+    h+='<div style="margin-left:auto;display:flex;align-items:center;gap:6px"><label style="font-size:11px;color:var(--text-muted)">Qty:</label><input type="number" id="scanQtyPerScan" class="form-input" value="1" min="1" style="width:60px;text-align:center;font-size:12px;padding:4px 8px"></div>';
     h+='</div>';
 
-    h+='<div style="margin-bottom:12px"><button class="btn btn-glass btn-sm" onclick="toggleManualEntry()" id="manualEntryToggle"><i class="bx bx-edit"></i> Manual Entry</button>';
+    h+='<div style="margin-bottom:12px"><button class="btn btn-glass btn-sm" id="ulBtnManual"><i class="bx bx-edit"></i> Manual Entry</button>';
     h+='<div id="manualEntryForm" style="display:none;margin-top:8px;padding:12px;border:1px dashed var(--border);border-radius:var(--radius-sm);background:var(--bg-secondary)">';
     h+='<div class="form-row">';
-    h+='<div class="form-group" style="flex:1"><label>EAN</label><input type="text" id="manualEan" class="form-input" placeholder="EAN Number" style="font-family:var(--font-display)"></div>';
+    h+='<div class="form-group" style="flex:1"><label>EAN</label><input type="text" id="manualEan" class="form-input" placeholder="EAN" style="font-family:var(--font-display)"></div>';
     h+='<div class="form-group" style="flex:2"><label>Material</label><input type="text" id="manualMat" class="form-input" placeholder="Material name"></div>';
     h+='<div class="form-group"><label>Qty</label><input type="number" id="manualQty" class="form-input" value="1" min="1"></div>';
-    h+='<div class="form-group" style="display:flex;align-items:flex-end"><button class="btn btn-glass btn-sm" onclick="addManualEntry()"><i class="bx bx-plus"></i> Add</button></div>';
+    h+='<div class="form-group" style="display:flex;align-items:flex-end"><button class="btn btn-glass btn-sm" id="ulBtnManualAdd"><i class="bx bx-plus"></i> Add</button></div>';
     h+='</div></div></div>';
 
     h+='<div class="table-wrapper" style="max-height:300px;overflow-y:auto"><table class="data-table"><thead><tr><th>#</th><th>EAN</th><th>Material</th><th>Invoice</th><th>Expected</th><th>Scanned</th><th>Status</th><th></th></tr></thead><tbody id="scanUnloadBody"></tbody></table></div>';
     h+='<div id="scanSummary" style="margin-top:10px;padding:10px;background:var(--bg-secondary);border-radius:var(--radius-sm);font-size:12px;display:none"></div>';
 
-    // *** FOOTER — SAVE & BACK + SUBMIT FINAL ***
-    var footer='';
-    footer+='<button class="btn btn-warning" onclick="savePartialUnload()"><i class="bx bx-save"></i> SAVE & BACK</button>';
+    var footer='<button class="btn btn-warning" id="ulBtnSave"><i class="bx bx-save"></i> SAVE & BACK</button>';
     footer+='<button class="btn btn-glass" onclick="closeModal()">Cancel</button>';
-    footer+='<button class="btn btn-glass" onclick="submitUnloading()"><i class="bx bx-check-double"></i> SUBMIT FINAL</button>';
+    footer+='<button class="btn btn-glass" id="ulBtnSubmit"><i class="bx bx-check-double"></i> SUBMIT FINAL</button>';
 
     showModal('Unloading — '+v.vehicleNo,h,'xl',footer);
     renderScanUnloadTable();
-    setTimeout(function(){document.getElementById('scanUnloadInput').focus();},300);
+
+    // SAB EVENT LISTENERS YAHAN LAGA RAHE HAIN
+    setTimeout(function(){
+        var scanInput=document.getElementById('scanUnloadInput');
+        if(scanInput){
+            scanInput.addEventListener('keydown',function(e){
+                if(e.key==='Enter'){e.preventDefault();e.stopPropagation();doAddScanItem();}
+            });
+            scanInput.focus();
+        }
+
+        var el;
+        el=document.getElementById('ulBtnScanner');
+        if(el)el.addEventListener('click',function(){
+            openScanner(function(code){
+                var inp=document.getElementById('scanUnloadInput');
+                if(inp)inp.value=code;
+                doAddScanItem();
+            });
+        });
+
+        el=document.getElementById('ulBtnAdd');
+        if(el)el.addEventListener('click',function(){doAddScanItem();});
+
+        el=document.getElementById('ulBtnManual');
+        if(el)el.addEventListener('click',function(){
+            var f=document.getElementById('manualEntryForm');
+            f.style.display=f.style.display==='none'?'':'none';
+            if(f.style.display==='')document.getElementById('manualEan').focus();
+        });
+
+        el=document.getElementById('ulBtnManualAdd');
+        if(el)el.addEventListener('click',function(){doAddManualItem();});
+
+        // Manual form mein Enter se bhi add ho
+        var manualFields=['manualEan','manualMat','manualQty'];
+        manualFields.forEach(function(fid){
+            var fe=document.getElementById(fid);
+            if(fe)fe.addEventListener('keydown',function(e){
+                if(e.key==='Enter'){e.preventDefault();doAddManualItem();}
+            });
+        });
+
+        el=document.getElementById('ulBtnSave');
+        if(el)el.addEventListener('click',function(){savePartialUnload();});
+
+        el=document.getElementById('ulBtnSubmit');
+        if(el)el.addEventListener('click',function(){submitUnloading();});
+
+    },250);
 }
 
-// --- Resume Partial Unload ---
+// --- Scan add karne ka logic ---
+function doAddScanItem(){
+    var inp=document.getElementById('scanUnloadInput');
+    if(!inp)return;
+    var val=inp.value.trim().toUpperCase();
+    inp.value='';
+    if(!val)return;
+    var qty=parseInt(document.getElementById('scanQtyPerScan').value)||1;
+    doProcessScan(val,qty);
+    var ref=document.getElementById('scanUnloadInput');
+    if(ref)ref.focus();
+}
+
+// --- Manual add karne ka logic ---
+function doAddManualItem(){
+    var ean=document.getElementById('manualEan').value.trim().toUpperCase();
+    var mat=document.getElementById('manualMat').value.trim().toUpperCase();
+    var qty=parseInt(document.getElementById('manualQty').value)||1;
+    if(!ean&&!mat){showToast('EAN ya Material dalein','error');return;}
+    doProcessScan(ean||mat,qty);
+    document.getElementById('manualEan').value='';
+    document.getElementById('manualMat').value='';
+    document.getElementById('manualQty').value='1';
+    var ref=document.getElementById('scanUnloadInput');
+    if(ref)ref.focus();
+}
+
+// --- Scan process ---
+function doProcessScan(val,qty){
+    var ud=window._unloadData;
+    if(!ud){showToast('Error: Data lost. Close & retry.','error');return;}
+    var found=ud.lookupMap[val];
+    if(found){
+        if(!ud.scanResults[val]){
+            ud.scanResults[val]={material:found.material,ean:found.ean,expectedQty:found.totalExpected,scannedQty:0,match:true,invoiceNo:found.invoices.map(function(i){return i.invoiceNo;}).join(', ')};
+            ud.scanOrder.push(val);
+        }
+        ud.scanResults[val].scannedQty+=qty;
+        showToast(found.material+' +'+qty,'success');
+    }else{
+        if(!ud.scanResults[val]){
+            ud.scanResults[val]={material:'UNKNOWN',ean:val,expectedQty:0,scannedQty:0,match:false,invoiceNo:'-'};
+            ud.scanOrder.push(val);
+        }
+        ud.scanResults[val].scannedQty+=qty;
+        showToast('UNKNOWN item +'+qty,'warning');
+    }
+    renderScanUnloadTable();
+}
+
+// --- Table render ---
+function renderScanUnloadTable(){
+    var ud=window._unloadData;if(!ud)return;
+    var body=document.getElementById('scanUnloadBody');if(!body)return;
+    var summaryDiv=document.getElementById('scanSummary');
+    var h='',matchC=0,shortC=0,excessC=0,wrongC=0;
+    ud.scanOrder.forEach(function(key,idx){
+        var r=ud.scanResults[key];
+        var stText,stCls,rowCls;
+        if(!r.match){stText='Wrong';stCls='badge-danger';rowCls='scan-row-red';wrongC++;}
+        else if(r.scannedQty===r.expectedQty){stText='Match';stCls='badge-success';rowCls='scan-row-green';matchC++;}
+        else if(r.scannedQty<r.expectedQty){stText='Short';stCls='badge-warning';rowCls='';shortC++;}
+        else{stText='Excess';stCls='badge-danger';rowCls='scan-row-red';excessC++;}
+        h+='<tr class="'+rowCls+'"><td>'+(idx+1)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(r.ean)+'</td><td>'+esc(r.material)+'</td><td style="font-size:10px">'+esc(r.invoiceNo)+'</td><td>'+r.expectedQty+'</td><td><strong>'+(r.scannedQty||0)+'</strong></td><td><span class="badge '+stCls+'">'+stText+'</span></td><td><button class="btn btn-danger btn-sm" data-rmkey="'+esc(key).replace(/"/g,'&quot;')+'"><i class="bx bx-minus"></i></button></td></tr>';
+    });
+    if(!ud.scanOrder.length){
+        h='<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:24px"><i class="bx bx-barcode" style="font-size:24px;display:block;margin-bottom:8px"></i>Type EAN ya Material, ya Scanner use karo</td></tr>';
+    }
+    body.innerHTML=h;
+    body.querySelectorAll('[data-rmkey]').forEach(function(btn){
+        btn.addEventListener('click',function(){
+            var k=this.getAttribute('data-rmkey');
+            if(ud.scanResults[k]){ud.scanResults[k].scannedQty--;if(ud.scanResults[k].scannedQty<=0){delete ud.scanResults[k];ud.scanOrder=ud.scanOrder.filter(function(x){return x!==k;});}}
+            renderScanUnloadTable();
+        });
+    });
+    if(ud.scanOrder.length>0){
+        summaryDiv.style.display='';
+        summaryDiv.innerHTML='<div style="display:flex;gap:16px;flex-wrap:wrap"><span><i class="bx bx-check-circle" style="color:var(--success)"></i> Match: <strong>'+matchC+'</strong></span><span><i class="bx bx-error-circle" style="color:var(--warning)"></i> Short: <strong>'+shortC+'</strong></span><span><i class="bx bx-plus-circle" style="color:var(--danger)"></i> Excess: <strong>'+excessC+'</strong></span><span><i class="bx bx-x-circle" style="color:var(--danger)"></i> Wrong: <strong>'+wrongC+'</strong></span><span style="margin-left:auto">Total: <strong style="color:var(--accent)">'+ud.scanOrder.length+'</strong></span></div>';
+    }else{summaryDiv.style.display='none';}
+}
+
+// --- Resume Partial ---
 function resumePartialUnload(vehId){
     var partials=DB.filter('partial_unloads',function(p){return p.vehicleId===vehId;});
     partials.sort(function(a,b){return new Date(b.savedAt)-new Date(a.savedAt);});
-    var partial=partials[0];
-    if(!partial){startUnload(vehId);return;}
-    startUnload(vehId,partial);
+    startUnload(vehId,partials[0]||null);
 }
 
-// --- SAVE & BACK (Partial Unload) ---
+// --- Save Partial ---
 function savePartialUnload(){
     var ud=window._unloadData;if(!ud)return;
-    if(!ud.scanOrder.length){showToast('Kam se kam ek item scan karein before saving','error');return;}
-
-    // Check existing partial record
+    if(!ud.scanOrder.length){showToast('Kam se kam ek item scan karein','error');return;}
     var existing=DB.filter('partial_unloads',function(p){return p.vehicleId===ud.vehId;});
-
     if(existing.length>0){
-        // Update existing
-        DB.update('partial_unloads',existing[0].id,{
-            lookupMap:ud.lookupMap,
-            scanResults:ud.scanResults,
-            scanOrder:ud.scanOrder,
-            savedAt:new Date().toISOString(),
-            savedBy:APP.currentUser?APP.currentUser.name:'Unknown'
-        });
-    } else {
-        // Create new
-        DB.add('partial_unloads',{
-            vehicleId:ud.vehId,
-            vehicleNo:ud.vehicleNo,
-            lrNo:ud.lrNo,
-            lookupMap:ud.lookupMap,
-            scanResults:ud.scanResults,
-            scanOrder:ud.scanOrder,
-            savedAt:new Date().toISOString(),
-            savedBy:APP.currentUser?APP.currentUser.name:'Unknown'
-        });
+        DB.update('partial_unloads',existing[0].id,{lookupMap:ud.lookupMap,scanResults:ud.scanResults,scanOrder:ud.scanOrder,savedAt:new Date().toISOString(),savedBy:APP.currentUser?APP.currentUser.name:'Unknown'});
+    }else{
+        DB.add('partial_unloads',{vehicleId:ud.vehId,vehicleNo:ud.vehicleNo,lrNo:ud.lrNo,lookupMap:ud.lookupMap,scanResults:ud.scanResults,scanOrder:ud.scanOrder,savedAt:new Date().toISOString(),savedBy:APP.currentUser?APP.currentUser.name:'Unknown'});
     }
-
-    // Vehicle status change
     DB.update('vehicles',ud.vehId,{status:'Partial Unload'});
-
-    logAction('Unloading','PARTIAL_SAVE','Partial unload saved for '+ud.vehicleNo+' ('+ud.scanOrder.length+' items scanned)');
-    addNotif('Partial unload saved for '+ud.vehicleNo+' — '+ud.scanOrder.length+' items done','info');
-    showToast('Progress saved! Baad mein RESUME kar sakte ho','success');
-    closeModal();
-    renderUnloadingScreen();
+    logAction('Unloading','PARTIAL_SAVE','Partial saved for '+ud.vehicleNo+' ('+ud.scanOrder.length+' items)');
+    showToast('Progress saved! Baad mein RESUME karo','success');
+    closeModal();renderUnloadingScreen();
 }
 
-// --- Discard Partial Unload ---
+// --- Discard Partial ---
 function discardPartialUnload(vehId){
-    if(!confirm('Partial unload data delete ho jayega. Sure?'))return;
-    var partials=DB.filter('partial_unloads',function(p){return p.vehicleId===vehId;});
-    partials.forEach(function(p){DB.remove('partial_unloads',p.id);});
+    if(!confirm('Partial data delete ho jayega. Sure?'))return;
+    DB.filter('partial_unloads',function(p){return p.vehicleId===vehId;}).forEach(function(p){DB.remove('partial_unloads',p.id);});
     DB.update('vehicles',vehId,{status:'Assigned'});
-    logAction('Unloading','PARTIAL_DISCARD','Partial unload discarded for vehicle '+vehId);
-    showToast('Partial data discarded','warning');
-    renderUnloadingScreen();
+    showToast('Partial data discarded','warning');renderUnloadingScreen();
 }
 
-// --- Submit Unloading (FINAL — cleans partial data) ---
+// --- Submit Final ---
 function submitUnloading(){
     var ud=window._unloadData;if(!ud)return;
     if(!ud.scanOrder.length){showToast('Kam se kam ek item scan karein','error');return;}
-
     var unloadNo=DB.unloadNo();
     var materials=[],shortItems=[],excessItems=[],wrongItems=[];
-
     ud.scanOrder.forEach(function(key){
         var r=ud.scanResults[key];
         materials.push({invoiceNo:r.invoiceNo,material:r.material,ean:r.ean,expectedQty:r.expectedQty,scannedQty:r.scannedQty,diff:r.expectedQty-r.scannedQty,match:r.match});
@@ -997,8 +1047,6 @@ function submitUnloading(){
         else if(r.scannedQty<r.expectedQty)shortItems.push({invoiceNo:r.invoiceNo,material:r.material,ean:r.ean,expected:r.expectedQty,scanned:r.scannedQty,short:r.expectedQty-r.scannedQty});
         else if(r.scannedQty>r.expectedQty)excessItems.push({invoiceNo:r.invoiceNo,material:r.material,ean:r.ean,expected:r.expectedQty,scanned:r.scannedQty,excess:r.scannedQty-r.expectedQty});
     });
-
-    // Unscanned expected items bhi short mein daalo
     Object.keys(ud.lookupMap).forEach(function(key){
         if(!ud.scanResults[key]){
             var lm=ud.lookupMap[key];
@@ -1006,66 +1054,35 @@ function submitUnloading(){
             shortItems.push({invoiceNo:lm.invoices.map(function(i){return i.invoiceNo;}).join(', '),material:lm.material,ean:lm.ean,expected:lm.totalExpected,scanned:0,short:lm.totalExpected});
         }
     });
-
-    // Check if this was a partial — add partial info to record
     var partials=DB.filter('partial_unloads',function(p){return p.vehicleId===ud.vehId;});
     var wasPartial=partials.length>0;
-    var partialSessions=0;
-    if(wasPartial){
-        partialSessions=partials.length;
-    }
-
-    DB.add('unloading_records',{
-        unloadNo:unloadNo,vehicleId:ud.vehId,vehicleNo:ud.vehicleNo,lrNo:ud.lrNo,
-        unloadedBy:APP.currentUser.id,unloadedByName:APP.currentUser.name,unloadedAt:new Date().toISOString(),
-        materials:materials,status:'Posting Pending Approval',
-        wasPartial:wasPartial,partialSessions:partialSessions
-    });
-
+    var partialSessions=wasPartial?partials.length:0;
+    DB.add('unloading_records',{unloadNo:unloadNo,vehicleId:ud.vehId,vehicleNo:ud.vehicleNo,lrNo:ud.lrNo,unloadedBy:APP.currentUser.id,unloadedByName:APP.currentUser.name,unloadedAt:new Date().toISOString(),materials:materials,status:'Posting Pending Approval',wasPartial:wasPartial,partialSessions:partialSessions});
     DB.update('vehicles',ud.vehId,{status:'Posting Pending Approval',unloadNo:unloadNo,unloadedBy:APP.currentUser.id,unloadedByName:APP.currentUser.name,unloadedAt:new Date().toISOString()});
-
-    // Update invoice_materials unloaded qty
     ud.scanOrder.forEach(function(key){
         var r=ud.scanResults[key];
         if(r.match&&r.ean){
             var invIds=DB.filter('invoices',function(i){return i.vehicleId===ud.vehId;}).map(function(i){return i.id;});
-            var ims=DB.filter('invoice_materials',function(m){return m.ean&&m.ean.toUpperCase()===r.ean&&invIds.indexOf(m.invoiceId)>-1;});
-            ims.forEach(function(im){DB.update('invoice_materials',im.id,{unloadedQty:(im.unloadedQty||0)+r.scannedQty});});
+            DB.filter('invoice_materials',function(m){return m.ean&&m.ean.toUpperCase()===r.ean&&invIds.indexOf(m.invoiceId)>-1;}).forEach(function(im){DB.update('invoice_materials',im.id,{unloadedQty:(im.unloadedQty||0)+r.scannedQty});});
         }
     });
-
-    // *** DELETE partial unload data — final submit ho gaya ***
     partials.forEach(function(p){DB.remove('partial_unloads',p.id);});
-
-    // Short/Excess report
     var hasDiscrepancy=shortItems.length>0||excessItems.length>0||wrongItems.length>0;
     var reportId=null;
     if(hasDiscrepancy){
         var reportNo=generateSERNo();
         var totalExp=0,totalScn=0;
         materials.forEach(function(m){totalExp+=m.expectedQty;totalScn+=m.scannedQty;});
-        reportId=DB.add('short_excess_reports',{
-            reportNo:reportNo,vehicleNo:ud.vehicleNo,lrNo:ud.lrNo,unloadNo:unloadNo,
-            shortItems:shortItems,excessItems:excessItems,wrongItems:wrongItems,
-            totalExpected:totalExp,totalScanned:totalScn,
-            wasPartial:wasPartial,partialSessions:partialSessions,
-            createdBy:APP.currentUser.name,createdAt:new Date().toISOString()
-        }).id;
+        reportId=DB.add('short_excess_reports',{reportNo:reportNo,vehicleNo:ud.vehicleNo,lrNo:ud.lrNo,unloadNo:unloadNo,shortItems:shortItems,excessItems:excessItems,wrongItems:wrongItems,totalExpected:totalExp,totalScanned:totalScn,wasPartial:wasPartial,partialSessions:partialSessions,createdBy:APP.currentUser.name,createdAt:new Date().toISOString()}).id;
     }
-
-    var msg='Unloading '+unloadNo+' submitted for '+ud.vehicleNo;
-    if(wasPartial)msg+=' (Resumed from '+partialSessions+' partial sessions)';
-    addNotif(msg,'warning');
-    logAction('Unloading','SUBMIT',msg);
-    showToast('Unloading submitted!'+(wasPartial?' ('+partialSessions+' partial sessions)':''),'success');
+    addNotif('Unloading '+unloadNo+' submitted for '+ud.vehicleNo,'warning');
+    logAction('Unloading','SUBMIT',unloadNo+' for '+ud.vehicleNo);
+    showToast('Unloading submitted!','success');
     closeModal();
-    if(reportId){setTimeout(function(){showSEReport(reportId);},400);}
-    else{renderUnloadingScreen();}
+    if(reportId)setTimeout(function(){showSEReport(reportId);},400);
+    else renderUnloadingScreen();
 }
-function generateSERNo(){
-    var existing=DB.get('short_excess_reports');
-    return 'SER-'+new Date().getFullYear()+'-'+String(existing.length+1).padStart(4,'0');
-}
+function generateSERNo(){return 'SER-'+new Date().getFullYear()+'-'+String(DB.get('short_excess_reports').length+1).padStart(4,'0');}
 
 // --- Short/Excess Report ---
 function showSEReport(reportId){
@@ -1102,119 +1119,68 @@ function showSEReport(reportId){
 // --- PDF Download ---
 function downloadSERPDF(reportId){
     var report=DB.find('short_excess_reports',reportId);if(!report){showToast('Report not found','error');return;}
-    var jsPDF=window.jspdf.jsPDF;
-    var doc=new jsPDF({unit:'mm',format:'a4'});
-    var y=15;
+    var jsPDF=window.jspdf.jsPDF;var doc=new jsPDF({unit:'mm',format:'a4'});var y=15;
     doc.setFillColor(15,23,42);doc.rect(0,0,210,40,'F');
-    doc.setTextColor(0,255,136);doc.setFontSize(18);doc.setFont('helvetica','bold');
-    doc.text('SHORT / EXCESS REPORT',105,y+8,{align:'center'});
-    doc.setTextColor(200,200,200);doc.setFontSize(10);doc.setFont('helvetica','normal');
-    doc.text(report.reportNo,105,y+18,{align:'center'});
-    doc.setTextColor(150,150,150);doc.setFontSize(8);
-    doc.text('Generated: '+fmtDT(new Date()),105,y+26,{align:'center'});
-    y=48;
-    doc.setDrawColor(0,255,136);doc.setLineWidth(0.5);doc.rect(10,y,190,22);
+    doc.setTextColor(0,255,136);doc.setFontSize(18);doc.setFont('helvetica','bold');doc.text('SHORT / EXCESS REPORT',105,y+8,{align:'center'});
+    doc.setTextColor(200,200,200);doc.setFontSize(10);doc.setFont('helvetica','normal');doc.text(report.reportNo,105,y+18,{align:'center'});
+    doc.setTextColor(150,150,150);doc.setFontSize(8);doc.text('Generated: '+fmtDT(new Date()),105,y+26,{align:'center'});
+    y=48;doc.setDrawColor(0,255,136);doc.setLineWidth(0.5);doc.rect(10,y,190,22);
     doc.setTextColor(30,30,30);doc.setFontSize(9);doc.setFont('helvetica','bold');
-    doc.text('Vehicle: '+report.vehicleNo,15,y+7);
-    doc.text('LR: '+(report.lrNo||'-'),80,y+7);
-    doc.text('Unload: '+report.unloadNo,140,y+7);
-    doc.text('By: '+report.createdBy,15,y+16);
-    doc.text('Date: '+fmtDT(report.createdAt),80,y+16);
-    y=78;
-    doc.setFillColor(240,240,240);doc.roundedRect(10,y,58,18,3,3,'F');
-    doc.roundedRect(76,y,58,18,3,3,'F');
-    doc.roundedRect(142,y,58,18,3,3,'F');
-    doc.setFontSize(14);doc.setFont('helvetica','bold');doc.setTextColor(0,100,200);
-    doc.text(String(report.totalExpected),39,y+12,{align:'center'});
-    doc.setTextColor(0,180,80);
-    doc.text(String(report.totalScanned),105,y+12,{align:'center'});
-    doc.setTextColor(220,50,50);
-    doc.text(String(report.totalExpected-report.totalScanned),171,y+12,{align:'center'});
-    doc.setFontSize(7);doc.setTextColor(100,100,100);doc.setFont('helvetica','normal');
-    doc.text('EXPECTED',39,y+17,{align:'center'});
-    doc.text('SCANNED',105,y+17,{align:'center'});
-    doc.text('DIFFERENCE',171,y+17,{align:'center'});
+    doc.text('Vehicle: '+report.vehicleNo,15,y+7);doc.text('LR: '+(report.lrNo||'-'),80,y+7);doc.text('Unload: '+report.unloadNo,140,y+7);
+    doc.text('By: '+report.createdBy,15,y+16);doc.text('Date: '+fmtDT(report.createdAt),80,y+16);
+    y=78;doc.setFillColor(240,240,240);doc.roundedRect(10,y,58,18,3,3,'F');doc.roundedRect(76,y,58,18,3,3,'F');doc.roundedRect(142,y,58,18,3,3,'F');
+    doc.setFontSize(14);doc.setFont('helvetica','bold');doc.setTextColor(0,100,200);doc.text(String(report.totalExpected),39,y+12,{align:'center'});
+    doc.setTextColor(0,180,80);doc.text(String(report.totalScanned),105,y+12,{align:'center'});
+    doc.setTextColor(220,50,50);doc.text(String(report.totalExpected-report.totalScanned),171,y+12,{align:'center'});
+    doc.setFontSize(7);doc.setTextColor(100,100,100);doc.setFont('helvetica','normal');doc.text('EXPECTED',39,y+17,{align:'center'});doc.text('SCANNED',105,y+17,{align:'center'});doc.text('DIFFERENCE',171,y+17,{align:'center'});
     y=104;
-    function addTableHeader(cols,colors){
-        doc.setFillColor(30,40,60);doc.rect(10,y,190,8,'F');
-        doc.setTextColor(255,255,255);doc.setFontSize(7);doc.setFont('helvetica','bold');
-        var x=12;cols.forEach(function(c,i){doc.text(c,x,y+5.5);x+=colors[i];});y+=10;
-    }
-    function addTableRow(cells,widths,isAlt){
-        if(isAlt){doc.setFillColor(245,245,245);doc.rect(10,y-3,190,7,'F');}
-        doc.setTextColor(30,30,30);doc.setFontSize(7);doc.setFont('helvetica','normal');
-        var x=12;cells.forEach(function(c,i){doc.text(String(c),x,y+1);x+=widths[i];});y+=6;
-    }
-    function checkPage(n){if(y+n>280){doc.addPage();y=15;}}
-    if(report.shortItems&&report.shortItems.length){
-        checkPage(30);doc.setTextColor(200,120,0);doc.setFontSize(10);doc.setFont('helvetica','bold');
-        doc.text('SHORT ITEMS ('+report.shortItems.length+')',10,y);y+=6;
-        addTableHeader(['Material','EAN','Invoice','Expected','Scanned','Short'],[55,40,35,20,20,20]);
-        report.shortItems.forEach(function(s,i){checkPage(8);addTableRow([s.material||'-',s.ean||'-',s.invoiceNo||'-',String(s.expected),String(s.scanned),'-'+s.short],[55,40,35,20,20,20],i%2===1);});
-        y+=4;
-    }
-    if(report.excessItems&&report.excessItems.length){
-        checkPage(30);doc.setTextColor(220,50,50);doc.setFontSize(10);doc.setFont('helvetica','bold');
-        doc.text('EXCESS ITEMS ('+report.excessItems.length+')',10,y);y+=6;
-        addTableHeader(['Material','EAN','Invoice','Expected','Scanned','Excess'],[55,40,35,20,20,20]);
-        report.excessItems.forEach(function(s,i){checkPage(8);addTableRow([s.material||'-',s.ean||'-',s.invoiceNo||'-',String(s.expected),String(s.scanned),'+'+s.excess],[55,40,35,20,20,20],i%2===1);});
-        y+=4;
-    }
-    if(report.wrongItems&&report.wrongItems.length){
-        checkPage(30);doc.setTextColor(220,50,50);doc.setFontSize(10);doc.setFont('helvetica','bold');
-        doc.text('WRONG ITEMS ('+report.wrongItems.length+')',10,y);y+=6;
-        addTableHeader(['EAN','Material','Qty Scanned'],[60,80,50]);
-        report.wrongItems.forEach(function(s,i){checkPage(8);addTableRow([s.ean||'-',s.material||'-',String(s.scannedQty)],[60,80,50],i%2===1);});
-    }
-    y=272;doc.setDrawColor(150,150,150);doc.line(10,y,200,y);
-    doc.setTextColor(130,130,130);doc.setFontSize(7);
-    doc.text('System Generated — '+report.reportNo+' — '+APP.currentUser.name,105,y+5,{align:'center'});
-    doc.save(report.reportNo+'.pdf');
-    showToast('PDF downloaded!','success');
-    logAction('Report','PDF_DOWNLOAD','SER PDF '+report.reportNo);
+    function addTH(cols,w){doc.setFillColor(30,40,60);doc.rect(10,y,190,8,'F');doc.setTextColor(255,255,255);doc.setFontSize(7);doc.setFont('helvetica','bold');var x=12;cols.forEach(function(c,i){doc.text(c,x,y+5.5);x+=w[i];});y+=10;}
+    function addTR(cells,w,alt){if(alt){doc.setFillColor(245,245,245);doc.rect(10,y-3,190,7,'F');}doc.setTextColor(30,30,30);doc.setFontSize(7);doc.setFont('helvetica','normal');var x=12;cells.forEach(function(c,i){doc.text(String(c),x,y+1);x+=w[i];});y+=6;}
+    function chkPg(n){if(y+n>280){doc.addPage();y=15;}}
+    if(report.shortItems&&report.shortItems.length){chkPg(30);doc.setTextColor(200,120,0);doc.setFontSize(10);doc.setFont('helvetica','bold');doc.text('SHORT ITEMS ('+report.shortItems.length+')',10,y);y+=6;addTH(['Material','EAN','Invoice','Expected','Scanned','Short'],[55,40,35,20,20,20]);report.shortItems.forEach(function(s,i){chkPg(8);addTR([s.material||'-',s.ean||'-',s.invoiceNo||'-',String(s.expected),String(s.scanned),'-'+s.short],[55,40,35,20,20,20],i%2===1);});y+=4;}
+    if(report.excessItems&&report.excessItems.length){chkPg(30);doc.setTextColor(220,50,50);doc.setFontSize(10);doc.setFont('helvetica','bold');doc.text('EXCESS ITEMS ('+report.excessItems.length+')',10,y);y+=6;addTH(['Material','EAN','Invoice','Expected','Scanned','Excess'],[55,40,35,20,20,20]);report.excessItems.forEach(function(s,i){chkPg(8);addTR([s.material||'-',s.ean||'-',s.invoiceNo||'-',String(s.expected),String(s.scanned),'+'+s.excess],[55,40,35,20,20,20],i%2===1);});y+=4;}
+    if(report.wrongItems&&report.wrongItems.length){chkPg(30);doc.setTextColor(220,50,50);doc.setFontSize(10);doc.setFont('helvetica','bold');doc.text('WRONG ITEMS ('+report.wrongItems.length+')',10,y);y+=6;addTH(['EAN','Material','Qty'],[60,80,50]);report.wrongItems.forEach(function(s,i){chkPg(8);addTR([s.ean||'-',s.material||'-',String(s.scannedQty)],[60,80,50],i%2===1);});}
+    y=272;doc.setDrawColor(150,150,150);doc.line(10,y,200,y);doc.setTextColor(130,130,130);doc.setFontSize(7);doc.text('System Generated — '+report.reportNo+' — '+(APP.currentUser?APP.currentUser.name:''),105,y+5,{align:'center'});
+    doc.save(report.reportNo+'.pdf');showToast('PDF downloaded!','success');
 }
 
 // --- Posting Pending ---
 function renderPostingPending(){
     var pending=DB.filter('vehicles',function(v){return v.status==='Posting Pending Approval';});
     var h='<div class="section-header"><h2><i class="bx bx-error-circle"></i> Posting Pending Approval ('+pending.length+')</h2></div>';
-    if(!pending.length){h+='<div class="card"><div class="empty-state"><i class="bx bx-check-circle"></i><p>All clear! No pending approvals.</p></div></div>';setHtml(h);return;}
+    if(!pending.length){h+='<div class="card"><div class="empty-state"><i class="bx bx-check-circle"></i><p>All clear!</p></div></div>';setHtml(h);return;}
     pending.forEach(function(v){
         var rec=DB.filter('unloading_records',function(r){return r.vehicleId===v.id&&r.status==='Posting Pending Approval';})[0];
         h+='<div class="card" style="margin-bottom:12px"><div class="card-title"><i class="bx bxs-truck"></i> '+esc(v.vehicleNo)+' — '+esc(v.lrNo||'')+'</div>';
         h+='<div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Unload No: <strong style="color:var(--accent);font-family:var(--font-display)">'+esc(v.unloadNo||'-')+'</strong> | By: '+esc(v.unloadedByName||'-')+' | Time: '+fmtDT(v.unloadedAt)+'</div>';
         if(rec&&rec.materials){
             h+='<div class="table-wrapper" style="max-height:200px;overflow-y:auto"><table class="data-table"><thead><tr><th>Invoice</th><th>Material</th><th>EAN</th><th>Expected</th><th>Scanned</th><th>Diff</th></tr></thead><tbody>';
-            rec.materials.forEach(function(m){
-                var cls=m.diff===0?'qty-match':'qty-mismatch';
-                h+='<tr><td style="font-size:11px">'+esc(m.invoiceNo)+'</td><td>'+esc(m.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(m.ean)+'</td><td>'+m.expectedQty+'</td><td>'+m.scannedQty+'</td><td class="'+cls+'">'+(m.diff>0?'-'+m.diff:(m.diff<0?'+'+Math.abs(m.diff):'0'))+'</td></tr>';
-            });
+            rec.materials.forEach(function(m){var cls=m.diff===0?'qty-match':'qty-mismatch';h+='<tr><td style="font-size:11px">'+esc(m.invoiceNo)+'</td><td>'+esc(m.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(m.ean)+'</td><td>'+m.expectedQty+'</td><td>'+m.scannedQty+'</td><td class="'+cls+'">'+(m.diff>0?'-'+m.diff:(m.diff<0?'+'+Math.abs(m.diff):'0'))+'</td></tr>';});
             h+='</tbody></table></div>';
         }
         h+='<div class="form-actions">';
         if(chkAct('canPostVehicle'))h+='<button class="btn btn-glass" onclick="postVehicle(\''+v.id+'\')"><i class="bx bx-check-double"></i> Post Vehicle</button>';
-        h+='<button class="btn btn-glass" onclick="viewUnloadingDetail(\''+v.id+'\')"><i class="bx bx-eye"></i> Full Detail</button>';
+        h+='<button class="btn btn-glass" onclick="viewUnloadingDetail(\''+v.id+'\')"><i class="bx bx-eye"></i> View</button>';
         h+='</div></div>';
     });
     setHtml(h);
 }
 
-// --- Post Vehicle (GRN = GRN-InvoiceNo) ---
+// --- Post Vehicle ---
 function postVehicle(vehId){
     var v=DB.find('vehicles',vehId);if(!v)return;
     var invs=DB.filter('invoices',function(i){return i.vehicleId===vehId;});
     var grnList=[];
     invs.forEach(function(inv){
         var grnNo='GRN-'+inv.invoiceNo;
-        grnList.push({invoiceId:inv.id,invoiceNo:inv.invoiceNo,grnNo:grnNo});
+        grnList.push(grnNo);
         DB.add('grn_records',{grnNo:grnNo,vehicleId:vehId,vehicleNo:v.vehicleNo,lrNo:v.lrNo,invoiceId:inv.id,invoiceNo:inv.invoiceNo,postedBy:APP.currentUser.id,postedByName:APP.currentUser.name,postedAt:new Date().toISOString()});
         DB.update('invoices',inv.id,{status:'Posted',grnNo:grnNo});
     });
-    var recs=DB.filter('unloading_records',function(r){return r.vehicleId===vehId&&r.status==='Posting Pending Approval';});
-    recs.forEach(function(r){DB.update('unloading_records',r.id,{status:'Posted'});});
+    DB.filter('unloading_records',function(r){return r.vehicleId===vehId&&r.status==='Posting Pending Approval';}).forEach(function(r){DB.update('unloading_records',r.id,{status:'Posted'});});
     DB.update('vehicles',vehId,{status:'Posted'});
-    addNotif('Vehicle '+v.vehicleNo+' posted. GRNs: '+grnList.map(function(g){return g.grnNo;}).join(', '),'success');
-    logAction('Inbound','POST','Vehicle '+v.vehicleNo+' posted. GRNs: '+grnList.length);
+    addNotif('Vehicle '+v.vehicleNo+' posted. GRNs: '+grnList.join(', '),'success');
+    logAction('Inbound','POST','Vehicle '+v.vehicleNo+' posted. '+grnList.length+' GRNs');
     showToast('Vehicle posted! '+grnList.length+' GRN(s) created.','success');
     if(APP.currentSub==='posting-pending')renderPostingPending();
     else if(APP.currentSub==='pending-vehicle')renderPendingVehicle();
@@ -1224,91 +1190,62 @@ function postVehicle(vehId){
 function viewUnloadingDetail(vehId){
     var v=DB.find('vehicles',vehId);if(!v)return;
     var recs=DB.filter('unloading_records',function(r){return r.vehicleId===vehId;});
-    var rec=recs[recs.length-1];if(!rec){showToast('No unloading record','error');return;}
-    var h='<div style="margin-bottom:12px"><strong>Vehicle:</strong> '+esc(v.vehicleNo)+' | <strong>LR:</strong> '+esc(v.lrNo||'-')+' | <strong>Unload No:</strong> <span style="color:var(--accent);font-family:var(--font-display)">'+esc(rec.unloadNo)+'</span></div>';
+    var rec=recs[recs.length-1];if(!rec){showToast('No record','error');return;}
+    var h='<div style="margin-bottom:12px"><strong>Vehicle:</strong> '+esc(v.vehicleNo)+' | <strong>LR:</strong> '+esc(v.lrNo||'-')+' | <strong>Unload:</strong> <span style="color:var(--accent);font-family:var(--font-display)">'+esc(rec.unloadNo)+'</span></div>';
     h+='<div style="margin-bottom:8px"><strong>By:</strong> '+esc(rec.unloadedByName||'-')+' | <strong>Time:</strong> '+fmtDT(rec.unloadedAt)+'</div>';
     h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Invoice</th><th>Material</th><th>EAN</th><th>Expected</th><th>Scanned</th><th>Diff</th></tr></thead><tbody>';
-    rec.materials.forEach(function(m){
-        var cls=m.diff===0?'qty-match':'qty-mismatch';
-        h+='<tr class="'+(m.diff===0?'':'scan-row-red')+'"><td>'+esc(m.invoiceNo)+'</td><td>'+esc(m.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(m.ean)+'</td><td>'+m.expectedQty+'</td><td>'+m.scannedQty+'</td><td class="'+cls+'">'+(m.diff>0?'Short: -'+m.diff:(m.diff<0?'Extra: +'+Math.abs(m.diff):'0'))+'</td></tr>';
-    });
+    rec.materials.forEach(function(m){var cls=m.diff===0?'qty-match':'qty-mismatch';h+='<tr class="'+(m.diff===0?'':'scan-row-red')+'"><td>'+esc(m.invoiceNo)+'</td><td>'+esc(m.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(m.ean)+'</td><td>'+m.expectedQty+'</td><td>'+m.scannedQty+'</td><td class="'+cls+'">'+(m.diff>0?'Short: -'+m.diff:(m.diff<0?'Extra: +'+Math.abs(m.diff):'0'))+'</td></tr>';});
     h+='</tbody></table></div>';
     var serReports=DB.filter('short_excess_reports',function(s){return s.vehicleNo===v.vehicleNo;});
-    if(serReports.length){
-        h+='<div style="margin-top:12px"><strong style="color:var(--warning)">Discrepancy Reports:</strong></div>';
-        serReports.forEach(function(s){
-            var itemCount=(s.shortItems||[]).length+(s.excessItems||[]).length+(s.wrongItems||[]).length;
-            h+='<div class="inv-list-item" onclick="showSEReport(\''+s.id+'\')"><div class="ili-left"><span class="ili-invno">'+esc(s.reportNo)+'</span><span class="ili-info">'+itemCount+' items | Expected: '+s.totalExpected+' | Scanned: '+s.totalScanned+'</span></div><span class="badge badge-danger">View / PDF</span></div>';
-        });
-    }
+    if(serReports.length){h+='<div style="margin-top:12px"><strong style="color:var(--warning)">Reports:</strong></div>';serReports.forEach(function(s){h+='<div class="inv-list-item" onclick="showSEReport(\''+s.id+'\')"><div class="ili-left"><span class="ili-invno">'+esc(s.reportNo)+'</span><span class="ili-info">Expected: '+s.totalExpected+' | Scanned: '+s.totalScanned+'</span></div><span class="badge badge-danger">View/PDF</span></div>';});}
     var grns=DB.filter('grn_records',function(g){return g.vehicleId===vehId;});
-    if(grns.length){
-        h+='<div style="margin-top:12px"><strong style="color:var(--accent)">GRN Numbers:</strong></div>';
-        grns.forEach(function(g){h+='<div class="inv-list-item"><div class="ili-left"><span class="ili-invno">'+esc(g.grnNo)+'</span><span class="ili-info">'+esc(g.invoiceNo)+'</span></div></div>';});
-    }
+    if(grns.length){h+='<div style="margin-top:12px"><strong style="color:var(--accent)">GRNs:</strong></div>';grns.forEach(function(g){h+='<div class="inv-list-item"><div class="ili-left"><span class="ili-invno">'+esc(g.grnNo)+'</span><span class="ili-info">'+esc(g.invoiceNo)+'</span></div></div>';});}
     showModal('Unloading Detail — '+v.vehicleNo,h,'lg','<button class="btn btn-glass" onclick="closeModal()">Close</button>');
 }
 
 // --- Inbound Record ---
 function renderInboundRecord(){
     var vehs=DB.get('vehicles').filter(function(v){return v.vehicleType==='Unloading';}).reverse();
-    var h='<div class="section-header"><h2><i class="bx bx-list-ul"></i> Inbound Record ('+vehs.length+')</h2>';
-    h+='<button class="btn btn-glass" onclick="exportInboundExcel()"><i class="bx bx-download"></i> Excel</button></div>';
-    h+='<div class="card" style="margin-bottom:12px"><div class="card-title"><i class="bx bx-search"></i> Search GRN No — Inbound Material</div>';
-    h+='<div class="search-box" style="max-width:500px"><i class="bx bx-barcode"></i><input type="text" id="grnSearchInput" placeholder="GRN-INV001 type karein..." oninput="searchGRNForMaterial()" style="font-family:var(--font-display);letter-spacing:1px"></div>';
-    h+='<div id="grnSearchResult"></div></div>';
+    var h='<div class="section-header"><h2><i class="bx bx-list-ul"></i> Inbound Record ('+vehs.length+')</h2><button class="btn btn-glass" onclick="exportInboundExcel()"><i class="bx bx-download"></i> Excel</button></div>';
+    h+='<div class="card" style="margin-bottom:12px"><div class="card-title"><i class="bx bx-search"></i> Search GRN No</div>';
+    h+='<div class="search-box" style="max-width:500px"><i class="bx bx-barcode"></i><input type="text" id="grnSearchInput" placeholder="GRN-INV001..." oninput="searchGRNForMaterial()" style="font-family:var(--font-display);letter-spacing:1px"></div><div id="grnSearchResult"></div></div>';
     h+='<div class="search-box"><i class="bx bx-search"></i><input type="text" id="inboundRecSearch" placeholder="Search vehicle, LR..." oninput="filterInboundRec()"></div>';
     h+='<div id="inboundRecTable">'+buildInboundRecTable(vehs)+'</div>';
     setHtml(h);
 }
 function searchGRNForMaterial(){
     var q=document.getElementById('grnSearchInput').value.trim().toUpperCase();
-    var container=document.getElementById('grnSearchResult');
-    if(!q){container.innerHTML='';return;}
+    var c=document.getElementById('grnSearchResult');if(!q){c.innerHTML='';return;}
     var grns=DB.filter('grn_records',function(g){return (g.grnNo||'').toUpperCase().indexOf(q)>-1;});
-    if(!grns.length){container.innerHTML='<div style="color:var(--text-muted);padding:12px;font-size:12px">GRN nahi mila</div>';return;}
+    if(!grns.length){c.innerHTML='<div style="color:var(--text-muted);padding:12px;font-size:12px">GRN nahi mila</div>';return;}
     var h='';
     grns.forEach(function(g){
         var mats=DB.filter('invoice_materials',function(m){return m.invoiceId===g.invoiceId;});
         h+='<div style="margin-top:10px;padding:12px;border:1px solid var(--accent);border-radius:var(--radius-sm);background:var(--accent-dim)">';
-        h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><span style="font-family:var(--font-display);font-size:13px;font-weight:700;color:var(--accent)">'+esc(g.grnNo)+'</span><span style="font-size:11px;color:var(--text-muted)">'+fmtDT(g.postedAt)+'</span></div>';
-        h+='<div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">Invoice: <strong>'+esc(g.invoiceNo)+'</strong> | Vehicle: <strong>'+esc(g.vehicleNo)+'</strong> | LR: <strong>'+esc(g.lrNo||'-')+'</strong></div>';
-        h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>EAN</th><th>Invoice Qty</th><th>Unloaded Qty</th><th>Status</th></tr></thead><tbody>';
-        var totalInv=0,totalUnl=0;
-        mats.forEach(function(m){
-            totalInv+=m.qty;totalUnl+=(m.unloadedQty||0);
-            var diff=m.qty-(m.unloadedQty||0);
-            var stCls=diff===0?'badge-success':'badge-warning';
-            h+='<tr><td>'+esc(m.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(m.ean)+'</td><td>'+m.qty+'</td><td>'+(m.unloadedQty||0)+'</td><td><span class="badge '+stCls+'">'+(diff===0?'Full':'Short: '+diff)+'</span></td></tr>';
-        });
-        h+='<tr style="background:var(--bg-secondary);font-weight:700"><td colspan="2">TOTAL</td><td style="color:var(--accent)">'+totalInv+'</td><td style="color:var(--success)">'+totalUnl+'</td><td>'+(totalInv===totalUnl?'<span class="badge badge-success">Complete</span>':'<span class="badge badge-warning">Pending: '+(totalInv-totalUnl)+'</span>')+'</td></tr>';
+        h+='<div style="display:flex;justify-content:space-between;margin-bottom:8px"><span style="font-family:var(--font-display);font-size:13px;font-weight:700;color:var(--accent)">'+esc(g.grnNo)+'</span><span style="font-size:11px;color:var(--text-muted)">'+fmtDT(g.postedAt)+'</span></div>';
+        h+='<div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">Invoice: <strong>'+esc(g.invoiceNo)+'</strong> | Vehicle: <strong>'+esc(g.vehicleNo)+'</strong></div>';
+        h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>EAN</th><th>Inv Qty</th><th>Unloaded</th><th>Status</th></tr></thead><tbody>';
+        mats.forEach(function(m){var diff=m.qty-(m.unloadedQty||0);h+='<tr><td>'+esc(m.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(m.ean)+'</td><td>'+m.qty+'</td><td>'+(m.unloadedQty||0)+'</td><td><span class="badge '+(diff===0?'badge-success':'badge-warning')+'">'+(diff===0?'Full':'Short: '+diff)+'</span></td></tr>';});
         h+='</tbody></table></div></div>';
     });
-    container.innerHTML=h;
+    c.innerHTML=h;
 }
 function buildInboundRecTable(vehs){
-    var h='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Vehicle No</th><th>LR No</th><th>Transport</th><th>Invoices</th><th>Status</th><th>Entry By</th><th>GRN</th><th>Actions</th></tr></thead><tbody>';
+    var h='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Vehicle</th><th>LR</th><th>Transport</th><th>Invoices</th><th>Status</th><th>Entry By</th><th>GRN</th><th></th></tr></thead><tbody>';
     if(!vehs.length)h+='<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:24px">No records</td></tr>';
     else vehs.forEach(function(v){
         var invs=DB.filter('invoices',function(i){return i.vehicleId===v.id;});
         var grns=DB.filter('grn_records',function(g){return g.vehicleId===v.id;});
         var grnStr=grns.map(function(g){return g.grnNo;}).join(', ')||'-';
-        var statusCls=v.status==='Posted'?'badge-success':(v.status==='Posting Pending Approval'?'badge-warning':(v.status==='Assigned'?'badge-info':'badge-warning'));
-        h+='<tr><td><strong>'+esc(v.vehicleNo)+'</strong></td><td>'+esc(v.lrNo||'-')+'</td><td>'+esc(v.transportName||'-')+'</td><td><span class="badge badge-info">'+invs.length+'</span></td><td><span class="badge '+statusCls+'">'+esc(v.status)+'</span></td><td style="font-size:11px;color:var(--text-secondary)">'+esc(v.entryByName||'-')+'</td><td style="font-size:10px;font-family:var(--font-display);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(grnStr)+'</td><td><div class="table-actions">';
-        h+='<button class="btn btn-glass btn-sm" onclick="viewUnloadingDetail(\''+v.id+'\')"><i class="bx bx-eye"></i></button>';
-        h+='</div></td></tr>';
+        var sc=v.status==='Posted'?'badge-success':(v.status==='Partial Unload'?'badge-info':'badge-warning');
+        h+='<tr><td><strong>'+esc(v.vehicleNo)+'</strong></td><td>'+esc(v.lrNo||'-')+'</td><td>'+esc(v.transportName||'-')+'</td><td><span class="badge badge-info">'+invs.length+'</span></td><td><span class="badge '+sc+'">'+esc(v.status)+'</span></td><td style="font-size:11px;color:var(--text-secondary)">'+esc(v.entryByName||'-')+'</td><td style="font-size:10px;font-family:var(--font-display);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(grnStr)+'</td><td><button class="btn btn-glass btn-sm" onclick="viewUnloadingDetail(\''+v.id+'\')"><i class="bx bx-eye"></i></button></td></tr>';
     });
-    h+='</tbody></table></div>';
-    return h;
+    h+='</tbody></table></div>';return h;
 }
 function filterInboundRec(){
     var q=document.getElementById('inboundRecSearch').value.trim().toLowerCase();
     var vehs=DB.get('vehicles').filter(function(v){return v.vehicleType==='Unloading';}).reverse();
-    if(q){
-        vehs=vehs.filter(function(v){
-            return (v.vehicleNo||'').toLowerCase().indexOf(q)>-1||(v.lrNo||'').toLowerCase().indexOf(q)>-1||(v.transportName||'').toLowerCase().indexOf(q)>-1||(v.entryByName||'').toLowerCase().indexOf(q)>-1;
-        });
-    }
+    if(q)vehs=vehs.filter(function(v){return(v.vehicleNo||'').toLowerCase().indexOf(q)>-1||(v.lrNo||'').toLowerCase().indexOf(q)>-1||(v.transportName||'').toLowerCase().indexOf(q)>-1;});
     document.getElementById('inboundRecTable').innerHTML=buildInboundRecTable(vehs);
 }
 function exportInboundExcel(){
@@ -1323,46 +1260,29 @@ function exportInboundExcel(){
 function renderUnloadingStock(){
     var grns=DB.get('grn_records').reverse();
     var h='<div class="section-header"><h2><i class="bx bx-box"></i> Unloading Stock</h2></div>';
-    h+='<div class="search-box"><i class="bx bx-search"></i><input type="text" id="stockSearch" placeholder="Search GRN No or Invoice No..." oninput="filterStock()"></div>';
+    h+='<div class="search-box"><i class="bx bx-search"></i><input type="text" id="stockSearch" placeholder="Search GRN or Invoice..." oninput="filterStock()"></div>';
     h+='<div id="stockList">'+buildStockList(grns)+'</div>';
     setHtml(h);
 }
 function buildStockList(grns){
-    var h='';
-    if(!grns.length){h+='<div class="card"><div class="empty-state"><i class="bx bx-inbox"></i><p>No unloading stock</p></div></div>';return h;}
-    grns.forEach(function(g){
-        var mats=DB.filter('invoice_materials',function(m){return m.invoiceId===g.invoiceId;});
-        h+='<div class="inv-list-item" onclick="showStockDetail(\''+g.id+'\')"><div class="ili-left"><span class="ili-invno">'+esc(g.grnNo)+'</span><span class="ili-info">'+esc(g.invoiceNo)+' | '+esc(g.vehicleNo)+' | '+mats.length+' materials</span></div><span class="badge badge-accent">'+fmtDate(g.postedAt)+'</span></div>';
-    });
-    return h;
+    if(!grns.length)return '<div class="card"><div class="empty-state"><i class="bx bx-inbox"></i><p>No stock</p></div></div>';
+    var h='';grns.forEach(function(g){var mc=DB.filter('invoice_materials',function(m){return m.invoiceId===g.invoiceId;}).length;h+='<div class="inv-list-item" onclick="showStockDetail(\''+g.id+'\')"><div class="ili-left"><span class="ili-invno">'+esc(g.grnNo)+'</span><span class="ili-info">'+esc(g.invoiceNo)+' | '+esc(g.vehicleNo)+' | '+mc+' materials</span></div><span class="badge badge-accent">'+fmtDate(g.postedAt)+'</span></div>';});return h;
 }
 function filterStock(){
     var q=document.getElementById('stockSearch').value.trim().toLowerCase();
     var grns=DB.get('grn_records').reverse();
-    if(q){grns=grns.filter(function(g){return (g.grnNo||'').toLowerCase().indexOf(q)>-1||(g.invoiceNo||'').toLowerCase().indexOf(q)>-1;});}
+    if(q)grns=grns.filter(function(g){return(g.grnNo||'').toLowerCase().indexOf(q)>-1||(g.invoiceNo||'').toLowerCase().indexOf(q)>-1;});
     document.getElementById('stockList').innerHTML=buildStockList(grns);
 }
 function showStockDetail(grnId){
     var g=DB.find('grn_records',grnId);if(!g)return;
     var mats=DB.filter('invoice_materials',function(m){return m.invoiceId===g.invoiceId;});
     var h='<div style="margin-bottom:12px"><strong>GRN:</strong> <span style="color:var(--accent);font-family:var(--font-display)">'+esc(g.grnNo)+'</span> | <strong>Invoice:</strong> '+esc(g.invoiceNo)+' | <strong>Vehicle:</strong> '+esc(g.vehicleNo)+'</div>';
-    h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>EAN</th><th>Invoice Qty</th><th>Unloaded Qty</th><th>Remaining</th></tr></thead><tbody>';
-    mats.forEach(function(m){
-        var remaining=m.qty-(m.unloadedQty||0);
-        h+='<tr><td>'+esc(m.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(m.ean)+'</td><td>'+m.qty+'</td><td>'+(m.unloadedQty||0)+'</td><td class="'+(remaining>0?'qty-match':'')+'">'+remaining+'</td></tr>';
-    });
+    h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>EAN</th><th>Inv Qty</th><th>Unloaded</th><th>Remaining</th></tr></thead><tbody>';
+    mats.forEach(function(m){var rem=m.qty-(m.unloadedQty||0);h+='<tr><td>'+esc(m.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(m.ean)+'</td><td>'+m.qty+'</td><td>'+(m.unloadedQty||0)+'</td><td class="'+(rem>0?'qty-match':'')+'">'+rem+'</td></tr>';});
     h+='</tbody></table></div>';
-    h+='<div class="form-actions"><button class="btn btn-glass" onclick="startPutawayFromStock(\''+g.id+'\')"><i class="bx bx-package"></i> Start Putaway</button></div>';
+    h+='<div class="form-actions"><button class="btn btn-glass" onclick="closeModal();navTo(\'putaway\');setTimeout(function(){var i=document.getElementById(\'putawayInvNo\');if(i){i.value=\''+esc(g.invoiceNo)+'\';filterPutawayInv();}},200);"><i class="bx bx-package"></i> Start Putaway</button></div>';
     showModal('Stock Detail — '+g.grnNo,h,'lg','<button class="btn btn-glass" onclick="closeModal()">Close</button>');
-}
-function startPutawayFromStock(grnId){
-    closeModal();
-    var g=DB.find('grn_records',grnId);if(!g)return;
-    navTo('putaway');
-    setTimeout(function(){
-        var invNoInput=document.getElementById('putawayInvNo');
-        if(invNoInput){invNoInput.value=g.invoiceNo;filterPutawayInv();}
-    },200);
 }
 
 // ==================== PUTAWAY ====================
@@ -4016,3 +3936,79 @@ function initEvents(){
         }catch(e){}
     }
 })();
+
+// ==================== SCANNER MODULE ====================
+var SCANNER = { html5Qr: null, callback: null, btInput: null, isActive: false };
+
+function openScanner(callback) {
+    if (typeof callback !== 'function') return;
+    SCANNER.callback = callback;
+    SCANNER.isActive = true;
+    var modal = document.getElementById('scannerModal');
+    if (modal) modal.style.display = 'flex';
+}
+
+function closeScannerModal() {
+    SCANNER.isActive = false;
+    SCANNER.callback = null;
+    if (SCANNER.html5Qr) { try { SCANNER.html5Qr.stop(); } catch(e) {} SCANNER.html5Qr = null; }
+    if (SCANNER.btInput) { try { SCANNER.btInput.remove(); } catch(e) {} SCANNER.btInput = null; }
+    var reader = document.getElementById('qr-reader');
+    if (reader) reader.innerHTML = '';
+    var modal = document.getElementById('scannerModal');
+    if (modal) modal.style.display = 'none';
+}
+
+function startCameraScan() {
+    var reader = document.getElementById('qr-reader');
+    if (!reader) return;
+    reader.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted)"><div class="loader-hex" style="margin:0 auto 10px;width:30px;height:30px"></div>Camera starting...</div>';
+    try {
+        SCANNER.html5Qr = new Html5Qrcode('qr-reader');
+        SCANNER.html5Qr.start(
+            { facingMode: 'environment' },
+            { fps: 10, qrbox: { width: 250, height: 250 } },
+            function(text) { if (SCANNER.callback) SCANNER.callback(text); },
+            function() {}
+        ).catch(function(err) {
+            reader.innerHTML = '<div style="padding:20px;text-align:center"><i class="bx bx-error-circle" style="font-size:32px;color:var(--danger);display:block;margin-bottom:8px"></i><div style="color:var(--danger);font-size:13px">Camera error</div><div style="color:var(--text-muted);font-size:11px;margin-top:4px">' + (err.message || err) + '</div></div>';
+        });
+    } catch(e) {
+        reader.innerHTML = '<div style="padding:20px;text-align:center;color:var(--danger)"><i class="bx bx-error-circle" style="font-size:32px;display:block;margin-bottom:8px"></i>Camera not supported</div>';
+    }
+}
+
+function focusForBluetoothScanner() {
+    var reader = document.getElementById('qr-reader');
+    if (!reader) return;
+    reader.innerHTML = '';
+    SCANNER.btInput = document.createElement('input');
+    SCANNER.btInput.type = 'text';
+    SCANNER.btInput.autofocus = true;
+    SCANNER.btInput.style.cssText = 'position:absolute;top:-200px;left:-200px;width:1px;height:1px;opacity:0;font-size:16px;';
+    document.body.appendChild(SCANNER.btInput);
+    reader.innerHTML = '<div style="padding:24px;text-align:center"><i class="bx bx-bluetooth" style="font-size:40px;color:var(--accent);display:block;margin-bottom:12px;animation:glow 2s infinite"></i><div style="font-size:14px;font-weight:700;color:var(--accent);margin-bottom:4px">Bluetooth Scanner Ready</div><div style="font-size:12px;color:var(--text-muted);margin-bottom:16px">Barcode scan karo — result automatically aayega</div><div style="display:inline-flex;align-items:center;gap:8px;padding:10px 16px;background:var(--accent-dim);border-radius:var(--radius-sm);border:1px solid rgba(var(--accent-rgb),.2)"><i class="bx bx-check-circle" style="color:var(--accent)"></i><span style="font-size:12px;color:var(--accent);font-weight:600">Waiting for scan...</span></div></div>';
+    setTimeout(function() { if (SCANNER.btInput) SCANNER.btInput.focus(); }, 300);
+    SCANNER.btInput.addEventListener('keydown', function(e) {
+        if (!SCANNER.isActive) return;
+        if (e.key === 'Enter') {
+            e.preventDefault(); e.stopPropagation();
+            var val = SCANNER.btInput.value.trim();
+            if (val && SCANNER.callback) SCANNER.callback(val);
+            SCANNER.btInput.value = '';
+        }
+        if (e.key === 'Tab') e.preventDefault();
+    });
+    SCANNER.btInput.addEventListener('blur', function() {
+        if (SCANNER.isActive && SCANNER.btInput) setTimeout(function() { if (SCANNER.isActive && SCANNER.btInput) SCANNER.btInput.focus(); }, 100);
+    });
+}
+
+document.addEventListener('click', function(e) {
+    var modal = document.getElementById('scannerModal');
+    if (modal && modal.style.display === 'flex' && e.target === modal) closeScannerModal();
+});
+
+window.addEventListener('beforeunload', function() {
+    if (SCANNER.html5Qr) try { SCANNER.html5Qr.stop(); } catch(e) {}
+});

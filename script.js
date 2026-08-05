@@ -2604,12 +2604,292 @@ function processBulkBinUpload(){
 // ==================== MATERIAL MASTER ====================
 function renderMaterialMaster(){
     var mats=DB.get('material_master');var pg=paginate(mats,APP.matPage,APP.matPerPage);
-    var h='<div class="section-header"><h2><i class="bx bx-label"></i> Material Master ('+mats.length+')</h2><div style="display:flex;gap:6px"><button class="btn btn-glass" onclick="exportTableExcel(\'material_master\',\'Material_Master\')"><i class="bx bx-download"></i> Excel</button><button class="btn btn-glass" onclick="showAddMaterial()"><i class="bx bx-plus"></i> Add</button></div></div>';
+    var h='<div class="section-header"><h2><i class="bx bx-label"></i> Material Master ('+mats.length+')</h2><div style="display:flex;gap:6px"><button class="btn btn-glass" onclick="exportTableExcel(\'material_master\',\'Material_Master\')"><i class="bx bx-download"></i> Excel</button><button class="btn btn-glass" onclick="showBulkUploadMaterial()"><i class="bx bx-upload"></i> Bulk Upload</button><button class="btn btn-glass" onclick="showAddMaterial()"><i class="bx bx-plus"></i> Add</button></div></div>';
     h+='<div class="search-box"><i class="bx bx-search"></i><input type="text" id="matSearch" placeholder="Search material, EAN..." oninput="searchMat()"></div>';
     h+='<div id="matTable">'+buildMatTable(pg.items)+'</div>';
     h+=renderPag(APP.matPage,pg.pages,'goMatPage');
     setHtml(h);
 }
+
+// ========== BULK UPLOAD FEATURE ==========
+function showBulkUploadMaterial(){
+    var h='<div style="margin-bottom:16px;padding:12px 16px;background:var(--bg-secondary);border-radius:8px;border:1px solid var(--border-color)">';
+    h+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><i class="bx bx-info-circle" style="color:var(--accent);font-size:18px"></i><strong>Instructions</strong></div>';
+    h+='<ul style="margin:0;padding-left:20px;color:var(--text-muted);font-size:13px;line-height:1.8">';
+    h+='<li>CSV file upload karein (max 1,00,000 rows supported)</li>';
+    h+='<li>Required columns: <code style="background:var(--bg-primary);padding:2px 6px;border-radius:4px">Material, EAN</code></li>';
+    h+='<li>Optional columns: <code style="background:var(--bg-primary);padding:2px 6px;border-radius:4px">Description, Division, Brand</code></li>';
+    h+='<li>Duplicate EAN skip ho jayenge</li>';
+    h+='<li>First row must be header row</li>';
+    h+='</ul></div>';
+    
+    h+='<div style="margin-bottom:16px"><button class="btn btn-glass" onclick="downloadMaterialTemplate()"><i class="bx bx-file"></i> Download CSV Template</button></div>';
+    
+    h+='<div id="bulkDropZone" style="border:2px dashed var(--border-color);border-radius:12px;padding:40px 20px;text-align:center;cursor:pointer;transition:all .2s" ondragover="event.preventDefault();this.style.borderColor=\'var(--accent)\';this.style.background=\'var(--bg-secondary)\'" ondragleave="this.style.borderColor=\'var(--border-color)\';this.style.background=\'transparent\'" ondrop="handleBulkDrop(event)" onclick="document.getElementById(\'bulkFileInput\').click()">';
+    h+='<i class="bx bx-cloud-upload" style="font-size:48px;color:var(--text-muted);display:block;margin-bottom:8px"></i>';
+    h+='<p style="color:var(--text-muted);margin:0">Drag & Drop CSV file here<br><span style="font-size:12px">or click to browse</span></p>';
+    h+='<input type="file" id="bulkFileInput" accept=".csv,.txt" style="display:none" onchange="handleBulkFile(this)">';
+    h+='</div>';
+    
+    h+='<div id="bulkPreview" style="display:none;margin-top:16px"></div>';
+    h+='<div id="bulkProgress" style="display:none;margin-top:16px"></div>';
+    
+    showModal('Bulk Upload Materials',h,'','<button class="btn btn-glass" onclick="closeModal()">Close</button>');
+}
+
+function downloadMaterialTemplate(){
+    var csv='Material,EAN,Description,Division,Brand\n';
+    csv+='Example Mat 1,8901234567890,Test Description 1,Food,Brand A\n';
+    csv+='Example Mat 2,8901234567891,Test Description 2,Home Care,Brand B\n';
+    csv+='Example Mat 3,8901234567892,Test Description 3,Personal Care,Brand C\n';
+    var blob=new Blob([csv],{type:'text/csv;charset=utf-8;'});
+    var link=document.createElement('a');
+    link.href=URL.createObjectURL(blob);
+    link.download='Material_Master_Template.csv';
+    link.click();
+    URL.revokeObjectURL(link.href);
+    showToast('Template downloaded!','success');
+}
+
+function handleBulkDrop(e){
+    e.preventDefault();
+    var zone=document.getElementById('bulkDropZone');
+    zone.style.borderColor='var(--border-color)';
+    zone.style.background='transparent';
+    var files=e.dataTransfer.files;
+    if(files.length)processBulkFile(files[0]);
+}
+
+function handleBulkFile(input){
+    if(input.files.length)processBulkFile(input.files[0]);
+}
+
+function processBulkFile(file){
+    if(!file.name.match(/\.(csv|txt)$/i)){
+        showToast('Only CSV files allowed','error');return;
+    }
+    if(file.size>50*1024*1024){
+        showToast('File too large (max 50MB)','error');return;
+    }
+    
+    var preview=document.getElementById('bulkPreview');
+    preview.style.display='block';
+    preview.innerHTML='<div style="text-align:center;padding:20px;color:var(--text-muted)"><i class="bx bx-loader-alt bx-spin" style="font-size:24px;display:block;margin-bottom:8px"></i>Reading file...</div>';
+    
+    var reader=new FileReader();
+    reader.onload=function(e){
+        var text=e.target.result;
+        parseBulkCSV(text,file.name);
+    };
+    reader.readAsText(file);
+}
+
+function parseBulkCSV(text,fileName){
+    var lines=text.split(/\r?\n/);
+    var totalLines=lines.length-1; // minus header
+    
+    if(totalLines<1){
+        document.getElementById('bulkPreview').innerHTML='<div style="padding:12px;background:#ff475722;border:1px solid #ff4757;color:#ff4757;border-radius:8px;text-align:center">Empty file or no data rows found</div>';
+        return;
+    }
+    
+    // Parse header
+    var headerLine=lines[0];
+    var headers=parseCSVLine(headerLine).map(function(h){return h.trim().toLowerCase();});
+    
+    // Find column indices
+    var colIdx={
+        material:headers.indexOf('material'),
+        ean:headers.indexOf('ean'),
+        description:headers.indexOf('description'),
+        division:headers.indexOf('division'),
+        brand:headers.indexOf('brand')
+    };
+    
+    if(colIdx.material===-1||colIdx.ean===-1){
+        document.getElementById('bulkPreview').innerHTML='<div style="padding:12px;background:#ff475722;border:1px solid #ff4757;color:#ff4757;border-radius:8px;text-align:center">Required columns "Material" and "EAN" not found in header.<br>Header found: <code>'+esc(headerLine)+'</code></div>';
+        return;
+    }
+    
+    // Parse all rows
+    var validRows=[],skippedRows=[],errorRows=[];
+    var existingEans={};
+    var existingMats=DB.get('material_master');
+    existingMats.forEach(function(m){if(m.ean)existingEans[m.ean]=true;});
+    
+    for(var i=1;i<lines.length;i++){
+        var line=lines[i].trim();
+        if(!line)continue;
+        
+        var cols=parseCSVLine(line);
+        var mat=(cols[colIdx.material]||'').trim();
+        var ean=(cols[colIdx.ean]||'').trim();
+        
+        if(!mat&&!ean){
+            skippedRows.push({row:i,reason:'Empty row'});
+            continue;
+        }
+        if(!mat){
+            errorRows.push({row:i,reason:'Material name missing'});
+            continue;
+        }
+        if(!ean){
+            errorRows.push({row:i,reason:'EAN missing'});
+            continue;
+        }
+        if(existingEans[ean]){
+            skippedRows.push({row:i,reason:'Duplicate EAN: '+ean});
+            continue;
+        }
+        
+        existingEans[ean]=true; // track within file too
+        validRows.push({
+            material:mat,
+            ean:ean,
+            description:(cols[colIdx.description]||'').trim(),
+            division:(cols[colIdx.division]||'').trim(),
+            brand:(cols[colIdx.brand]||'').trim()
+        });
+    }
+    
+    // Show preview
+    var pv='<div style="padding:16px;background:var(--bg-secondary);border-radius:12px;border:1px solid var(--border-color)">';
+    pv+='<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">';
+    pv+='<div style="text-align:center;padding:12px;background:#2ed57322;border-radius:8px"><div style="font-size:24px;font-weight:700;color:#2ed573;font-family:var(--font-display)">'+validRows.length.toLocaleString()+'</div><div style="font-size:11px;color:var(--text-muted)">Valid Rows</div></div>';
+    pv+='<div style="text-align:center;padding:12px;background:#ffa50222;border-radius:8px"><div style="font-size:24px;font-weight:700;color:#ffa502;font-family:var(--font-display)">'+skippedRows.length.toLocaleString()+'</div><div style="font-size:11px;color:var(--text-muted)">Skipped (Duplicates)</div></div>';
+    pv+='<div style="text-align:center;padding:12px;background:#ff475722;border-radius:8px"><div style="font-size:24px;font-weight:700;color:#ff4757;font-family:var(--font-display)">'+errorRows.length.toLocaleString()+'</div><div style="font-size:11px;color:var(--text-muted)">Errors</div></div>';
+    pv+='<div style="text-align:center;padding:12px;background:var(--bg-primary);border-radius:8px"><div style="font-size:24px;font-weight:700;color:var(--text-primary);font-family:var(--font-display)">'+totalLines.toLocaleString()+'</div><div style="font-size:11px;color:var(--text-muted)">Total Rows</div></div>';
+    pv+='</div>';
+    
+    // File info
+    pv+='<div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;padding:8px;background:var(--bg-primary);border-radius:6px"><i class="bx bx-file"></i> '+esc(fileName)+' | Columns detected: '+esc(headerLine)+'</div>';
+    
+    // Preview first 5 rows
+    if(validRows.length>0){
+        pv+='<div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">Preview (first 5 rows):</div>';
+        pv+='<div style="max-height:180px;overflow-y:auto;border-radius:6px;border:1px solid var(--border-color)"><table class="data-table" style="font-size:11px"><thead><tr><th>Material</th><th>EAN</th><th>Description</th><th>Division</th><th>Brand</th></tr></thead><tbody>';
+        var previewCount=Math.min(5,validRows.length);
+        for(var p=0;p<previewCount;p++){
+            var r=validRows[p];
+            pv+='<tr><td>'+esc(r.material)+'</td><td style="font-family:var(--font-display)">'+esc(r.ean)+'</td><td>'+esc(r.description)+'</td><td>'+esc(r.division)+'</td><td>'+esc(r.brand)+'</td></tr>';
+        }
+        pv+='</tbody></table></div>';
+    }
+    
+    // Error details (collapsible)
+    if(errorRows.length>0){
+        pv+='<details style="margin-top:10px"><summary style="cursor:pointer;color:#ff4757;font-size:12px"><i class="bx bx-error-circle"></i> View Error Details ('+errorRows.length+')</summary>';
+        pv+='<div style="max-height:120px;overflow-y:auto;margin-top:6px;padding:8px;background:#ff475711;border-radius:6px;font-size:11px;font-family:var(--font-display)">';
+        errorRows.slice(0,50).forEach(function(er){pv+='<div>Row '+er.row+': '+esc(er.reason)+'</div>';});
+        if(errorRows.length>50)pv+='<div>...and '+(errorRows.length-50)+' more errors</div>';
+        pv+='</div></details>';
+    }
+    
+    pv+='</div>';
+    
+    // Action buttons
+    pv+='<div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end">';
+    pv+='<button class="btn btn-glass" onclick="document.getElementById(\'bulkFileInput\').value=\'\';document.getElementById(\'bulkPreview\').style.display=\'none\'"><i class="bx bx-reload"></i> Re-upload</button>';
+    if(validRows.length>0){
+        pv+='<button class="btn btn-glass" style="background:var(--accent);color:#000;font-weight:600" onclick="executeBulkUpload()"><i class="bx bx-upload"></i> Upload '+validRows.length.toLocaleString()+' Rows</button>';
+    }
+    pv+='</div>';
+    
+    document.getElementById('bulkPreview').innerHTML=pv;
+    
+    // Store valid rows globally for upload
+    window._bulkRows=validRows;
+}
+
+// CSV line parser - handles quoted fields with commas
+function parseCSVLine(line){
+    var result=[];
+    var current='';
+    var inQuotes=false;
+    for(var i=0;i<line.length;i++){
+        var ch=line[i];
+        if(inQuotes){
+            if(ch==='"'){
+                if(i+1<line.length&&line[i+1]==='"'){current+='"';i++;}
+                else inQuotes=false;
+            }else{current+=ch;}
+        }else{
+            if(ch==='"')inQuotes=true;
+            else if(ch===','){result.push(current);current='';}
+            else current+=ch;
+        }
+    }
+    result.push(current);
+    return result;
+}
+
+// Chunked bulk upload with progress - prevents UI freeze on 70K rows
+function executeBulkUpload(){
+    var rows=window._bulkRows;
+    if(!rows||!rows.length)return;
+    
+    var progressDiv=document.getElementById('bulkProgress');
+    progressDiv.style.display='block';
+    
+    var total=rows.length;
+    var chunkSize=500; // 500 rows per batch to keep UI responsive
+    var inserted=0;
+    var startTime=Date.now();
+    
+    function renderProgress(){
+        var pct=Math.round((inserted/total)*100);
+        var elapsed=((Date.now()-startTime)/1000).toFixed(1);
+        var rate=inserted>0?Math.round(inserted/elapsed):0;
+        var remaining=rate>0?Math.round((total-inserted)/rate):'...';
+        
+        var ph='<div style="padding:16px;background:var(--bg-secondary);border-radius:12px;border:1px solid var(--border-color)">';
+        ph+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
+        ph+='<span style="font-size:13px;font-weight:600"><i class="bx bx-loader-alt bx-spin"></i> Uploading...</span>';
+        ph+='<span style="font-size:12px;color:var(--text-muted);font-family:var(--font-display)">'+inserted.toLocaleString()+' / '+total.toLocaleString()+'</span>';
+        ph+='</div>';
+        ph+='<div style="height:8px;background:var(--bg-primary);border-radius:4px;overflow:hidden;margin-bottom:8px">';
+        ph+='<div style="height:100%;width:'+pct+'%;background:linear-gradient(90deg,var(--accent),#2ed573);border-radius:4px;transition:width .1s"></div>';
+        ph+='</div>';
+        ph+='<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted)">';
+        ph+='<span>'+pct+'% complete</span>';
+        ph+='<span>'+rate.toLocaleString()+' rows/sec | ~'+remaining+'s remaining</span>';
+        ph+='</div>';
+        ph+='</div>';
+        progressDiv.innerHTML=ph;
+    }
+    
+    renderProgress();
+    
+    function processChunk(){
+        var end=Math.min(inserted+chunkSize,total);
+        for(var i=inserted;i<end;i++){
+            DB.add('material_master',rows[i]);
+        }
+        inserted=end;
+        renderProgress();
+        
+        if(inserted<total){
+            setTimeout(processChunk,0); // yield to UI
+        }else{
+            // Done
+            var elapsed=((Date.now()-startTime)/1000).toFixed(1);
+            var ph='<div style="padding:20px;background:#2ed57311;border:1px solid #2ed573;border-radius:12px;text-align:center">';
+            ph+='<i class="bx bx-check-circle" style="font-size:48px;color:#2ed573;display:block;margin-bottom:8px"></i>';
+            ph+='<div style="font-size:20px;font-weight:700;color:#2ed573;margin-bottom:4px">Upload Complete!</div>';
+            ph+='<div style="color:var(--text-muted);font-size:13px">'+total.toLocaleString()+' materials inserted in '+elapsed+'s</div>';
+            ph+='<button class="btn btn-glass" style="margin-top:12px" onclick="closeModal();renderMaterialMaster()"><i class="bx bx-check"></i> Done</button>';
+            ph+='</div>';
+            progressDiv.innerHTML=ph;
+            
+            logAction('Material','BULK_UPLOAD',total+' materials uploaded');
+            showToast(total.toLocaleString()+' materials uploaded!','success');
+        }
+    }
+    
+    processChunk();
+}
+
+// ========== EXISTING FUNCTIONS (unchanged) ==========
 function buildMatTable(mats){
     var h='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>Description</th><th>EAN</th><th>Division</th><th>Brand</th><th>Actions</th></tr></thead><tbody>';
     if(!mats.length)h+='<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:20px">No data</td></tr>';

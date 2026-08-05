@@ -3,42 +3,103 @@
    Developed by Nikhil Patil
    ============================================================ */
 
-// ==================== SUPABASE SYNC ====================
+/* ============================================================
+   VIP INDUSTRIES LIMITED MD20 — WMS COMPLETE SCRIPT
+   Developed by Nikhil Patil
+   ============================================================ */
+
+// ==================== SUPABASE SYNC (FIXED) ====================
 var supabaseClient = null;
+var _localWriteTs = {};
+
 try {
     var SUPABASE_URL = 'https://whlqsapzywnadvkhfhzp.supabase.co';
     var SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndobHFzYXB6eXduYWR2a2hmaHpwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUxNjE4ODMsImV4cCI6MjEwMDczNzg4M30.YaNFKPQ9vmhKHYa0DtaZPbbM44IqgSlibPSABId_bno';
     if (typeof supabase !== 'undefined' && SUPABASE_URL.indexOf('supabase.co') > -1) {
         supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+        console.log('Supabase client initialized');
     }
-} catch(e) {}
+} catch(e) {
+    console.warn('Supabase init error:', e);
+}
+
+function _safeParse(val) {
+    if (val && typeof val === 'object') return val;
+    if (typeof val === 'string') {
+        try { return JSON.parse(val); } catch(e) { return null; }
+    }
+    return null;
+}
 
 function pushServer(key, val) {
     if (!supabaseClient) return;
-    try { supabaseClient.from('app_data').upsert({key:key, value:val}, {onConflict:'key'}); } catch(e) {}
+    try {
+        supabaseClient.from('app_data').upsert({key: key, value: val}, {onConflict: 'key'}).then(function(res) {
+            if (res.error) console.warn('pushServer error [' + key + ']:', res.error.message);
+            else console.log('pushServer OK:', key);
+        }).catch(function(e) {
+            console.warn('pushServer catch [' + key + ']:', e.message || e);
+        });
+    } catch(e) {
+        console.warn('pushServer error:', e);
+    }
 }
+
 function pullAll() {
     if (!supabaseClient) return;
     try {
         var tables = ['users','location_master','material_master','rack_master','vehicles','invoices','invoice_materials','picking_reports','audit_log','notifications','difference_reports','obd_data','picking_assignments','loading_assignments','loading_data','user_sessions','grn_records','short_reports','unloading_records','loaded_vehicles','picking_done','loading_users','user_work_log'];
         tables.forEach(function(t) {
             supabaseClient.from('app_data').select('value').eq('key', t).single().then(function(res) {
-                if (res.data && res.data.value) localStorage.setItem('wms_'+t, JSON.stringify(res.data.value));
-            }).catch(function(){});
+                if (res.error) return;
+                if (res.data && res.data.value != null) {
+                    var localRaw = localStorage.getItem('wms_' + t);
+                    if (!localRaw || localRaw === '[]' || localRaw === '{}') {
+                        var parsed = _safeParse(res.data.value);
+                        if (parsed) {
+                            localStorage.setItem('wms_' + t, JSON.stringify(parsed));
+                            console.log('pullAll: pulled', t, 'from server (' + (Array.isArray(parsed) ? parsed.length + ' items' : 'object') + ')');
+                        }
+                    } else {
+                        console.log('pullAll: SKIP', t, '(local data exists)');
+                    }
+                }
+            }).catch(function(e) {
+                console.warn('pullAll error [' + t + ']:', e.message || e);
+            });
         });
-    } catch(e) {}
+    } catch(e) {
+        console.warn('pullAll error:', e);
+    }
 }
+
 if (supabaseClient) {
     try {
-        supabaseClient.channel('wms-live').on('postgres_changes',{event:'*',schema:'public',table:'app_data'},function(p) {
-            if (p.new && p.new.key && p.new.value) {
-                localStorage.setItem('wms_'+p.new.key, JSON.stringify(p.new.value));
+        supabaseClient.channel('wms-live').on('postgres_changes', {
+            event: '*', schema: 'public', table: 'app_data'
+        }, function(p) {
+            if (!p.new || !p.new.key || p.new.value == null) return;
+            var k = p.new.key;
+            if (_localWriteTs[k] && (Date.now() - _localWriteTs[k]) < 5000) {
+                console.log('Realtime: IGNORE echo for', k, '(written locally ' + (Date.now() - _localWriteTs[k]) + 'ms ago)');
+                return;
+            }
+            var parsed = _safeParse(p.new.value);
+            if (parsed) {
+                localStorage.setItem('wms_' + k, JSON.stringify(parsed));
+                console.log('Realtime: ACCEPTED remote update for', k);
                 if (APP.currentUser && APP.currentSection) {
                     renderSection(APP.currentSection, APP.currentSub);
                 }
+            } else {
+                console.warn('Realtime: could not parse value for', k);
             }
-        }).subscribe();
-    } catch(e) {}
+        }).subscribe(function(status) {
+            console.log('Realtime subscription status:', status);
+        });
+    } catch(e) {
+        console.warn('Realtime subscription error:', e);
+    }
 }
 
 // ==================== STATE ====================
@@ -55,7 +116,11 @@ var DB = {
     _k: function(k){return 'wms_'+k;},
     get: function(k){try{return JSON.parse(localStorage.getItem(this._k(k))||'[]');}catch(e){return [];}},
     getObj: function(k){try{return JSON.parse(localStorage.getItem(this._k(k))||'{}');}catch(e){return {};}},
-    set: function(k,v){localStorage.setItem(this._k(k),JSON.stringify(v));pushServer(k,v);},
+    set: function(k, v) {
+        localStorage.setItem(this._k(k), JSON.stringify(v));
+        _localWriteTs[k] = Date.now();
+        pushServer(k, v);
+    },
     add: function(k,item){
         var d=this.get(k); item.id=item.id||this.uid(); item.createdAt=item.createdAt||new Date().toISOString();
         d.push(item); this.set(k,d); return item;
@@ -464,7 +529,7 @@ function renderInbound(sub){
     }
 }
 
-// --- Security Gate (Entry By Added) ---
+// --- Security Gate ---
 function renderSecurityGate(){
     var h='<div class="section-header"><h2><i class="bx bx-shield-quarter"></i> Security Gate Entry</h2></div>';
     h+='<div class="card"><div class="card-title"><i class="bx bxs-truck"></i> Vehicle Reporting</div>';
@@ -522,20 +587,19 @@ function submitSecGate(){
     document.getElementById('secDriver').value='';document.getElementById('secMobile').value='';document.getElementById('secTransport').value='';
 }
 
-// --- Pending Vehicle (Entry By Column + Manual Assign with Suggestions) ---
+// --- Pending Vehicle ---
 function renderPendingVehicle(){
     var allV=DB.get('vehicles');
     var unassigned=[],assigned=[],postPend=[];
     allV.forEach(function(v){
         if(v.vehicleType!=='Unloading')return;
         if(v.status==='Posting Pending Approval')postPend.push(v);
-        else if(v.assignedTo&&v.status!=='Posted'&&v.status!=='Unloaded'&&v.status!=='Rejected')assigned.push(v);
+       else if(v.assignedTo&&v.status!=='Posted'&&v.status!=='Unloaded'&&v.status!=='Rejected')assigned.push(v);
         else if(v.status==='Unload Pending')unassigned.push(v);
     });
     var h='<div class="section-header"><h2><i class="bx bx-time-five"></i> Inbound Control Tower</h2>';
     if(chkAct('canUploadInvoice'))h+='<button class="btn btn-glass" onclick="showBulkUpload()"><i class="bx bx-upload"></i> Bulk Upload</button>';
     h+='</div>';
-    // Unassigned
     h+='<div class="card"><div class="card-title"><i class="bx bx-clock"></i> Unassigned Vehicles ('+unassigned.length+')</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>Vehicle No</th><th>LR No</th><th>Transport</th><th>Invoices</th><th>Materials</th><th>Entry By</th><th>Actions</th></tr></thead><tbody>';
     if(!unassigned.length)h+='<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:20px">No unassigned vehicles</td></tr>';
     else unassigned.forEach(function(v){
@@ -547,17 +611,15 @@ function renderPendingVehicle(){
         h+='</div></td></tr>';
     });
     h+='</tbody></table></div></div>';
-    // Assigned
-    h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-user-check"></i> Assigned Vehicles ('+assigned.length+')</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>Vehicle No</th><th>LR No</th><th>Assigned To</th><th>Invoices</th><th>Entry By</th><th>Actions</th></tr></thead><tbody>';
+    h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-user-check"></i> Assigned Vehicles ('+assigned.length+')</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>Vehicle No</th><th>LR No</th><th>Assigned User ID</th><th>Invoices</th><th>Entry By</th><th>Actions</th></tr></thead><tbody>';
     if(!assigned.length)h+='<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:20px">No assigned vehicles</td></tr>';
     else assigned.forEach(function(v){
         var invs=DB.filter('invoices',function(i){return i.vehicleId===v.id;});
-        h+='<tr><td><strong>'+esc(v.vehicleNo)+'</strong></td><td>'+esc(v.lrNo||'-')+'</td><td>'+esc(v.assignedToName||'-')+'</td><td><span class="badge badge-info">'+invs.length+'</span></td><td style="font-size:11px;color:var(--text-secondary)">'+esc(v.entryByName||'-')+'</td><td><div class="table-actions">';
+        h+='<tr><td><strong>'+esc(v.vehicleNo)+'</strong></td><td>'+esc(v.lrNo||'-')+'</td><td><span class="badge badge-accent" style="font-family:var(--font-display)">'+esc(v.assignedTo||'-')+'</span></td><td><span class="badge badge-info">'+invs.length+'</span></td><td style="font-size:11px;color:var(--text-secondary)">'+esc(v.entryByName||'-')+'</td><td><div class="table-actions">';
         if(chkAct('canAssignVehicle'))h+='<button class="btn btn-danger btn-sm" onclick="unassignVehicle(\''+v.id+'\')"><i class="bx bx-user-minus"></i> Unassign</button>';
         h+='</div></td></tr>';
     });
     h+='</tbody></table></div></div>';
-    // Posting Pending
     if(postPend.length>0){
         h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-error-circle" style="color:var(--warning)"></i> Posting Pending Approval ('+postPend.length+')</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>Vehicle No</th><th>LR No</th><th>Unload No</th><th>Submitted By</th><th>Actions</th></tr></thead><tbody>';
         postPend.forEach(function(v){
@@ -571,7 +633,7 @@ function renderPendingVehicle(){
     setHtml(h);
 }
 
-// Upload Invoice (unchanged)
+// Upload Invoice
 function showUploadInvoice(vehId){
     var v=DB.find('vehicles',vehId);if(!v)return;
     var h='<div class="form-group"><label>Invoice Number <span class="req">*</span></label><input type="text" id="singleInvNo" class="form-input" placeholder="INV-2025-XXX" style="text-transform:uppercase"></div>';
@@ -625,7 +687,7 @@ function saveSingleInvoice(vehId){
     closeModal();renderInbound('pending-vehicle');
 }
 
-// Bulk Upload (unchanged)
+// Bulk Upload
 function showBulkUpload(){
     var h='<div class="form-group"><label>Upload Bulk Data (Excel) <span class="req">*</span></label>';
     h+='<label class="btn btn-glass btn-sm" style="cursor:pointer"><i class="bx bx-upload"></i> Choose File<input type="file" id="bulkFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="document.getElementById(\'bulkFName\').innerText=this.files[0].name"></label>';
@@ -669,67 +731,49 @@ function processBulkUpload(){
     reader.readAsArrayBuffer(fi.files[0]);
 }
 
-// --- Assign Unloading (Manual Name + Suggestions) ---
+// --- Assign Unloading (SIMPLE — User ID Input) ---
 function showAssignUnloading(vehId){
     var v=DB.find('vehicles',vehId);if(!v)return;
     var invs=DB.filter('invoices',function(i){return i.vehicleId===vehId;});
     if(!invs.length){showToast('Upload invoices first!','error');return;}
-    var h='<div class="form-group"><label>Vehicle: <strong style="color:var(--accent)">'+esc(v.vehicleNo)+'</strong></label></div>';
-    h+='<div class="form-group" style="position:relative"><label>Assign To — Type Name <span class="req">*</span></label>';
-    h+='<input type="text" id="assignUserInput" class="form-input" placeholder="Yahan name type karein..." autocomplete="off" oninput="suggestAssignUsers(this.value)" onkeydown="handleAssignKeydown(event)">';
-    h+='<input type="hidden" id="assignUserId" value="">';
-    h+='<div id="assignUserSuggestions"></div>';
-    h+='</div>';
-    h+='<div style="background:var(--accent-dim);padding:10px;border-radius:var(--radius-sm);font-size:12px;color:var(--accent)"><i class="bx bx-info-circle"></i> Name type karein — niche suggestions aayengi. Select karein ya jo type kiya wo hi save hoga.</div>';
-    showModal('Assign Unloading — '+v.vehicleNo,h,'sm',
+
+    // Saare users list banao dropdown ke liye
+    var users=DB.get('users');
+    var uOpts='<option value="">-- Select User --</option>';
+    users.forEach(function(u){
+        uOpts+='<option value="'+esc(u.id)+'">'+esc(u.name)+' ('+esc(u.username)+') — ID: '+esc(u.id)+'</option>';
+    });
+
+    var h='<div style="background:var(--accent-dim);padding:12px;border-radius:var(--radius-sm);margin-bottom:14px"><strong style="color:var(--accent)">'+esc(v.vehicleNo)+'</strong> — '+esc(v.lrNo||'')+' | Invoices: '+invs.length+'</div>';
+
+    // Dropdown se select ya manually ID type karo
+    h+='<div class="form-group"><label>Select User <span class="req">*</span></label>';
+    h+='<select id="assignUserSelect" class="form-input" onchange="document.getElementById(\'assignUserIdInput\').value=this.value">'+uOpts+'</select></div>';
+
+    // Ya manually User ID type karo
+    h+='<div class="form-group"><label>Ya User ID Type Karein <span class="req">*</span></label>';
+    h+='<input type="text" id="assignUserIdInput" class="form-input" placeholder="User ID paste karein ya type karein..." style="font-family:var(--font-display);font-size:13px" onkeydown="if(event.key===\'Enter\'){event.preventDefault();doAssignUnloading(\''+vehId+'\');}"></div>';
+
+    h+='<div style="background:var(--bg-secondary);padding:10px;border-radius:var(--radius-sm);font-size:11px;color:var(--text-muted);border:1px dashed var(--border)"><i class="bx bx-info-circle" style="color:var(--warning)"></i> Dropdown se select karein ya Admin panel se User ID copy karke yahan paste karein. Jo ID yahan hoga wahi save hogi.</div>';
+
+    showModal('Assign Unloading — '+v.vehicleNo,h,'md',
         '<button class="btn btn-glass" onclick="closeModal()">Cancel</button>'+
         '<button class="btn btn-glass" onclick="doAssignUnloading(\''+vehId+'\')"><i class="bx bx-check"></i> Assign</button>');
-    setTimeout(function(){document.getElementById('assignUserInput').focus();},300);
-}
-function suggestAssignUsers(query){
-    var container=document.getElementById('assignUserSuggestions');
-    var hiddenId=document.getElementById('assignUserId');
-    if(!query.trim()){container.innerHTML='';hiddenId.value='';return;}
-    var users=DB.get('users').filter(function(u){return u.role!=='Super Admin';});
-    var q=query.toLowerCase();
-    var filtered=users.filter(function(u){return u.name.toLowerCase().indexOf(q)>-1||(u.role||'').toLowerCase().indexOf(q)>-1;});
-    if(!filtered.length){
-        container.innerHTML='<div style="padding:8px 12px;color:var(--text-muted);font-size:12px;border:1px solid var(--border);border-radius:var(--radius-sm);margin-top:4px"><i class="bx bx-info-circle"></i> Koi match nahi — jo name type kiya wo save hoga</div>';
-        hiddenId.value='';
-        return;
-    }
-    var h='<div style="position:absolute;top:52px;left:0;right:0;background:var(--bg-primary);border:1px solid var(--accent);border-radius:var(--radius-sm);max-height:180px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,0.5);z-index:999">';
-    filtered.forEach(function(u){
-        var safeName=esc(u.name).replace(/'/g,"\\'");
-        h+='<div style="padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;transition:background 0.15s" onmousedown="selectAssignUser(\''+u.id+'\',\''+safeName+'\')" onmouseover="this.style.background=\'var(--bg-secondary)\'" onmouseout="this.style.background=\'transparent\'">';
-        h+='<span><i class="bx bx-user" style="color:var(--accent);margin-right:8px"></i><strong>'+esc(u.name)+'</strong></span>';
-        h+='<span class="badge badge-info" style="font-size:10px">'+esc(u.role)+'</span>';
-        h+='</div>';
-    });
-    h+='</div>';
-    container.innerHTML=h;
-}
-function selectAssignUser(id,name){
-    document.getElementById('assignUserInput').value=name;
-    document.getElementById('assignUserId').value=id;
-    document.getElementById('assignUserSuggestions').innerHTML='';
-}
-function handleAssignKeydown(e){
-    if(e.key==='Tab'){
-        var firstSug=document.querySelector('#assignUserSuggestions div > div');
-        if(firstSug&&document.getElementById('assignUserSuggestions').innerHTML.indexOf('Koi match')===-1){
-            e.preventDefault();firstSug.onmousedown();
-        }
-    }
+
+    setTimeout(function(){document.getElementById('assignUserSelect').focus();},300);
 }
 function doAssignUnloading(vehId){
-    var nameInput=document.getElementById('assignUserInput').value.trim();
-    var userIdInput=document.getElementById('assignUserId').value;
-    if(!nameInput){showToast('Name type karein ya select karein','error');return;}
-    DB.update('vehicles',vehId,{assignedTo:userIdInput||'manual-'+Date.now(),assignedToName:nameInput,status:'Assigned'});
-    addNotif('Vehicle assigned to '+nameInput+' for unloading','info');
-    logAction('Inbound','ASSIGN','Vehicle '+vehId+' assigned to '+nameInput);
-    showToast('Vehicle assigned to '+nameInput,'success');
+    var userId=document.getElementById('assignUserIdInput').value.trim();
+    if(!userId){showToast('User ID select karein ya type karein','error');return;}
+
+    // User ka naam bhi nikal lo display ke liye
+    var userObj=DB.find('users',userId);
+    var userName=userObj?userObj.name:userId;
+
+    DB.update('vehicles',vehId,{assignedTo:userId,assignedToName:userName,status:'Assigned'});
+    addNotif('Vehicle assigned to '+userName+' (ID: '+userId+')','info');
+    logAction('Inbound','ASSIGN','Vehicle '+vehId+' assigned to '+userName+' (ID:'+userId+')');
+    showToast('Vehicle assigned to '+userName,'success');
     closeModal();renderInbound('pending-vehicle');
 }
 function unassignVehicle(vehId){
@@ -739,62 +783,121 @@ function unassignVehicle(vehId){
     showToast('Vehicle unassigned','success');renderInbound('pending-vehicle');
 }
 
-// --- Unloading Screen (Clean — No Invoice/Material Badges) ---
+// --- Unloading Screen (PARTIAL UNLOAD SUPPORT) ---
 function renderUnloadingScreen(){
-    if(!APP.currentUser)return;
-    var myVehs=DB.filter('vehicles',function(v){
-        return v.assignedTo===APP.currentUser.id&&(v.status==='Assigned'||v.status==='Unload Pending');
+    if(!APP.currentUser){setHtml('<div class="card"><div class="empty-state"><i class="bx bx-lock-alt"></i><p>Login required</p></div></div>');return;}
+    var myId=APP.currentUser.id;
+
+    // Jo abhi start hone wale hain
+    var pendingVehs=DB.filter('vehicles',function(v){
+        return v.assignedTo===myId&&(v.status==='Assigned'||v.status==='Unload Pending');
     });
-    var h='<div class="section-header"><h2><i class="bx bx-package"></i> My Unloading</h2></div>';
-    if(!myVehs.length){h+='<div class="card"><div class="empty-state"><i class="bx bx-inbox"></i><p>No vehicles assigned to you</p></div></div>';setHtml(h);return;}
-    myVehs.forEach(function(v){
-        h+='<div class="card" style="margin-bottom:14px"><div class="card-title"><i class="bx bxs-truck"></i> '+esc(v.vehicleNo)+' — '+esc(v.lrNo||'')+'</div>';
-        // Sirf vehicle info — koi invoice ya material badge nahi
-        if(chkAct('canStartUnloading'))h+='<button class="btn btn-glass" onclick="startUnload(\''+v.id+'\')"><i class="bx bx-scan"></i> Start Unload</button>';
+    // Jo partial unload hain — resume karne ke liye
+    var partialVehs=DB.filter('vehicles',function(v){
+        return v.assignedTo===myId&&v.status==='Partial Unload';
+    });
+
+    var h='<div class="section-header"><h2><i class="bx bx-package"></i> My Unloading</h2>';
+    h+='<div style="font-size:12px;color:var(--text-muted)">Pending: '+pendingVehs.length+' | Partial: '+partialVehs.length+'</div></div>';
+
+    // ===== PENDING START =====
+    if(pendingVehs.length>0){
+        h+='<div class="card" style="margin-bottom:16px"><div class="card-title"><i class="bx bx-time-five" style="color:var(--warning)"></i> Pending Start ('+pendingVehs.length+')</div>';
+        pendingVehs.forEach(function(v){
+            var invs=DB.filter('invoices',function(i){return i.vehicleId===v.id;});
+            var matCount=0;invs.forEach(function(inv){matCount+=DB.filter('invoice_materials',function(m){return m.invoiceId===inv.id;}).length;});
+            h+='<div style="border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:10px;background:var(--bg-card);backdrop-filter:var(--glass-blur)">';
+            h+='<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">';
+            h+='<div>';
+            h+='<div style="font-size:16px;font-weight:800;color:var(--accent);font-family:var(--font-display);letter-spacing:1px">'+esc(v.vehicleNo)+'</div>';
+            h+='<div style="font-size:11px;color:var(--text-muted);margin-top:2px">LR: '+esc(v.lrNo||'-')+' | Invoices: '+invs.length+' | Materials: '+matCount+'</div>';
+            h+='</div>';
+            if(chkAct('canStartUnloading'))
+                h+='<button class="btn btn-primary" onclick="startUnload(\''+v.id+'\')"><i class="bx bx-play-circle"></i> START UNLOADING</button>';
+            else
+                h+='<button class="btn btn-glass" disabled><i class="bx bx-block"></i> No Permission</button>';
+            h+='</div></div>';
+        });
         h+='</div>';
-    });
+    }
+
+    // ===== PARTIAL — RESUME =====
+    if(partialVehs.length>0){
+        h+='<div class="card" style="margin-bottom:16px"><div class="card-title"><i class="bx bx-loader-circle" style="color:var(--info)"></i> Resume Unloading ('+partialVehs.length+')</div>';
+        partialVehs.forEach(function(v){
+            var partials=DB.filter('partial_unloads',function(p){return p.vehicleId===v.id;});
+            partials.sort(function(a,b){return new Date(b.savedAt)-new Date(a.savedAt);});
+            var latest=partials[0];
+            var scanCount=latest?(latest.scanOrder||[]).length:0;
+            var savedTime=latest?fmtDT(latest.savedAt):'-';
+
+            h+='<div style="border:2px solid var(--info);border-radius:var(--radius);padding:14px;margin-bottom:10px;background:rgba(var(--info-rgb),.05);backdrop-filter:var(--glass-blur)">';
+            h+='<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">';
+            h+='<div>';
+            h+='<div style="font-size:16px;font-weight:800;color:var(--info);font-family:var(--font-display);letter-spacing:1px">'+esc(v.vehicleNo)+' <span class="badge badge-warning" style="font-size:9px;vertical-align:middle">PARTIAL</span></div>';
+            h+='<div style="font-size:11px;color:var(--text-muted);margin-top:2px">LR: '+esc(v.lrNo||'-')+' | Saved: '+savedTime+' | Scanned: <strong style="color:var(--info)">'+scanCount+'</strong> items</div>';
+            h+='</div>';
+            h+='<div style="display:flex;gap:6px">';
+            h+='<button class="btn btn-info" onclick="resumePartialUnload(\''+v.id+'\')"><i class="bx bx-refresh"></i> RESUME</button>';
+            h+='<button class="btn btn-danger btn-sm" onclick="discardPartialUnload(\''+v.id+'\')"><i class="bx bx-trash"></i> Discard</button>';
+            h+='</div></div></div>';
+        });
+        h+='</div>';
+    }
+
+    // ===== EMPTY =====
+    if(!pendingVehs.length&&!partialVehs.length){
+        h+='<div class="card"><div class="empty-state"><i class="bx bx-inbox"></i><p style="font-size:15px;margin-bottom:6px">No vehicles assigned to you</p><p style="font-size:12px">Ask Admin to assign a vehicle for unloading</p></div></div>';
+    }
     setHtml(h);
 }
 
-// --- Start Unload (Blank Scan Page — Auto Match Check) ---
-function startUnload(vehId){
+// --- Start Unload (fresh or with existing data for resume) ---
+function startUnload(vehId,existingData){
     var v=DB.find('vehicles',vehId);if(!v)return;
     var invs=DB.filter('invoices',function(i){return i.vehicleId===vehId;});
-
-    // EAN lookup map banao — saare invoices ke materials se
     var lookupMap={};
     invs.forEach(function(inv){
         var mats=DB.filter('invoice_materials',function(m){return m.invoiceId===inv.id;});
         mats.forEach(function(m){
             var ean=(m.ean||'').toUpperCase();
             var matName=(m.material||'').toUpperCase();
-            // EAN se map
             if(ean){
                 if(!lookupMap[ean])lookupMap[ean]={material:m.material,ean:ean,totalExpected:0,invoices:[]};
                 lookupMap[ean].totalExpected+=m.qty;
                 lookupMap[ean].invoices.push({invoiceNo:inv.invoiceNo,invoiceId:inv.id,qty:m.qty});
             }
-            // Material name se bhi map (EAN nahi ho to)
             if(matName&&!lookupMap[matName]){
                 lookupMap[matName]={material:m.material,ean:ean,totalExpected:m.qty,invoices:[{invoiceNo:inv.invoiceNo,invoiceId:inv.id,qty:m.qty}]};
             }
         });
     });
 
-    window._unloadData={vehId:vehId,vehicleNo:v.vehicleNo,lrNo:v.lrNo,lookupMap:lookupMap,scanResults:{},scanOrder:[]};
+    var scanResults={},scanOrder=[];
+    if(existingData){
+        scanResults=existingData.scanResults||{};
+        scanOrder=existingData.scanOrder||[];
+    }
+
+    window._unloadData={vehId:vehId,vehicleNo:v.vehicleNo,lrNo:v.lrNo,lookupMap:lookupMap,scanResults:scanResults,scanOrder:scanOrder};
 
     var expectedCount=Object.keys(lookupMap).length;
-    var h='<div style="margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><div><strong style="color:var(--accent);font-size:16px">'+esc(v.vehicleNo)+'</strong> <span style="color:var(--text-muted)">—</span> '+esc(v.lrNo||'')+'</div><div style="font-size:11px;color:var(--text-muted)">Expected Items: <strong style="color:var(--accent)">'+expectedCount+'</strong></div></div>';
+    var isResume=scanOrder.length>0;
 
-    // Scan input — blank page
+    var h='<div style="margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">';
+    h+='<div><strong style="color:var(--accent);font-size:16px">'+esc(v.vehicleNo)+'</strong> <span style="color:var(--text-muted)">—</span> '+esc(v.lrNo||'')+'</div>';
+    if(isResume)h+='<span class="badge badge-info"><i class="bx bx-refresh"></i> Resumed — '+scanOrder.length+' items loaded</span>';
+    else h+='<div style="font-size:11px;color:var(--text-muted)">Expected Items: <strong style="color:var(--accent)">'+expectedCount+'</strong></div>';
+    h+='</div>';
+
     h+='<div class="search-box" style="max-width:100%;margin-bottom:8px"><i class="bx bx-barcode"></i><input type="text" id="scanUnloadInput" placeholder="Scan ya type karein — EAN / Material..." onkeydown="if(event.key===\'Enter\'){event.preventDefault();addScanUnloadItem();}" style="font-family:var(--font-display);font-size:14px;letter-spacing:1px"></div>';
+
     h+='<div style="display:flex;gap:6px;margin-bottom:8px;align-items:center;flex-wrap:wrap">';
     h+='<button class="btn btn-glass btn-sm" onclick="openScannerForUnload()"><i class="bx bx-qr"></i> Scanner</button>';
     h+='<button class="btn btn-glass btn-sm" onclick="addScanUnloadItem()"><i class="bx bx-plus"></i> Add</button>';
     h+='<div style="margin-left:auto;display:flex;align-items:center;gap:6px"><label style="font-size:11px;color:var(--text-muted)">Qty/Scan:</label><input type="number" id="scanQtyPerScan" class="form-input" value="1" min="1" style="width:60px;text-align:center;font-size:12px;padding:4px 8px"></div>';
     h+='</div>';
 
-    // Manual entry toggle
     h+='<div style="margin-bottom:12px"><button class="btn btn-glass btn-sm" onclick="toggleManualEntry()" id="manualEntryToggle"><i class="bx bx-edit"></i> Manual Entry</button>';
     h+='<div id="manualEntryForm" style="display:none;margin-top:8px;padding:12px;border:1px dashed var(--border);border-radius:var(--radius-sm);background:var(--bg-secondary)">';
     h+='<div class="form-row">';
@@ -804,99 +907,89 @@ function startUnload(vehId){
     h+='<div class="form-group" style="display:flex;align-items:flex-end"><button class="btn btn-glass btn-sm" onclick="addManualEntry()"><i class="bx bx-plus"></i> Add</button></div>';
     h+='</div></div></div>';
 
-    // Results table
     h+='<div class="table-wrapper" style="max-height:300px;overflow-y:auto"><table class="data-table"><thead><tr><th>#</th><th>EAN</th><th>Material</th><th>Invoice</th><th>Expected</th><th>Scanned</th><th>Status</th><th></th></tr></thead><tbody id="scanUnloadBody"></tbody></table></div>';
-
-    // Summary
     h+='<div id="scanSummary" style="margin-top:10px;padding:10px;background:var(--bg-secondary);border-radius:var(--radius-sm);font-size:12px;display:none"></div>';
 
-    h+='<div class="form-actions" style="margin-top:14px"><button class="btn btn-glass" onclick="submitUnloading()"><i class="bx bx-check-double"></i> Submit Unloading</button></div>';
+    // *** FOOTER — SAVE & BACK + SUBMIT FINAL ***
+    var footer='';
+    footer+='<button class="btn btn-warning" onclick="savePartialUnload()"><i class="bx bx-save"></i> SAVE & BACK</button>';
+    footer+='<button class="btn btn-glass" onclick="closeModal()">Cancel</button>';
+    footer+='<button class="btn btn-glass" onclick="submitUnloading()"><i class="bx bx-check-double"></i> SUBMIT FINAL</button>';
 
-    showModal('Unloading — '+v.vehicleNo,h,'xl','<button class="btn btn-glass" onclick="closeModal()">Cancel</button>');
+    showModal('Unloading — '+v.vehicleNo,h,'xl',footer);
     renderScanUnloadTable();
-    document.getElementById('scanUnloadInput').focus();
+    setTimeout(function(){document.getElementById('scanUnloadInput').focus();},300);
 }
-function toggleManualEntry(){
-    var f=document.getElementById('manualEntryForm');
-    f.style.display=f.style.display==='none'?'':'none';
+
+// --- Resume Partial Unload ---
+function resumePartialUnload(vehId){
+    var partials=DB.filter('partial_unloads',function(p){return p.vehicleId===vehId;});
+    partials.sort(function(a,b){return new Date(b.savedAt)-new Date(a.savedAt);});
+    var partial=partials[0];
+    if(!partial){startUnload(vehId);return;}
+    startUnload(vehId,partial);
 }
-function openScannerForUnload(){
-    APP.scanCallback=function(code){document.getElementById('scanUnloadInput').value=code;addScanUnloadItem();};
-    document.getElementById('scannerModal').style.display='flex';focusForBluetoothScanner();
-}
-function addScanUnloadItem(){
-    var input=document.getElementById('scanUnloadInput');if(!input)return;
-    var val=input.value.trim().toUpperCase();input.value='';
-    if(!val)return;
-    var qtyPerScan=parseInt(document.getElementById('scanQtyPerScan').value)||1;
-    processUnloadScan(val,qtyPerScan);
-    document.getElementById('scanUnloadInput').focus();
-}
-function addManualEntry(){
-    var ean=document.getElementById('manualEan').value.trim().toUpperCase();
-    var mat=document.getElementById('manualMat').value.trim().toUpperCase();
-    var qty=parseInt(document.getElementById('manualQty').value)||1;
-    if(!ean&&!mat){showToast('EAN ya Material dalein','error');return;}
-    processUnloadScan(ean||mat,qty);
-    document.getElementById('manualEan').value='';document.getElementById('manualMat').value='';document.getElementById('manualQty').value='1';
-}
-function processUnloadScan(val,qty){
+
+// --- SAVE & BACK (Partial Unload) ---
+function savePartialUnload(){
     var ud=window._unloadData;if(!ud)return;
-    var found=ud.lookupMap[val];
-    if(found){
-        if(!ud.scanResults[val]){
-            ud.scanResults[val]={material:found.material,ean:found.ean,expectedQty:found.totalExpected,scannedQty:0,match:true,invoiceNo:found.invoices.map(function(i){return i.invoiceNo;}).join(', ')};
-            ud.scanOrder.push(val);
-        }
-        ud.scanResults[val].scannedQty+=qty;
+    if(!ud.scanOrder.length){showToast('Kam se kam ek item scan karein before saving','error');return;}
+
+    // Check existing partial record
+    var existing=DB.filter('partial_unloads',function(p){return p.vehicleId===ud.vehId;});
+
+    if(existing.length>0){
+        // Update existing
+        DB.update('partial_unloads',existing[0].id,{
+            lookupMap:ud.lookupMap,
+            scanResults:ud.scanResults,
+            scanOrder:ud.scanOrder,
+            savedAt:new Date().toISOString(),
+            savedBy:APP.currentUser?APP.currentUser.name:'Unknown'
+        });
     } else {
-        if(!ud.scanResults[val]){
-            ud.scanResults[val]={material:'UNKNOWN',ean:val,expectedQty:0,scannedQty:0,match:false,invoiceNo:'-'};
-            ud.scanOrder.push(val);
-        }
-        ud.scanResults[val].scannedQty+=qty;
+        // Create new
+        DB.add('partial_unloads',{
+            vehicleId:ud.vehId,
+            vehicleNo:ud.vehicleNo,
+            lrNo:ud.lrNo,
+            lookupMap:ud.lookupMap,
+            scanResults:ud.scanResults,
+            scanOrder:ud.scanOrder,
+            savedAt:new Date().toISOString(),
+            savedBy:APP.currentUser?APP.currentUser.name:'Unknown'
+        });
     }
-    renderScanUnloadTable();
-}
-function renderScanUnloadTable(){
-    var ud=window._unloadData;if(!ud)return;
-    var body=document.getElementById('scanUnloadBody');if(!body)return;
-    var summaryDiv=document.getElementById('scanSummary');
-    var h='',matchC=0,shortC=0,excessC=0,wrongC=0;
-    ud.scanOrder.forEach(function(key,idx){
-        var r=ud.scanResults[key];
-        var stText,stCls,rowCls;
-        if(!r.match){stText='Wrong';stCls='badge-danger';rowCls='scan-row-red';wrongC++;}
-        else if(r.scannedQty===r.expectedQty){stText='Match';stCls='badge-success';rowCls='scan-row-green';matchC++;}
-        else if(r.scannedQty<r.expectedQty){stText='Short';stCls='badge-warning';rowCls='';shortC++;}
-        else{stText='Excess';stCls='badge-danger';rowCls='scan-row-red';excessC++;}
-        var safeKey=esc(key).replace(/'/g,"\\'");
-        h+='<tr class="'+rowCls+'"><td>'+(idx+1)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(r.ean)+'</td><td>'+esc(r.material)+'</td><td style="font-size:10px">'+esc(r.invoiceNo)+'</td><td>'+r.expectedQty+'</td><td><strong>'+(r.scannedQty||0)+'</strong></td><td><span class="badge '+stCls+'">'+stText+'</span></td><td><button class="btn btn-danger btn-sm" onclick="removeScanResult(\''+safeKey+'\')"><i class="bx bx-minus"></i></button></td></tr>';
-    });
-    if(!ud.scanOrder.length){
-        h='<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:24px"><i class="bx bx-barcode" style="font-size:24px;display:block;margin-bottom:8px"></i>Scan ya type karein — result yahan dikhega</td></tr>';
-    }
-    body.innerHTML=h;
-    if(ud.scanOrder.length>0){
-        summaryDiv.style.display='';
-        summaryDiv.innerHTML='<div style="display:flex;gap:16px;flex-wrap:wrap"><span><i class="bx bx-check-circle" style="color:var(--success)"></i> Match: <strong>'+matchC+'</strong></span><span><i class="bx bx-error-circle" style="color:var(--warning)"></i> Short: <strong>'+shortC+'</strong></span><span><i class="bx bx-plus-circle" style="color:var(--danger)"></i> Excess: <strong>'+excessC+'</strong></span><span><i class="bx bx-x-circle" style="color:var(--danger)"></i> Wrong: <strong>'+wrongC+'</strong></span><span style="margin-left:auto">Scanned: <strong style="color:var(--accent)">'+ud.scanOrder.length+'</strong></span></div>';
-    } else {summaryDiv.style.display='none';}
-}
-function removeScanResult(key){
-    var ud=window._unloadData;if(!ud||!ud.scanResults[key])return;
-    ud.scanResults[key].scannedQty--;
-    if(ud.scanResults[key].scannedQty<=0){delete ud.scanResults[key];ud.scanOrder=ud.scanOrder.filter(function(k){return k!==key;});}
-    renderScanUnloadTable();
+
+    // Vehicle status change
+    DB.update('vehicles',ud.vehId,{status:'Partial Unload'});
+
+    logAction('Unloading','PARTIAL_SAVE','Partial unload saved for '+ud.vehicleNo+' ('+ud.scanOrder.length+' items scanned)');
+    addNotif('Partial unload saved for '+ud.vehicleNo+' — '+ud.scanOrder.length+' items done','info');
+    showToast('Progress saved! Baad mein RESUME kar sakte ho','success');
+    closeModal();
+    renderUnloadingScreen();
 }
 
-// --- Submit Unloading (with Short/Excess Report) ---
+// --- Discard Partial Unload ---
+function discardPartialUnload(vehId){
+    if(!confirm('Partial unload data delete ho jayega. Sure?'))return;
+    var partials=DB.filter('partial_unloads',function(p){return p.vehicleId===vehId;});
+    partials.forEach(function(p){DB.remove('partial_unloads',p.id);});
+    DB.update('vehicles',vehId,{status:'Assigned'});
+    logAction('Unloading','PARTIAL_DISCARD','Partial unload discarded for vehicle '+vehId);
+    showToast('Partial data discarded','warning');
+    renderUnloadingScreen();
+}
+
+// --- Submit Unloading (FINAL — cleans partial data) ---
 function submitUnloading(){
     var ud=window._unloadData;if(!ud)return;
     if(!ud.scanOrder.length){showToast('Kam se kam ek item scan karein','error');return;}
+
     var unloadNo=DB.unloadNo();
     var materials=[],shortItems=[],excessItems=[],wrongItems=[];
 
-    // Scanned items add karo
     ud.scanOrder.forEach(function(key){
         var r=ud.scanResults[key];
         materials.push({invoiceNo:r.invoiceNo,material:r.material,ean:r.ean,expectedQty:r.expectedQty,scannedQty:r.scannedQty,diff:r.expectedQty-r.scannedQty,match:r.match});
@@ -905,7 +998,7 @@ function submitUnloading(){
         else if(r.scannedQty>r.expectedQty)excessItems.push({invoiceNo:r.invoiceNo,material:r.material,ean:r.ean,expected:r.expectedQty,scanned:r.scannedQty,excess:r.scannedQty-r.expectedQty});
     });
 
-    // Jo expected the but scan hi nahi hue — complete short
+    // Unscanned expected items bhi short mein daalo
     Object.keys(ud.lookupMap).forEach(function(key){
         if(!ud.scanResults[key]){
             var lm=ud.lookupMap[key];
@@ -914,45 +1007,67 @@ function submitUnloading(){
         }
     });
 
-    DB.add('unloading_records',{unloadNo:unloadNo,vehicleId:ud.vehId,vehicleNo:ud.vehicleNo,lrNo:ud.lrNo,unloadedBy:APP.currentUser.id,unloadedByName:APP.currentUser.name,unloadedAt:new Date().toISOString(),materials:materials,status:'Posting Pending Approval'});
+    // Check if this was a partial — add partial info to record
+    var partials=DB.filter('partial_unloads',function(p){return p.vehicleId===ud.vehId;});
+    var wasPartial=partials.length>0;
+    var partialSessions=0;
+    if(wasPartial){
+        partialSessions=partials.length;
+    }
+
+    DB.add('unloading_records',{
+        unloadNo:unloadNo,vehicleId:ud.vehId,vehicleNo:ud.vehicleNo,lrNo:ud.lrNo,
+        unloadedBy:APP.currentUser.id,unloadedByName:APP.currentUser.name,unloadedAt:new Date().toISOString(),
+        materials:materials,status:'Posting Pending Approval',
+        wasPartial:wasPartial,partialSessions:partialSessions
+    });
+
     DB.update('vehicles',ud.vehId,{status:'Posting Pending Approval',unloadNo:unloadNo,unloadedBy:APP.currentUser.id,unloadedByName:APP.currentUser.name,unloadedAt:new Date().toISOString()});
 
-    // Update invoice materials
+    // Update invoice_materials unloaded qty
     ud.scanOrder.forEach(function(key){
         var r=ud.scanResults[key];
         if(r.match&&r.ean){
-            var invs=DB.filter('invoices',function(i){return i.vehicleId===ud.vehId;});
-            var invIds=invs.map(function(i){return i.id;});
+            var invIds=DB.filter('invoices',function(i){return i.vehicleId===ud.vehId;}).map(function(i){return i.id;});
             var ims=DB.filter('invoice_materials',function(m){return m.ean&&m.ean.toUpperCase()===r.ean&&invIds.indexOf(m.invoiceId)>-1;});
             ims.forEach(function(im){DB.update('invoice_materials',im.id,{unloadedQty:(im.unloadedQty||0)+r.scannedQty});});
         }
     });
 
-    // Short/Excess Report banao agar discrepancy hai
+    // *** DELETE partial unload data — final submit ho gaya ***
+    partials.forEach(function(p){DB.remove('partial_unloads',p.id);});
+
+    // Short/Excess report
     var hasDiscrepancy=shortItems.length>0||excessItems.length>0||wrongItems.length>0;
     var reportId=null;
     if(hasDiscrepancy){
         var reportNo=generateSERNo();
         var totalExp=0,totalScn=0;
         materials.forEach(function(m){totalExp+=m.expectedQty;totalScn+=m.scannedQty;});
-        reportId=DB.add('short_excess_reports',{reportNo:reportNo,vehicleNo:ud.vehicleNo,lrNo:ud.lrNo,unloadNo:unloadNo,shortItems:shortItems,excessItems:excessItems,wrongItems:wrongItems,totalExpected:totalExp,totalScanned:totalScn,createdBy:APP.currentUser.name,createdAt:new Date().toISOString()}).id;
+        reportId=DB.add('short_excess_reports',{
+            reportNo:reportNo,vehicleNo:ud.vehicleNo,lrNo:ud.lrNo,unloadNo:unloadNo,
+            shortItems:shortItems,excessItems:excessItems,wrongItems:wrongItems,
+            totalExpected:totalExp,totalScanned:totalScn,
+            wasPartial:wasPartial,partialSessions:partialSessions,
+            createdBy:APP.currentUser.name,createdAt:new Date().toISOString()
+        }).id;
     }
 
-    addNotif('Unloading '+unloadNo+' submitted for '+ud.vehicleNo,'warning');
-    logAction('Unloading','SUBMIT',unloadNo+' for '+ud.vehicleNo);
-    showToast('Unloading submitted!','success');
+    var msg='Unloading '+unloadNo+' submitted for '+ud.vehicleNo;
+    if(wasPartial)msg+=' (Resumed from '+partialSessions+' partial sessions)';
+    addNotif(msg,'warning');
+    logAction('Unloading','SUBMIT',msg);
+    showToast('Unloading submitted!'+(wasPartial?' ('+partialSessions+' partial sessions)':''),'success');
     closeModal();
-
     if(reportId){setTimeout(function(){showSEReport(reportId);},400);}
     else{renderUnloadingScreen();}
 }
-
 function generateSERNo(){
     var existing=DB.get('short_excess_reports');
     return 'SER-'+new Date().getFullYear()+'-'+String(existing.length+1).padStart(4,'0');
 }
 
-// --- Short/Excess Report View + PDF Download ---
+// --- Short/Excess Report ---
 function showSEReport(reportId){
     var report=DB.find('short_excess_reports',reportId);if(!report)return;
     var h='<div style="text-align:center;margin-bottom:16px"><div style="font-size:20px;font-weight:800;color:var(--accent);font-family:var(--font-display);letter-spacing:2px">'+esc(report.reportNo)+'</div><div style="font-size:12px;color:var(--text-muted)">Short / Excess / Wrong Report</div></div>';
@@ -962,7 +1077,6 @@ function showSEReport(reportId){
     h+='<div style="flex:1;padding:10px;background:rgba(0,255,136,0.08);border-radius:var(--radius-sm);text-align:center"><div style="font-size:20px;font-weight:700;color:var(--success)">'+report.totalScanned+'</div><div style="font-size:10px;color:var(--text-muted)">Scanned</div></div>';
     h+='<div style="flex:1;padding:10px;background:rgba(255,107,107,0.08);border-radius:var(--radius-sm);text-align:center"><div style="font-size:20px;font-weight:700;color:var(--danger)">'+(report.totalExpected-report.totalScanned)+'</div><div style="font-size:10px;color:var(--text-muted)">Difference</div></div>';
     h+='</div>';
-
     if(report.shortItems&&report.shortItems.length){
         h+='<div class="card-title" style="color:var(--warning)"><i class="bx bx-minus-circle"></i> Short Items ('+report.shortItems.length+')</div>';
         h+='<div class="table-wrapper" style="max-height:150px;overflow-y:auto"><table class="data-table"><thead><tr><th>Material</th><th>EAN</th><th>Invoice</th><th>Expected</th><th>Scanned</th><th>Short</th></tr></thead><tbody>';
@@ -977,23 +1091,20 @@ function showSEReport(reportId){
     }
     if(report.wrongItems&&report.wrongItems.length){
         h+='<div class="card-title" style="color:var(--danger);margin-top:10px"><i class="bx bx-x-circle"></i> Wrong Items ('+report.wrongItems.length+')</div>';
-        h+='<div class="table-wrapper" style="max-height:150px;overflow-y:auto"><table class="data-table"><thead><tr><th>EAN</th><th>Material</th><thMaterial</th><th>Qty</th></tr></thead><tbody>';
+        h+='<div class="table-wrapper" style="max-height:150px;overflow-y:auto"><table class="data-table"><thead><tr><th>EAN</th><th>Material</th><th>Qty</th></tr></thead><tbody>';
         report.wrongItems.forEach(function(s){h+='<tr class="scan-row-red"><td style="font-family:var(--font-display);font-size:10px">'+esc(s.ean)+'</td><td>'+esc(s.material)+'</td><td><strong style="color:var(--danger)">'+s.scannedQty+'</strong></td></tr>';});
         h+='</tbody></table></div>';
     }
-
     h+='<div class="form-actions" style="margin-top:16px"><button class="btn btn-glass" onclick="downloadSERPDF(\''+reportId+'\')"><i class="bx bx-download"></i> Download PDF</button><button class="btn btn-glass" onclick="closeModal();renderUnloadingScreen();">Close</button></div>';
     showModal('Short / Excess Report',h,'xl','');
 }
 
-// --- PDF Download for SER Report ---
+// --- PDF Download ---
 function downloadSERPDF(reportId){
     var report=DB.find('short_excess_reports',reportId);if(!report){showToast('Report not found','error');return;}
     var jsPDF=window.jspdf.jsPDF;
     var doc=new jsPDF({unit:'mm',format:'a4'});
     var y=15;
-
-    // Header
     doc.setFillColor(15,23,42);doc.rect(0,0,210,40,'F');
     doc.setTextColor(0,255,136);doc.setFontSize(18);doc.setFont('helvetica','bold');
     doc.text('SHORT / EXCESS REPORT',105,y+8,{align:'center'});
@@ -1002,8 +1113,6 @@ function downloadSERPDF(reportId){
     doc.setTextColor(150,150,150);doc.setFontSize(8);
     doc.text('Generated: '+fmtDT(new Date()),105,y+26,{align:'center'});
     y=48;
-
-    // Info box
     doc.setDrawColor(0,255,136);doc.setLineWidth(0.5);doc.rect(10,y,190,22);
     doc.setTextColor(30,30,30);doc.setFontSize(9);doc.setFont('helvetica','bold');
     doc.text('Vehicle: '+report.vehicleNo,15,y+7);
@@ -1012,8 +1121,6 @@ function downloadSERPDF(reportId){
     doc.text('By: '+report.createdBy,15,y+16);
     doc.text('Date: '+fmtDT(report.createdAt),80,y+16);
     y=78;
-
-    // Summary boxes
     doc.setFillColor(240,240,240);doc.roundedRect(10,y,58,18,3,3,'F');
     doc.roundedRect(76,y,58,18,3,3,'F');
     doc.roundedRect(142,y,58,18,3,3,'F');
@@ -1028,76 +1135,46 @@ function downloadSERPDF(reportId){
     doc.text('SCANNED',105,y+17,{align:'center'});
     doc.text('DIFFERENCE',171,y+17,{align:'center'});
     y=104;
-
-    // Table helper
     function addTableHeader(cols,colors){
         doc.setFillColor(30,40,60);doc.rect(10,y,190,8,'F');
         doc.setTextColor(255,255,255);doc.setFontSize(7);doc.setFont('helvetica','bold');
-        var x=12;
-        cols.forEach(function(c,i){doc.text(c,x,y+5.5);x+=colors[i];});
-        y+=10;
+        var x=12;cols.forEach(function(c,i){doc.text(c,x,y+5.5);x+=colors[i];});y+=10;
     }
     function addTableRow(cells,widths,isAlt){
         if(isAlt){doc.setFillColor(245,245,245);doc.rect(10,y-3,190,7,'F');}
         doc.setTextColor(30,30,30);doc.setFontSize(7);doc.setFont('helvetica','normal');
-        var x=12;
-        cells.forEach(function(c,i){doc.text(String(c),x,y+1);x+=widths[i];});
-        y+=6;
+        var x=12;cells.forEach(function(c,i){doc.text(String(c),x,y+1);x+=widths[i];});y+=6;
     }
-    function checkPage(needed){
-        if(y+needed>280){doc.addPage();y=15;return true;}return false;
-    }
-
-    // Short Items
+    function checkPage(n){if(y+n>280){doc.addPage();y=15;}}
     if(report.shortItems&&report.shortItems.length){
-        checkPage(30);
-        doc.setTextColor(200,120,0);doc.setFontSize(10);doc.setFont('helvetica','bold');
+        checkPage(30);doc.setTextColor(200,120,0);doc.setFontSize(10);doc.setFont('helvetica','bold');
         doc.text('SHORT ITEMS ('+report.shortItems.length+')',10,y);y+=6;
         addTableHeader(['Material','EAN','Invoice','Expected','Scanned','Short'],[55,40,35,20,20,20]);
-        report.shortItems.forEach(function(s,i){
-            checkPage(8);
-            addTableRow([s.material||'-',s.ean||'-',s.invoiceNo||'-',String(s.expected),String(s.scanned),'-'+s.short],[55,40,35,20,20,20],i%2===1);
-        });
+        report.shortItems.forEach(function(s,i){checkPage(8);addTableRow([s.material||'-',s.ean||'-',s.invoiceNo||'-',String(s.expected),String(s.scanned),'-'+s.short],[55,40,35,20,20,20],i%2===1);});
         y+=4;
     }
-
-    // Excess Items
     if(report.excessItems&&report.excessItems.length){
-        checkPage(30);
-        doc.setTextColor(220,50,50);doc.setFontSize(10);doc.setFont('helvetica','bold');
+        checkPage(30);doc.setTextColor(220,50,50);doc.setFontSize(10);doc.setFont('helvetica','bold');
         doc.text('EXCESS ITEMS ('+report.excessItems.length+')',10,y);y+=6;
         addTableHeader(['Material','EAN','Invoice','Expected','Scanned','Excess'],[55,40,35,20,20,20]);
-        report.excessItems.forEach(function(s,i){
-            checkPage(8);
-            addTableRow([s.material||'-',s.ean||'-',s.invoiceNo||'-',String(s.expected),String(s.scanned),'+'+s.excess],[55,40,35,20,20,20],i%2===1);
-        });
+        report.excessItems.forEach(function(s,i){checkPage(8);addTableRow([s.material||'-',s.ean||'-',s.invoiceNo||'-',String(s.expected),String(s.scanned),'+'+s.excess],[55,40,35,20,20,20],i%2===1);});
         y+=4;
     }
-
-    // Wrong Items
     if(report.wrongItems&&report.wrongItems.length){
-        checkPage(30);
-        doc.setTextColor(220,50,50);doc.setFontSize(10);doc.setFont('helvetica','bold');
+        checkPage(30);doc.setTextColor(220,50,50);doc.setFontSize(10);doc.setFont('helvetica','bold');
         doc.text('WRONG ITEMS ('+report.wrongItems.length+')',10,y);y+=6;
         addTableHeader(['EAN','Material','Qty Scanned'],[60,80,50]);
-        report.wrongItems.forEach(function(s,i){
-            checkPage(8);
-            addTableRow([s.ean||'-',s.material||'-',String(s.scannedQty)],[60,80,50],i%2===1);
-        });
+        report.wrongItems.forEach(function(s,i){checkPage(8);addTableRow([s.ean||'-',s.material||'-',String(s.scannedQty)],[60,80,50],i%2===1);});
     }
-
-    // Footer
-    y=272;
-    doc.setDrawColor(150,150,150);doc.line(10,y,200,y);
+    y=272;doc.setDrawColor(150,150,150);doc.line(10,y,200,y);
     doc.setTextColor(130,130,130);doc.setFontSize(7);
-    doc.text('This is system generated report — '+report.reportNo+' — '+APP.currentUser.name,105,y+5,{align:'center'});
-
+    doc.text('System Generated — '+report.reportNo+' — '+APP.currentUser.name,105,y+5,{align:'center'});
     doc.save(report.reportNo+'.pdf');
     showToast('PDF downloaded!','success');
     logAction('Report','PDF_DOWNLOAD','SER PDF '+report.reportNo);
 }
 
-// --- Posting Pending (unchanged) ---
+// --- Posting Pending ---
 function renderPostingPending(){
     var pending=DB.filter('vehicles',function(v){return v.status==='Posting Pending Approval';});
     var h='<div class="section-header"><h2><i class="bx bx-error-circle"></i> Posting Pending Approval ('+pending.length+')</h2></div>';
@@ -1109,7 +1186,7 @@ function renderPostingPending(){
         if(rec&&rec.materials){
             h+='<div class="table-wrapper" style="max-height:200px;overflow-y:auto"><table class="data-table"><thead><tr><th>Invoice</th><th>Material</th><th>EAN</th><th>Expected</th><th>Scanned</th><th>Diff</th></tr></thead><tbody>';
             rec.materials.forEach(function(m){
-                var cls=m.diff===0?'qty-match':(m.diff>0?'qty-mismatch':'qty-mismatch');
+                var cls=m.diff===0?'qty-match':'qty-mismatch';
                 h+='<tr><td style="font-size:11px">'+esc(m.invoiceNo)+'</td><td>'+esc(m.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(m.ean)+'</td><td>'+m.expectedQty+'</td><td>'+m.scannedQty+'</td><td class="'+cls+'">'+(m.diff>0?'-'+m.diff:(m.diff<0?'+'+Math.abs(m.diff):'0'))+'</td></tr>';
             });
             h+='</tbody></table></div>';
@@ -1122,13 +1199,12 @@ function renderPostingPending(){
     setHtml(h);
 }
 
-// --- Post Vehicle (GRN = GRN-InvoiceNo format) ---
+// --- Post Vehicle (GRN = GRN-InvoiceNo) ---
 function postVehicle(vehId){
     var v=DB.find('vehicles',vehId);if(!v)return;
     var invs=DB.filter('invoices',function(i){return i.vehicleId===vehId;});
     var grnList=[];
     invs.forEach(function(inv){
-        // GRN-InvoiceNo format, koi random sequence nahi
         var grnNo='GRN-'+inv.invoiceNo;
         grnList.push({invoiceId:inv.id,invoiceNo:inv.invoiceNo,grnNo:grnNo});
         DB.add('grn_records',{grnNo:grnNo,vehicleId:vehId,vehicleNo:v.vehicleNo,lrNo:v.lrNo,invoiceId:inv.id,invoiceNo:inv.invoiceNo,postedBy:APP.currentUser.id,postedByName:APP.currentUser.name,postedAt:new Date().toISOString()});
@@ -1157,7 +1233,6 @@ function viewUnloadingDetail(vehId){
         h+='<tr class="'+(m.diff===0?'':'scan-row-red')+'"><td>'+esc(m.invoiceNo)+'</td><td>'+esc(m.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(m.ean)+'</td><td>'+m.expectedQty+'</td><td>'+m.scannedQty+'</td><td class="'+cls+'">'+(m.diff>0?'Short: -'+m.diff:(m.diff<0?'Extra: +'+Math.abs(m.diff):'0'))+'</td></tr>';
     });
     h+='</tbody></table></div>';
-    // SER Report link agar hai
     var serReports=DB.filter('short_excess_reports',function(s){return s.vehicleNo===v.vehicleNo;});
     if(serReports.length){
         h+='<div style="margin-top:12px"><strong style="color:var(--warning)">Discrepancy Reports:</strong></div>';
@@ -1166,7 +1241,6 @@ function viewUnloadingDetail(vehId){
             h+='<div class="inv-list-item" onclick="showSEReport(\''+s.id+'\')"><div class="ili-left"><span class="ili-invno">'+esc(s.reportNo)+'</span><span class="ili-info">'+itemCount+' items | Expected: '+s.totalExpected+' | Scanned: '+s.totalScanned+'</span></div><span class="badge badge-danger">View / PDF</span></div>';
         });
     }
-    // GRN info
     var grns=DB.filter('grn_records',function(g){return g.vehicleId===vehId;});
     if(grns.length){
         h+='<div style="margin-top:12px"><strong style="color:var(--accent)">GRN Numbers:</strong></div>';
@@ -1175,21 +1249,16 @@ function viewUnloadingDetail(vehId){
     showModal('Unloading Detail — '+v.vehicleNo,h,'lg','<button class="btn btn-glass" onclick="closeModal()">Close</button>');
 }
 
-// --- Inbound Record (GRN = GRN-InvoiceNo, GRN Search shows inbound material) ---
+// --- Inbound Record ---
 function renderInboundRecord(){
     var vehs=DB.get('vehicles').filter(function(v){return v.vehicleType==='Unloading';}).reverse();
     var h='<div class="section-header"><h2><i class="bx bx-list-ul"></i> Inbound Record ('+vehs.length+')</h2>';
-    h+='<button class="btn btn-glass" onclick="exportInboundExcel()"><i class="bx bx-download"></i> Excel</button>';
-    h+='</div>';
-    // GRN Search Box
-    h+='<div class="card" style="margin-bottom:12px"><div class="card-title"><i class="bx bx-search"></i> Search GRN No — Inbound Material Dekhen</div>';
+    h+='<button class="btn btn-glass" onclick="exportInboundExcel()"><i class="bx bx-download"></i> Excel</button></div>';
+    h+='<div class="card" style="margin-bottom:12px"><div class="card-title"><i class="bx bx-search"></i> Search GRN No — Inbound Material</div>';
     h+='<div class="search-box" style="max-width:500px"><i class="bx bx-barcode"></i><input type="text" id="grnSearchInput" placeholder="GRN-INV001 type karein..." oninput="searchGRNForMaterial()" style="font-family:var(--font-display);letter-spacing:1px"></div>';
     h+='<div id="grnSearchResult"></div></div>';
-    // Vehicle table
     h+='<div class="search-box"><i class="bx bx-search"></i><input type="text" id="inboundRecSearch" placeholder="Search vehicle, LR..." oninput="filterInboundRec()"></div>';
-    h+='<div id="inboundRecTable">';
-    h+=buildInboundRecTable(vehs);
-    h+='</div>';
+    h+='<div id="inboundRecTable">'+buildInboundRecTable(vehs)+'</div>';
     setHtml(h);
 }
 function searchGRNForMaterial(){
@@ -1203,15 +1272,14 @@ function searchGRNForMaterial(){
         var mats=DB.filter('invoice_materials',function(m){return m.invoiceId===g.invoiceId;});
         h+='<div style="margin-top:10px;padding:12px;border:1px solid var(--accent);border-radius:var(--radius-sm);background:var(--accent-dim)">';
         h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><span style="font-family:var(--font-display);font-size:13px;font-weight:700;color:var(--accent)">'+esc(g.grnNo)+'</span><span style="font-size:11px;color:var(--text-muted)">'+fmtDT(g.postedAt)+'</span></div>';
-        h+='<div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">Invoice: <strong>'+esc(g.invoiceNo)+'</strong> | Vehicle: <strong>'+esc(g.vehicleNo)+'</strong> | LR: <strong>'+esc(g.lrNo||'-')+'</strong> | Posted By: <strong>'+esc(g.postedByName||'-')+'</strong></div>';
+        h+='<div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">Invoice: <strong>'+esc(g.invoiceNo)+'</strong> | Vehicle: <strong>'+esc(g.vehicleNo)+'</strong> | LR: <strong>'+esc(g.lrNo||'-')+'</strong></div>';
         h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>EAN</th><th>Invoice Qty</th><th>Unloaded Qty</th><th>Status</th></tr></thead><tbody>';
         var totalInv=0,totalUnl=0;
         mats.forEach(function(m){
             totalInv+=m.qty;totalUnl+=(m.unloadedQty||0);
             var diff=m.qty-(m.unloadedQty||0);
-            var stCls=diff===0?'badge-success':(diff>0?'badge-warning':'badge-danger');
-            var stTxt=diff===0?'Full':'Short: '+diff;
-            h+='<tr><td>'+esc(m.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(m.ean)+'</td><td>'+m.qty+'</td><td>'+(m.unloadedQty||0)+'</td><td><span class="badge '+stCls+'">'+stTxt+'</span></td></tr>';
+            var stCls=diff===0?'badge-success':'badge-warning';
+            h+='<tr><td>'+esc(m.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(m.ean)+'</td><td>'+m.qty+'</td><td>'+(m.unloadedQty||0)+'</td><td><span class="badge '+stCls+'">'+(diff===0?'Full':'Short: '+diff)+'</span></td></tr>';
         });
         h+='<tr style="background:var(--bg-secondary);font-weight:700"><td colspan="2">TOTAL</td><td style="color:var(--accent)">'+totalInv+'</td><td style="color:var(--success)">'+totalUnl+'</td><td>'+(totalInv===totalUnl?'<span class="badge badge-success">Complete</span>':'<span class="badge badge-warning">Pending: '+(totalInv-totalUnl)+'</span>')+'</td></tr>';
         h+='</tbody></table></div></div>';
@@ -1251,14 +1319,12 @@ function exportInboundExcel(){
     showToast('Excel downloaded!','success');
 }
 
-// --- Unloading Stock (unchanged) ---
+// --- Unloading Stock ---
 function renderUnloadingStock(){
     var grns=DB.get('grn_records').reverse();
     var h='<div class="section-header"><h2><i class="bx bx-box"></i> Unloading Stock</h2></div>';
     h+='<div class="search-box"><i class="bx bx-search"></i><input type="text" id="stockSearch" placeholder="Search GRN No or Invoice No..." oninput="filterStock()"></div>';
-    h+='<div id="stockList">';
-    h+=buildStockList(grns);
-    h+='</div>';
+    h+='<div id="stockList">'+buildStockList(grns)+'</div>';
     setHtml(h);
 }
 function buildStockList(grns){
@@ -1266,10 +1332,7 @@ function buildStockList(grns){
     if(!grns.length){h+='<div class="card"><div class="empty-state"><i class="bx bx-inbox"></i><p>No unloading stock</p></div></div>';return h;}
     grns.forEach(function(g){
         var mats=DB.filter('invoice_materials',function(m){return m.invoiceId===g.invoiceId;});
-        h+='<div class="inv-list-item" onclick="showStockDetail(\''+g.id+'\')">';
-        h+='<div class="ili-left"><span class="ili-invno">'+esc(g.grnNo)+'</span><span class="ili-info">'+esc(g.invoiceNo)+' | '+esc(g.vehicleNo)+' | '+mats.length+' materials</span></div>';
-        h+='<span class="badge badge-accent">'+fmtDate(g.postedAt)+'</span>';
-        h+='</div>';
+        h+='<div class="inv-list-item" onclick="showStockDetail(\''+g.id+'\')"><div class="ili-left"><span class="ili-invno">'+esc(g.grnNo)+'</span><span class="ili-info">'+esc(g.invoiceNo)+' | '+esc(g.vehicleNo)+' | '+mats.length+' materials</span></div><span class="badge badge-accent">'+fmtDate(g.postedAt)+'</span></div>';
     });
     return h;
 }
@@ -2569,7 +2632,7 @@ function renderPickingAssign(){
     if(!obds.length)h+='<div style="color:var(--text-muted);padding:16px;text-align:center">All OBDs assigned</div>';
     else{
         h+='<div class="form-group" style="margin-bottom:12px"><label>Select User <span class="req">*</span></label><select id="pickAssignUser" class="form-input" style="max-width:300px"><option value="">-- Select User --</option>';
-        var users=DB.get('users').filter(function(u){return u.role==='Picker'||u.role==='Manager';});
+        var users=DB.get('users').filter(function(u){return u.role==='Picker'||u.role==='Manager'||u.role==='admin';});
         users.forEach(function(u){h+='<option value="'+u.id+'" data-name="'+esc(u.name)+'">'+esc(u.name)+' ('+esc(u.role)+')</option>';});
         h+='</select></div>';
         h+='<div class="chk-list" id="obdChkList">';
@@ -3167,56 +3230,318 @@ function exportWorkTimePDF(){
 }
 
 // ==================== ADMIN ====================
+
+// --- Module & Action Definitions ---
+var ALL_MODULES = [
+    {id:'dashboard',label:'Dashboard',group:'System'},
+    {id:'inbound',label:'Inbound (Full)',group:'Inbound'},
+    {id:'security-gate',label:'Security Gate',group:'Inbound'},
+    {id:'pending-vehicle',label:'Pending Vehicle',group:'Inbound'},
+    {id:'unloading-screen',label:'Unloading Screen',group:'Inbound'},
+    {id:'posting-pending',label:'Posting Pending',group:'Inbound'},
+    {id:'inbound-record',label:'Inbound Record',group:'Inbound'},
+    {id:'unloading-stock',label:'Unloading Stock',group:'Inbound'},
+    {id:'putaway',label:'Putaway',group:'Warehouse'},
+    {id:'piv',label:'PIV',group:'Warehouse'},
+    {id:'location',label:'Location Master',group:'Warehouse'},
+    {id:'rack',label:'Bin Master',group:'Warehouse'},
+    {id:'material',label:'Material Master',group:'Warehouse'},
+    {id:'picking',label:'Picking',group:'Outbound'},
+    {id:'loading',label:'Loading',group:'Outbound'},
+    {id:'qty-mismatch',label:'Qty Mismatch',group:'Outbound'},
+    {id:'user-time',label:'User Working Time',group:'System'},
+    {id:'reports',label:'Reports',group:'System'},
+    {id:'audit',label:'Audit Log',group:'System'},
+    {id:'admin',label:'Admin',group:'System'},
+    {id:'settings',label:'Settings',group:'System'}
+];
+
+var ALL_ACTIONS = [
+    {id:'canSecurityEntry',label:'Security Gate Entry Button',mod:'Security Gate'},
+    {id:'canUploadInvoice',label:'Upload Invoice Button',mod:'Pending Vehicle'},
+    {id:'canAssignVehicle',label:'Assign Vehicle Button',mod:'Pending Vehicle'},
+    {id:'canStartUnloading',label:'Start Unload Button',mod:'Unloading Screen'},
+    {id:'canPostVehicle',label:'Post Vehicle Button',mod:'Posting Pending'},
+    {id:'canApprove',label:'Approve / Reject Button',mod:'Posting Pending'},
+    {id:'canViewReports',label:'View Reports Button',mod:'Reports'},
+    {id:'canPutaway',label:'Putaway Save Button',mod:'Putaway'},
+    {id:'canPIV',label:'PIV Save Button',mod:'PIV'},
+    {id:'canPick',label:'Picking Start Button',mod:'Picking'},
+    {id:'canLoad',label:'Loading Start Button',mod:'Loading'},
+    {id:'canAdmin',label:'Admin Panel Access',mod:'Admin'}
+];
+
+var ROLE_DEFAULTS = {
+    'Admin':{
+        modules:['all'],
+        actions:{canSecurityEntry:false,canUploadInvoice:true,canAssignVehicle:true,canStartUnloading:true,canPostVehicle:true,canApprove:true,canViewReports:true,canPutaway:true,canPIV:true,canPick:true,canLoad:true,canAdmin:true}
+    },
+    'Manager':{
+        modules:['dashboard','inbound','pending-vehicle','posting-pending','inbound-record','unloading-stock','reports','audit','picking','loading','user-time'],
+        actions:{canSecurityEntry:false,canUploadInvoice:true,canAssignVehicle:true,canStartUnloading:false,canPostVehicle:false,canApprove:true,canViewReports:true,canPutaway:false,canPIV:false,canPick:true,canLoad:true,canAdmin:false}
+    },
+    'DEO':{
+        modules:['inbound','pending-vehicle'],
+        actions:{canSecurityEntry:false,canUploadInvoice:true,canAssignVehicle:true,canStartUnloading:false,canPostVehicle:false,canApprove:false,canViewReports:false,canPutaway:false,canPIV:false,canPick:false,canLoad:false,canAdmin:false}
+    },
+    'Security':{
+        modules:['inbound','security-gate'],
+        actions:{canSecurityEntry:true,canUploadInvoice:false,canAssignVehicle:false,canStartUnloading:false,canPostVehicle:false,canApprove:false,canViewReports:false,canPutaway:false,canPIV:false,canPick:false,canLoad:false,canAdmin:false}
+    },
+    'Unloader':{
+        modules:['inbound','unloading-screen'],
+        actions:{canSecurityEntry:false,canUploadInvoice:false,canAssignVehicle:false,canStartUnloading:true,canPostVehicle:false,canApprove:false,canViewReports:false,canPutaway:false,canPIV:false,canPick:false,canLoad:false,canAdmin:false}
+    },
+    'Picker':{
+        modules:['picking'],
+        actions:{canSecurityEntry:false,canUploadInvoice:false,canAssignVehicle:false,canStartUnloading:false,canPostVehicle:false,canApprove:false,canViewReports:false,canPutaway:false,canPIV:false,canPick:true,canLoad:false,canAdmin:false}
+    },
+    'Loader':{
+        modules:['loading'],
+        actions:{canSecurityEntry:false,canUploadInvoice:false,canAssignVehicle:false,canStartUnloading:false,canPostVehicle:false,canApprove:false,canViewReports:false,canPutaway:false,canPIV:false,canPick:false,canLoad:true,canAdmin:false}
+    }
+};
+
+// --- Main Admin Page ---
 function renderAdmin(){
     var users=DB.get('users');
-    var h='<div class="section-header"><h2><i class="bx bx-user-detail"></i> User Management</h2><button class="btn btn-glass" onclick="showAddUser()"><i class="bx bx-plus"></i> Add User</button></div>';
-    h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Username</th><th>Name</th><th>Role</th><th>Actions</th></tr></thead><tbody>';
-    users.forEach(function(u){
-        h+='<tr><td><strong>'+esc(u.username)+'</strong></td><td>'+esc(u.name)+'</td><td><span class="badge badge-accent">'+esc(u.role)+'</span></td><td><div class="table-actions"><button class="btn btn-glass btn-sm" onclick="editUser(\''+u.id+'\')"><i class="bx bx-edit"></i></button>'+(u.role!=='Super Admin'?'<button class="btn btn-danger btn-sm" onclick="deleteUser(\''+u.id+'\')"><i class="bx bx-trash"></i></button>':'')+'</div></td></tr>';
+    var h='<div class="section-header"><h2><i class="bx bx-user-detail"></i> User Management</h2>';
+    h+='<button class="btn btn-glass" onclick="showAddUser()"><i class="bx bx-user-plus"></i> Add User</button></div>';
+
+    // Role summary
+    var roleC={};
+    users.forEach(function(u){var r=u.role||'Unknown';roleC[r]=(roleC[r]||0)+1;});
+    h+='<div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">';
+    for(var rk in roleC){
+        h+='<div style="padding:10px 16px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);text-align:center;min-width:90px"><div style="font-size:20px;font-weight:800;color:var(--accent)">'+roleC[rk]+'</div><div style="font-size:9px;color:var(--text-muted);letter-spacing:1px">'+esc(rk)+'S</div></div>';
+    }
+    h+='</div>';
+
+    // Users Table
+    h+='<div class="card"><div class="card-title">All Users ('+users.length+')</div>';
+    h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>Name</th><th>Username</th><th>Role</th><th>Modules</th><th>Buttons</th><th>Status</th><th>Actions</th></tr></thead><tbody>';
+    if(!users.length)h+='<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:24px">No users</td></tr>';
+    users.forEach(function(u,i){
+        var mods=(u.permissions&&u.permissions.modules)?u.permissions.modules:[];
+        var acts=(u.permissions&&u.permissions.actions)?u.permissions.actions:{};
+        var isAll=mods.indexOf('all')>-1;
+        var modStr=isAll?'<span class="badge badge-accent">ALL</span>':'<span class="badge badge-info">'+mods.length+'</span>';
+        var actCount=0;for(var ak in acts){if(acts[ak])actCount++;}
+        var actStr='<span class="badge '+(actCount>6?'badge-success':'badge-warning')+'">'+actCount+'/'+ALL_ACTIONS.length+'</span>';
+        var sessions=DB.filter('user_sessions',function(s){return s.userId===u.id&&!s.logoutTime;});
+        var statusBadge=sessions.length>0?'<span class="badge badge-success"><span class="status-dot green"></span> Online</span>':'<span class="badge" style="background:var(--bg-secondary);color:var(--text-muted)"><span class="status-dot" style="background:var(--text-muted)"></span> Offline</span>';
+
+        h+='<tr><td>'+(i+1)+'</td>';
+        h+='<td><strong>'+esc(u.name)+'</strong></td>';
+        h+='<td style="font-family:var(--font-display);font-size:12px;color:var(--accent)">'+esc(u.username)+'</td>';
+        h+='<td><span class="badge badge-warning">'+esc(u.role)+'</span></td>';
+        h+='<td>'+modStr+'</td>';
+        h+='<td>'+actStr+'</td>';
+        h+='<td>'+statusBadge+'</td>';
+        h+='<td><div class="table-actions">';
+        if(u.role==='Super Admin'){
+            h+='<span style="font-size:10px;color:var(--text-muted)"><i class="bx bx-lock"></i> Locked</span>';
+        } else {
+            h+='<button class="btn btn-glass btn-sm" onclick="editUser(\''+u.id+'\')"><i class="bx bx-edit"></i></button>';
+            h+='<button class="btn btn-danger btn-sm" onclick="deleteUser(\''+u.id+'\')"><i class="bx bx-trash"></i></button>';
+        }
+        h+='</div></td></tr>';
     });
-    h+='</tbody></table></div>';
+    h+='</tbody></table></div></div>';
     setHtml(h);
 }
-function showAddUser(){
-    var h='<div class="form-row"><div class="form-group"><label>Username <span class="req">*</span></label><input type="text" id="auUser" class="form-input"></div><div class="form-group"><label>Password <span class="req">*</span></label><input type="text" id="auPass" class="form-input"></div></div>';
-    h+='<div class="form-row"><div class="form-group"><label>Full Name <span class="req">*</span></label><input type="text" id="auName" class="form-input"></div><div class="form-group"><label>Role <span class="req">*</span></label><select id="auRole" class="form-input"><option>Admin</option><option>Manager</option><option>DEO</option><option>Security</option><option>Unloader</option><option>Picker</option><option>Loader</option></select></div></div>';
-    h+='<div class="card-title" style="margin-top:12px"><i class="bx bx-shield"></i> Permissions</div><div class="perm-grid">';
-    var perms=[['canSecurityEntry','Security Entry'],['canUploadInvoice','Upload Invoice'],['canAssignVehicle','Assign Vehicle'],['canStartUnloading','Start Unloading'],['canPostVehicle','Post Vehicle'],['canApprove','Approve'],['canViewReports','View Reports'],['canPutaway','Putaway'],['canPIV','PIV'],['canPick','Picking'],['canLoad','Loading'],['canAdmin','Admin']];
-    perms.forEach(function(p){h+='<div class="perm-item"><input type="checkbox" id="au_'+p[0]+'" checked><label for="au_'+p[0]+'">'+p[1]+'</label></div>';});
+
+// --- Permission Builder HTML ---
+function buildPermHTML(prefix,isSuperAdmin,currentPerms){
+    var cp=currentPerms||{modules:[],actions:{}};
+    var cMods=cp.modules||[];
+    var cActs=cp.actions||{};
+    var isAll=cMods.indexOf('all')>-1;
+    var disabled=isSuperAdmin?'disabled':'';
+
+    var h='';
+
+    // === MODULE VISIBILITY ===
+    h+='<div style="margin-bottom:16px">';
+    h+='<div class="card-title" style="margin-bottom:8px"><i class="bx bx-layout" style="color:var(--accent)"></i> Module Visibility <span style="font-size:10px;color:var(--text-muted);font-weight:normal">(Sidebar mein kya dikhega)</span></div>';
+
+    // ALL toggle
+    h+='<div style="margin-bottom:8px"><label class="perm-item" style="border-color:var(--accent);background:var(--accent-dim);cursor:pointer"><input type="checkbox" id="'+prefix+'_allMods" '+(isAll?'checked':'')+' '+disabled+' onchange="toggleAllMods(\''+prefix+'\')"> <strong style="color:var(--accent)">ALL MODULES</strong></label></div>';
+
+    // Grouped modules
+    var groups={};
+    ALL_MODULES.forEach(function(m){if(!groups[m.group])groups[m.group]=[];groups[m.group].push(m);});
+
+    for(var gk in groups){
+        h+='<div style="font-size:10px;color:var(--text-muted);letter-spacing:1px;margin:10px 0 4px;padding-left:4px;border-left:2px solid var(--border);padding-left:8px">'+gk.toUpperCase()+'</div>';
+        h+='<div class="perm-grid">';
+        groups[gk].forEach(function(m){
+            var chk=isAll||cMods.indexOf(m.id)>-1;
+            h+='<label class="perm-item"><input type="checkbox" class="'+prefix+'_modCb" value="'+m.id+'" '+(chk?'checked':'')+' '+disabled+' '+(isAll?'disabled':'')+'> '+m.label+'</label>';
+        });
+        h+='</div>';
+    }
     h+='</div>';
-    showModal('Add User',h,'lg','<button class="btn btn-glass" onclick="closeModal()">Cancel</button><button class="btn btn-glass" onclick="saveUser()"><i class="bx bx-check"></i> Save</button>');
+
+    // === BUTTON / ACTION ACCESS ===
+    h+='<div>';
+    h+='<div class="card-title" style="margin-bottom:8px"><i class="bx bx-shield" style="color:var(--warning)"></i> Button Access <span style="font-size:10px;color:var(--text-muted);font-weight:normal">(Konse buttons click kar sake)</span></div>';
+    h+='<div class="perm-grid">';
+    ALL_ACTIONS.forEach(function(a){
+        var chk=isAll||cActs[a.id]===true;
+        h+='<label class="perm-item"><input type="checkbox" class="'+prefix+'_actCb" value="'+a.id+'" '+(chk?'checked':'')+' '+disabled+' '+(isAll?'disabled':'')+'> '+a.label+' <span style="font-size:9px;color:var(--text-muted)">('+a.mod+')</span></label>';
+    });
+    h+='</div>';
+    h+='</div>';
+
+    return h;
 }
-function saveUser(){
-    var un=document.getElementById('auUser').value.trim(),pw=document.getElementById('auPass').value.trim(),nm=document.getElementById('auName').value.trim(),rl=document.getElementById('auRole').value;
-    if(!un||!pw||!nm){showToast('Fill required fields','error');return;}
+
+function toggleAllMods(prefix){
+    var isAll=document.getElementById(prefix+'_allMods').checked;
+    var modCbs=document.querySelectorAll('.'+prefix+'_modCb');
+    var actCbs=document.querySelectorAll('.'+prefix+'_actCb');
+    for(var i=0;i<modCbs.length;i++){modCbs[i].checked=isAll;modCbs[i].disabled=isAll;}
+    for(var j=0;j<actCbs.length;j++){actCbs[j].checked=isAll;actCbs[j].disabled=isAll;}
+}
+
+function readPermHTML(prefix){
+    var isAll=document.getElementById(prefix+'_allMods').checked;
+    var modules=[];
     var actions={};
-    var perms=['canSecurityEntry','canUploadInvoice','canAssignVehicle','canStartUnloading','canPostVehicle','canApprove','canViewReports','canPutaway','canPIV','canPick','canLoad','canAdmin'];
-    perms.forEach(function(p){actions[p]=document.getElementById('au_'+p).checked;});
-    var modMap={Admin:['all'],Manager:['dashboard','inbound','reports','audit','picking','loading','user-time'],DEO:['inbound'],Security:['inbound','loading'],Unloader:['inbound'],Picker:['picking'],Loader:['loading']};
-    DB.add('users',{username:un,password:pw,name:nm,role:rl,permissions:{modules:modMap[rl]||['dashboard'],actions:actions}});
-    logAction('Admin','ADD_USER','User '+un+' ('+rl+') created');showToast('User created!','success');closeModal();renderAdmin();
+    if(isAll){
+        modules=['all'];
+        ALL_ACTIONS.forEach(function(a){actions[a.id]=true;});
+    } else {
+        var modCbs=document.querySelectorAll('.'+prefix+'_modCb');
+        for(var i=0;i<modCbs.length;i++){if(modCbs[i].checked)modules.push(modCbs[i].value);}
+        var actCbs=document.querySelectorAll('.'+prefix+'_actCb');
+        for(var j=0;j<actCbs.length;j++){actions[actCbs[j].value]=actCbs[j].checked;}
+    }
+    return {modules:modules,actions:actions};
 }
+
+// --- Add User ---
+function showAddUser(){
+    var h='<div class="form-row">';
+    h+='<div class="form-group"><label>Full Name <span class="req">*</span></label><input type="text" id="auName" class="form-input" placeholder="e.g. Rahul Sharma"></div>';
+    h+='<div class="form-group"><label>Username <span class="req">*</span></label><input type="text" id="auUser" class="form-input" placeholder="e.g. rahul" style="text-transform:lowercase"></div>';
+    h+='</div>';
+    h+='<div class="form-row">';
+    h+='<div class="form-group"><label>Password <span class="req">*</span></label><input type="text" id="auPass" class="form-input" placeholder="Min 4 characters"></div>';
+    h+='<div class="form-group"><label>Role <span class="req">*</span></label>';
+    h+='<select id="auRole" class="form-input" onchange="applyRoleDefaults(\'au\')">';
+    h+='<option value="">-- Select Role --</option>';
+    var roles=['Admin','Manager','DEO','Security','Unloader','Picker','Loader'];
+    roles.forEach(function(r){h+='<option value="'+r+'">'+r+'</option>';});
+    h+='</select></div></div>';
+    h+='<div id="auRoleMsg" style="font-size:11px;color:var(--text-muted);margin-bottom:10px"></div>';
+    h+='<hr class="cyber-line" style="margin:14px 0">';
+    h+=buildPermHTML('au',false,null);
+
+    showModal('Add New User',h,'xl',
+        '<button class="btn btn-glass" onclick="closeModal()">Cancel</button>'+
+        '<button class="btn btn-glass" onclick="saveUser()"><i class="bx bx-check"></i> Create User</button>');
+}
+
+function applyRoleDefaults(prefix){
+    var role=document.getElementById(prefix+'Role').value;
+    var msg=document.getElementById(prefix+'RoleMsg');
+    var defs=ROLE_DEFAULTS[role];
+    if(!defs){msg.innerHTML='';return;}
+
+    // Show role description
+    var descs={
+        'Admin':'Full access except Security Gate entry. Can manage users.',
+        'Manager':'View + Assign vehicles, View reports, Picking & Loading oversight.',
+        'DEO':'Inbound only — upload invoices, assign vehicles.',
+        'Security':'Security Gate entry only.',
+        'Unloader':'Unloading Screen only — scan & submit.',
+        'Picker':'Picking module only.',
+        'Loader':'Loading module only.'
+    };
+    msg.innerHTML='<div style="background:var(--accent-dim);padding:8px 12px;border-radius:var(--radius-sm);font-size:11px;color:var(--accent)"><i class="bx bx-info-circle"></i> '+descs[role]+'</div>';
+
+    // Apply defaults to checkboxes
+    var isAll=defs.modules.indexOf('all')>-1;
+    var allModCb=document.getElementById(prefix+'_allMods');
+    if(allModCb){allModCb.checked=isAll;}
+    var modCbs=document.querySelectorAll('.'+prefix+'_modCb');
+    for(var i=0;i<modCbs.length;i++){
+        var chk=isAll||defs.modules.indexOf(modCbs[i].value)>-1;
+        modCbs[i].checked=chk;
+        modCbs[i].disabled=isAll;
+    }
+    var actCbs=document.querySelectorAll('.'+prefix+'_actCb');
+    for(var j=0;j<actCbs.length;j++){
+        var aChk=isAll||defs.actions[actCbs[j].value]===true;
+        actCbs[j].checked=aChk;
+        actCbs[j].disabled=isAll;
+    }
+}
+
+function saveUser(){
+    var nm=document.getElementById('auName').value.trim();
+    var un=document.getElementById('auUser').value.trim().toLowerCase();
+    var pw=document.getElementById('auPass').value.trim();
+    var rl=document.getElementById('auRole').value;
+    if(!nm||!un||!pw||!rl){showToast('All fields required','error');return;}
+    if(pw.length<4){showToast('Password min 4 characters','error');return;}
+    var exists=DB.filter('users',function(u){return u.username===un;});
+    if(exists.length>0){showToast('Username already exists!','error');return;}
+    var perms=readPermHTML('au');
+    DB.add('users',{username:un,password:pw,name:nm,role:rl,permissions:perms});
+    logAction('Admin','ADD_USER','User '+un+' ('+rl+') created');
+    showToast('User created: '+nm,'success');
+    closeModal();renderAdmin();
+}
+
+// --- Edit User ---
 function editUser(id){
     var u=DB.find('users',id);if(!u)return;
-    var h='<div class="form-row"><div class="form-group"><label>Full Name</label><input type="text" id="euName" class="form-input" value="'+esc(u.name)+'"></div><div class="form-group"><label>Role</label><select id="euRole" class="form-input"><option'+(u.role==='Admin'?' selected':'')+'>Admin</option><option'+(u.role==='Manager'?' selected':'')+'>Manager</option><option'+(u.role==='DEO'?' selected':'')+'>DEO</option><option'+(u.role==='Security'?' selected':'')+'>Security</option><option'+(u.role==='Unloader'?' selected':'')+'>Unloader</option><option'+(u.role==='Picker'?' selected':'')+'>Picker</option><option'+(u.role==='Loader'?' selected':'')+'>Loader</option></select></div></div>';
-    h+='<div class="form-group"><label>New Password (leave blank to keep)</label><input type="text" id="euPass" class="form-input" placeholder="New password"></div>';
-    h+='<div class="card-title" style="margin-top:12px"><i class="bx bx-shield"></i> Permissions</div><div class="perm-grid">';
-    var perms=['canSecurityEntry','canUploadInvoice','canAssignVehicle','canStartUnloading','canPostVehicle','canApprove','canViewReports','canPutaway','canPIV','canPick','canLoad','canAdmin'];
-    var pLabels=['Security Entry','Upload Invoice','Assign Vehicle','Start Unloading','Post Vehicle','Approve','View Reports','Putaway','PIV','Picking','Loading','Admin'];
-    perms.forEach(function(p,i){h+='<div class="perm-item"><input type="checkbox" id="eu_'+p+'" '+(u.permissions.actions&&u.permissions.actions[p]?'checked':'')+'><label for="eu_'+p+'">'+pLabels[i]+'</label></div>';});
-    h+='</div>';
-    showModal('Edit User — '+u.name,h,'lg','<button class="btn btn-glass" onclick="closeModal()">Cancel</button><button class="btn btn-glass" onclick="updateUser(\''+id+'\')"><i class="bx bx-check"></i> Update</button>');
+    var h='<div style="background:var(--accent-dim);padding:10px;border-radius:var(--radius-sm);margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><div><strong style="color:var(--accent)">'+esc(u.name)+'</strong> <span style="font-family:var(--font-display);font-size:12px;color:var(--text-muted)">('+esc(u.username)+')</span></div><span class="badge badge-warning">'+esc(u.role)+'</span></div>';
+
+    h+='<div class="form-row">';
+    h+='<div class="form-group"><label>Full Name <span class="req">*</span></label><input type="text" id="euName" class="form-input" value="'+esc(u.name)+'"></div>';
+    h+='<div class="form-group"><label>Role <span class="req">*</span></label>';
+    h+='<select id="euRole" class="form-input" onchange="applyRoleDefaults(\'eu\')">';
+    var roles=['Admin','Manager','DEO','Security','Unloader','Picker','Loader'];
+    roles.forEach(function(r){h+='<option value="'+r+'"'+(u.role===r?' selected':'')+'>'+r+'</option>';});
+    h+='</select></div></div>';
+    h+='<div class="form-group"><label>New Password <span style="font-size:10px;color:var(--text-muted)">(blank = keep current)</span></label><input type="text" id="euPass" class="form-input" placeholder="New password..."></div>';
+    h+='<div id="euRoleMsg" style="font-size:11px;color:var(--text-muted);margin-bottom:10px"></div>';
+    h+='<hr class="cyber-line" style="margin:14px 0">';
+    h+=buildPermHTML('eu',false,u.permissions);
+
+    showModal('Edit User — '+u.name,h,'xl',
+        '<button class="btn btn-glass" onclick="closeModal()">Cancel</button>'+
+        '<button class="btn btn-glass" onclick="updateUser(\''+id+'\')"><i class="bx bx-check"></i> Update</button>');
 }
+
 function updateUser(id){
-    var up={name:document.getElementById('euName').value.trim(),role:document.getElementById('euRole').value};
-    var pw=document.getElementById('euPass').value.trim();if(pw)up.password=pw;
-    var actions={};var perms=['canSecurityEntry','canUploadInvoice','canAssignVehicle','canStartUnloading','canPostVehicle','canApprove','canViewReports','canPutaway','canPIV','canPick','canLoad','canAdmin'];
-    perms.forEach(function(p){actions[p]=document.getElementById('eu_'+p).checked;});
-    var modMap={Admin:['all'],Manager:['dashboard','inbound','reports','audit','picking','loading','user-time'],DEO:['inbound'],Security:['inbound','loading'],Unloader:['inbound'],Picker:['picking'],Loader:['loading']};
-    up.permissions={modules:modMap[up.role]||['dashboard'],actions:actions};
-    DB.update('users',id,up);logAction('Admin','EDIT_USER','User '+id+' updated');showToast('User updated!','success');closeModal();renderAdmin();
+    var nm=document.getElementById('euName').value.trim();
+    var rl=document.getElementById('euRole').value;
+    var pw=document.getElementById('euPass').value.trim();
+    if(!nm||!rl){showToast('Name and Role required','error');return;}
+    if(pw&&pw.length<4){showToast('Password min 4 characters','error');return;}
+    var up={name:nm,role:rl,permissions:readPermHTML('eu')};
+    if(pw&&pw.length>=4)up.password=pw;
+    DB.update('users',id,up);
+    logAction('Admin','EDIT_USER','User '+id+' updated to '+rl);
+    showToast('User updated!','success');
+    closeModal();renderAdmin();
 }
-function deleteUser(id){if(!confirm('Delete user?'))return;DB.remove('users',id);logAction('Admin','DELETE_USER','User '+id+' deleted');showToast('User deleted','success');renderAdmin();}
+
+// --- Delete User ---
+function deleteUser(id){
+    var u=DB.find('users',id);if(!u)return;
+    if(u.id===APP.currentUser.id){showToast('Cannot delete yourself!','error');return;}
+    if(!confirm('Delete user "'+u.name+'" ('+u.username+')?'))return;
+    DB.remove('users',id);
+    logAction('Admin','DELETE_USER','User '+u.name+' deleted');
+    showToast('User deleted','success');
+    renderAdmin();
+}
 
 // ==================== SETTINGS (10 UI Options) ====================
 function renderSettings(){

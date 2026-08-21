@@ -17,6 +17,8 @@
     <link rel="stylesheet" href="style.css">
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+    <!-- SAP Fiori "72" Font -->
+<link rel="stylesheet" href="https://ui5.sap.com/resources/sap/ui/core/themes/base/fonts/72-font.css">
 </head>
 <body>
     <!-- LOGIN PAGE -->
@@ -55,22 +57,23 @@
 
     <!-- MAIN APP -->
     <div id="mainApp" style="display:none">
-        <aside id="sidebar">
+               <aside id="sidebar">
             <div class="sidebar-header">
                 <div class="sidebar-logo">
-                    <i class='bx bxs-building-house'></i>
+                    <img src="https://z-cdn-media.chatglm.cn/files/3739b31e-9d0d-42c1-be57-77783d6b96db.png?auth_key=1887329044-b9e8ba0dd8d84ecca3a3be593df3f2cf-0-10bfe59c0a274860bde6b1d4ca8face5" alt="VIP Logo" class="sidebar-logo-img">
                     <div>
-                        <strong>VIP INDUSTRIES</strong>
+                        <strong>INDUSTRIES</strong>
                         <small>MD20 — WMS</small>
                     </div>
                 </div>
                 <button id="sidebarClose" class="sidebar-close-btn"><i class='bx bx-x'></i></button>
             </div>
+            
             <nav id="sidebarNav"></nav>
             <div class="sidebar-footer">
                 <div class="dev-credit">
                     <i class='bx bx-code-alt'></i>
-                    <span>Developed by <strong>Nikhil Patil & Khushi patil</strong></span>
+                    <span>Developed by <strong>Nikhil Patil</strong></span>
                 </div>
             </div>
         </aside>

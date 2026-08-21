@@ -17,6 +17,45 @@
     --glass-border: rgba(255,255,255,.08);
     --glass-blur: blur(16px);
 }
+/* SAP Fiori Typography & Base Styles */
+* {
+    font-family: "72", "72full", Arial, sans-serif;
+}
+
+body {
+    font-size: 14px;
+    letter-spacing: 0.01em; /* SAP uses slight letter spacing */
+}
+
+/* SAP-style flat buttons */
+.btn, .btn-glass, .btn-primary, .btn-danger, .btn-warning, .btn-info {
+    border-radius: 4px !important; /* Fiori uses slightly sharp corners */
+    text-transform: none !important; /* Normal case, not UPPERCASE */
+    letter-spacing: normal !important;
+    font-weight: 600;
+    box-shadow: none !important; /* Fiori prefers flat buttons */
+}
+
+/* SAP-style Headers */
+.section-header h2 {
+    text-transform: none;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+}
+
+/* SAP-style Sidebar (Shell Bar) */
+.sidebar-logo strong {
+    text-transform: uppercase;
+    font-weight: 700;
+    font-size: 12px;
+    letter-spacing: 0.5px;
+}
+
+/* SAP-style Inputs */
+.form-input, .input-icon input {
+    border-radius: 4px;
+    font-family: "72", Arial, sans-serif !important;
+}
 
 [data-theme="dark"] {
     --bg-primary: #060A13;
@@ -139,6 +178,18 @@ input,select,textarea,button{font-family:inherit;font-size:inherit}
 .sidebar-logo i{font-size:24px;color:var(--accent);filter:drop-shadow(0 0 8px rgba(0,229,160,.25))}
 .sidebar-logo strong{font-family:var(--font-display);font-size:10.5px;letter-spacing:1.5px;color:var(--text-primary);display:block;line-height:1.3}
 .sidebar-logo small{font-size:9px;color:var(--text-muted);letter-spacing:1px;text-transform:uppercase}
+/* Sidebar Logo Image Styling */
+.sidebar-logo {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.sidebar-logo-img {
+    height: 32px; /* Image ki height set ki hai taaki text ke barabar ho */
+    width: auto;
+    object-fit: contain;
+    border-radius: 4px;
+}
 .sidebar-close-btn{display:none;background:none;border:none;color:var(--text-secondary);font-size:20px;cursor:pointer}
 
 /* Nav */
@@ -526,3 +577,106 @@ textarea.form-input{resize:vertical;min-height:70px}
 .settings-card .sc-icon{width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:20px;margin-bottom:12px}
 .settings-card .sc-title{font-weight:700;font-size:14px;margin-bottom:4px}
 .settings-card .sc-desc{font-size:11px;color:var(--text-muted);line-height:1.4}
+/* ===== SAP-STYLE REPORTS ===== */
+.report-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px;margin-bottom:20px}
+.report-card{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:22px 18px;cursor:pointer;transition:all .25s;backdrop-filter:var(--glass-blur);position:relative;overflow:hidden}
+.report-card::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:var(--accent);opacity:0;transition:opacity .25s}
+.report-card:hover{border-color:rgba(var(--accent-rgb),.35);transform:translateY(-3px);box-shadow:0 8px 28px rgba(var(--accent-rgb),.1)}
+.report-card:hover::before{opacity:1}
+.report-card:active{transform:scale(.97)}
+.rc-icon{width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:22px;margin-bottom:14px}
+.rc-title{font-size:14px;font-weight:700;margin-bottom:4px;color:var(--text-primary)}
+.rc-desc{font-size:11px;color:var(--text-muted);line-height:1.5}
+
+.report-filter-box{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:24px;backdrop-filter:var(--glass-blur)}
+.report-filter-header{display:flex;align-items:center;gap:12px;margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid var(--border)}
+.report-filter-header .rfh-back{width:34px;height:34px;border-radius:8px;background:rgba(var(--accent-rgb),.08);border:1px solid rgba(var(--accent-rgb),.15);color:var(--accent);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:18px;transition:all .2s;flex-shrink:0}
+.report-filter-header .rfh-back:hover{background:var(--accent);color:#050810}
+.report-filter-header .rfh-title{font-size:16px;font-weight:800}
+.report-filter-header .rfh-title i{color:var(--accent);margin-right:6px}
+.report-date-row{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px}
+.report-date-row .form-group label{display:block;font-size:11px;font-weight:600;color:var(--text-secondary);margin-bottom:4px;text-transform:uppercase;letter-spacing:.3px}
+.report-date-row input[type="date"]{width:100%;padding:9px 12px;background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;transition:all .2s}
+.report-date-row input[type="date"]:focus{outline:none;border-color:rgba(var(--accent-rgb),.4);box-shadow:0 0 0 3px rgba(var(--accent-rgb),.08)}
+.report-extra-filters{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px;margin-bottom:18px}
+
+.sap-report-header{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:0;margin-bottom:0;overflow:hidden;backdrop-filter:var(--glass-blur)}
+.srh-company{text-align:center;padding:20px 20px 10px}
+.srh-company h2{font-family:var(--font-display);font-size:16px;font-weight:900;letter-spacing:2px;color:var(--accent)}
+.srh-company p{font-size:10px;color:var(--text-muted);letter-spacing:1px;text-transform:uppercase;margin-top:2px}
+.srh-divider{height:2px;background:linear-gradient(90deg,transparent,var(--accent),transparent);margin:0 20px;opacity:.4}
+.srh-info{display:flex;flex-wrap:wrap;gap:6px 24px;padding:12px 20px;font-size:11px;color:var(--text-secondary);border-bottom:1px solid var(--border)}
+.srh-info span strong{color:var(--text-primary);font-weight:600}
+.srh-title-bar{display:flex;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid var(--border);flex-wrap:wrap;gap:10px}
+.srh-title-bar h3{font-size:15px;font-weight:800;display:flex;align-items:center;gap:8px}
+.srh-title-bar h3 i{color:var(--accent)}
+
+.report-export-bar{display:flex;gap:6px;flex-wrap:wrap}
+.rex-btn{display:inline-flex;align-items:center;gap:5px;padding:7px 14px;border-radius:var(--radius-sm);font-size:11px;font-weight:600;cursor:pointer;transition:all .2s;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-secondary)}
+.rex-btn:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-dim)}
+.rex-btn:active{transform:scale(.95)}
+.rex-btn.excel{color:#1D6F42;border-color:rgba(29,111,66,.3);background:rgba(29,111,66,.08)}
+.rex-btn.excel:hover{background:#1D6F42;color:#fff;border-color:#1D6F42}
+.rex-btn.pdf{color:#D32F2F;border-color:rgba(211,47,47,.3);background:rgba(211,47,47,.08)}
+.rex-btn.pdf:hover{background:#D32F2F;color:#fff;border-color:#D32F2F}
+
+.report-summary-bar{display:flex;flex-wrap:wrap;gap:10px;padding:12px 20px;border-bottom:1px solid var(--border);background:rgba(var(--accent-rgb),.02)}
+.rsb-item{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text-secondary)}
+.rsb-item strong{color:var(--accent);font-size:14px;font-weight:800}
+
+.sap-table-wrap{overflow-x:auto;border-top:none;border-radius:0 0 var(--radius) var(--radius);border:1px solid var(--border);border-top:none}
+.sap-table{width:100%;border-collapse:collapse;font-size:12px}
+.sap-table th{padding:9px 12px;text-align:left;font-weight:700;font-size:10px;text-transform:uppercase;letter-spacing:.4px;color:#050810;background:var(--accent);border:1px solid rgba(0,180,122,.3);white-space:nowrap;position:sticky;top:0;z-index:1}
+.sap-table td{padding:8px 12px;border:1px solid var(--border);color:var(--text-primary);vertical-align:top}
+.sap-table tbody tr:nth-child(even){background:rgba(var(--accent-rgb),.02)}
+.sap-table tbody tr:hover{background:rgba(var(--accent-rgb),.06)}
+.sap-table td.num,.sap-table th.num{text-align:right;font-variant-numeric:tabular-nums}
+.sap-table td.center,.sap-table th.center{text-align:center}
+.sap-table .total-row{background:rgba(var(--accent-rgb),.08)!important;font-weight:700}
+.sap-table .total-row td{border-top:2px solid var(--accent);font-size:12px}
+.sap-table .grand-total{background:rgba(var(--accent-rgb),.14)!important}
+.sap-table .grand-total td{border-top:3px double var(--accent);font-size:13px;font-weight:800}
+
+.report-record-count{padding:10px 20px;font-size:11px;color:var(--text-muted);border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
+.report-back-row{display:flex;gap:8px;margin-bottom:16px}
+
+.report-empty{text-align:center;padding:60px 20px;color:var(--text-muted)}
+.report-empty i{font-size:48px;margin-bottom:12px;display:block;opacity:.3}
+.report-empty p{font-size:13px;margin-bottom:4px}
+.report-empty .re-filters{font-size:11px;opacity:.7}
+
+.sap-badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600}
+.sap-badge.green{background:rgba(var(--success-rgb),.15);color:var(--success)}
+.sap-badge.yellow{background:rgba(var(--warning-rgb),.15);color:var(--warning)}
+.sap-badge.red{background:rgba(var(--danger-rgb),.15);color:var(--danger)}
+.sap-badge.blue{background:rgba(var(--info-rgb),.15);color:var(--info)}
+.sap-badge.gray{background:rgba(100,116,139,.15);color:#64748B}
+
+@media print{
+    .report-back-row,.report-export-bar,.section-header,.shell-left,.shell-center,.shell-right,#sidebar,.bottom-nav,.more-panel{display:none!important}
+    #mainContent{margin-left:0!important}
+    .sap-report-header{break-inside:avoid;border:2px solid #333;border-radius:0}
+    .srh-company h2{color:#000!important;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+    .srh-divider{background:#000!important;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+    .sap-table{font-size:9px}
+    .sap-table th{background:#ccc!important;color:#000!important;-webkit-print-color-adjust:exact;print-color-adjust:exact;border-color:#999!important}
+    .sap-table td{border-color:#ccc!important;color:#000!important}
+    .sap-table .total-row{background:#e5e5e5!important;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+    .sap-table .total-row td{border-color:#666!important}
+    .report-summary-bar{border-color:#999!important}
+    .rsb-item strong{color:#000!important}
+    .sap-badge{border:1px solid #999!important;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+    .sap-badge.green{background:#d4edda!important;color:#155724!important}
+    .sap-badge.yellow{background:#fff3cd!important;color:#856404!important}
+    .sap-badge.red{background:#f8d7da!important;color:#721c24!important}
+    #contentArea{padding:0!important}
+}
+@media(max-width:768px){
+    .report-grid{grid-template-columns:1fr 1fr}
+    .report-date-row{grid-template-columns:1fr}
+    .srh-info{flex-direction:column;gap:4px}
+    .srh-title-bar{flex-direction:column;align-items:flex-start}
+}
+@media(max-width:480px){
+    .report-grid{grid-template-columns:1fr}
+}

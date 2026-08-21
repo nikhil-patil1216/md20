@@ -3,11 +3,6 @@
    Developed by Nikhil Patil
    ============================================================ */
 
-/* ============================================================
-   VIP INDUSTRIES LIMITED MD20 — WMS COMPLETE SCRIPT
-   Developed by Nikhil Patil
-   ============================================================ */
-
 // ==================== SUPABASE SYNC (FIXED) ====================
 var supabaseClient = null;
 var _localWriteTs = {};
@@ -450,37 +445,37 @@ function chkAct(act){
 function renderSidebar(){
     if(!APP.currentUser)return;
     var mods=[
-        {id:'dashboard',icon:'bxs-dashboard',label:'Dashboard',subs:[]},
-        {id:'inbound',icon:'bxs-truck',label:'Inbound',subs:[
-            {id:'security-gate',label:'Security Gate'},
-            {id:'pending-vehicle',label:'Pending Vehicle'},
-            {id:'unloading-screen',label:'Unloading Screen'},
+        {id:'dashboard',icon:'bxs-dashboard',label:'Overview',subs:[]},
+        {id:'inbound',icon:'bxs-truck',label:'Inbound Process',subs:[
+            {id:'security-gate',label:'Create Vehicle Entry'},
+            {id:'pending-vehicle',label:'Pending Vehicles'},
+            {id:'unloading-screen',label:'Goods Receipt / Unloading'},
             {id:'posting-pending',label:'Posting Pending'},
-            {id:'inbound-record',label:'Inbound Record'},
+            {id:'inbound-record',label:'Inbound Records'},
             {id:'unloading-stock',label:'Unloading Stock'}
         ]},
         {id:'putaway',icon:'bxs-package',label:'Putaway',subs:[]},
         {id:'piv',icon:'bxs-clipboard',label:'PIV',subs:[]},
-        {id:'location',icon:'bxs-map-pin',label:'Location Master',subs:[]},
-        {id:'rack',icon:'bxs-grid-alt',label:'Rack Master',subs:[]},
-        {id:'material',icon:'bxs-label',label:'Material Master',subs:[]},
-        {id:'picking',icon:'bxs-box',label:'Picking',subs:[
-            {id:'obd-upload',label:'OBD Upload'},
-            {id:'picking-assign',label:'Picking Assign'},
-            {id:'start-picking',label:'Start Picking'},
-            {id:'picking-done',label:'Picking Done'}
-            ,{id:'picking-with-loading',label:'Picking with Loading'}
+        {id:'location',icon:'bxs-map-pin',label:'Storage Locations',subs:[]},
+        {id:'rack',icon:'bxs-grid-alt',label:'Storage Bins',subs:[]},
+        {id:'material',icon:'bxs-label',label:'Materials',subs:[]},
+        {id:'picking',icon:'bxs-box',label:'Outbound Picking',subs:[
+            {id:'obd-upload',label:'Create Outbound Delivery'},
+            {id:'picking-assign',label:'Assign Picking Tasks'},
+            {id:'start-picking',label:'Execute Picking'},
+            {id:'picking-done',label:'Picking Records'},
+            {id:'picking-with-loading',label:'Picking with Loading'}
         ]},
-        {id:'loading',icon:'bxs-truck',label:'Loading',subs:[
-            {id:'loading-assign',label:'Loading Assign'},
-            {id:'start-loading',label:'Start Loading'},
-            {id:'loading-done',label:'Loaded Vehicles'},
-            {id:'qty-mismatch',label:'Qty Mismatch'}
+        {id:'loading',icon:'bxs-truck',label:'Outbound Loading',subs:[
+            {id:'loading-assign',label:'Assign Loading Tasks'},
+            {id:'start-loading',label:'Execute Loading'},
+            {id:'loading-done',label:'Loading Records'},
+            {id:'qty-mismatch',label:'Quantity Differences'}
         ]},
-        {id:'user-time',icon:'bx-time-five',label:'User Working Time',subs:[]},
-        {id:'admin',icon:'bxs-user-detail',label:'Admin',subs:[]},
-        {id:'settings',icon:'bxs-cog',label:'Settings',subs:[]},
-        {id:'reports',icon:'bxs-bar-chart-alt-2',label:'Reports',subs:[]},
+        {id:'user-time',icon:'bx-time-five',label:'User Activity Log',subs:[]},
+        {id:'admin',icon:'bxs-user-detail',label:'User Management',subs:[]},
+        {id:'settings',icon:'bxs-cog',label:'System Settings',subs:[]},
+        {id:'reports',icon:'bxs-bar-chart-alt-2',label:'Reports / Analytics',subs:[]},
         {id:'audit',icon:'bxs-receipt',label:'Audit Log',subs:[]}
     ];
     var h='';
@@ -528,8 +523,40 @@ function renderSidebar(){
 }
 
 // ==================== NAVIGATION ====================
-var sectionNames={dashboard:'Dashboard',inbound:'Inbound',putaway:'Putaway',piv:'PIV',location:'Location Master',rack:'Rack Master',material:'Material Master',admin:'Admin',settings:'Settings',reports:'Reports',audit:'Audit Log',picking:'Picking',loading:'Loading','user-time':'User Working Time'};
-var subNames={'security-gate':'Security Gate','pending-vehicle':'Pending Vehicle','unloading-screen':'Unloading Screen','posting-pending':'Posting Pending','inbound-record':'Inbound Record','unloading-stock':'Unloading Stock','obd-upload':'OBD Upload','picking-assign':'Picking Assign','start-picking':'Start Picking','picking-done':'Picking Done','loading-assign':'Loading Assign','start-loading':'Start Loading','loading-done':'Loaded Vehicles','qty-mismatch':'Qty Mismatch'};
+var sectionNames={
+    dashboard:'Overview',
+    inbound:'Inbound Process', 
+    putaway:'Putaway', 
+    piv:'Picking & Issue Verification (PIV)', 
+    location:'Storage Locations', 
+    rack:'Storage Bins', 
+    material:'Materials', 
+    admin:'User Management', 
+    settings:'System Settings', 
+    reports:'Reports / Analytics', 
+    audit:'Audit Log', 
+    picking:'Outbound Picking', 
+    loading:'Outbound Loading', 
+    'user-time':'User Activity Log'
+};
+
+var subNames={
+    'security-gate':'Create Vehicle Entry',
+    'pending-vehicle':'Pending Vehicles',
+    'unloading-screen':'Goods Receipt / Unloading',
+    'posting-pending':'Posting Pending',
+    'inbound-record':'Inbound Records',
+    'unloading-stock':'Unloading Stock',
+    'obd-upload':'Create Outbound Delivery',
+    'picking-assign':'Assign Picking Tasks',
+    'start-picking':'Execute Picking',
+    'picking-done':'Picking Records',
+    'picking-with-loading':'Picking with Loading',
+    'loading-assign':'Assign Loading Tasks',
+    'start-loading':'Execute Loading',
+    'loading-done':'Loading Records',
+    'qty-mismatch':'Quantity Differences'
+};
 
 function navTo(sec,sub){
     sub=sub||null;
@@ -5812,3 +5839,555 @@ document.addEventListener('click', function(e) {
 window.addEventListener('beforeunload', function() {
     if (SCANNER.html5Qr) try { SCANNER.html5Qr.stop(); } catch(e) {}
 });
+// ==================== SAP-STYLE DATE-WISE REPORTS ====================
+var REPORT_TYPES = [
+    {id:'inbound',icon:'bxs-truck',color:'var(--accent)',bg:'var(--accent-dim)',title:'Inbound Report',desc:'Vehicle-wise unloading, GRN & posting details',extras:[{id:'vehicleNo',label:'Vehicle No',type:'text',ph:'MH-12-AB-1234'},{id:'status',label:'Status',type:'select',opts:['All','Unload Pending','Assigned','Posting Pending Approval','Posted','Unloaded','Rejected']}]},
+    {id:'outbound',icon:'bxs-truck',color:'var(--accent2)',bg:'var(--accent2-dim)',title:'Outbound / Loading Report',desc:'Loading, dispatch & loaded vehicle details',extras:[{id:'vehicleNo',label:'Vehicle No',type:'text',ph:'MH-12-AB-1234'},{id:'status',label:'Load Status',type:'select',opts:['All','Fully Loaded','Partial','With Mismatch']}]},
+    {id:'picking',icon:'bxs-box',color:'var(--info)',bg:'var(--info-dim)',title:'Picking Report',desc:'OBD-wise picking activity & picker performance',extras:[{id:'pickerName',label:'Picker Name',type:'text',ph:'Name or username'},{id:'status',label:'OBD Status',type:'select',opts:['All','Pending','Assigned','Done','Picked','P&L Done']}]},
+    {id:'stock',icon:'bxs-package',color:'var(--success)',bg:'rgba(var(--success-rgb),.1)',title:'Stock Position Report',desc:'Current stock by material, location & rack',extras:[{id:'material',label:'Material Keyword',type:'text',ph:'Rice, Sugar, Oil...'},{id:'rack',label:'Rack',type:'text',ph:'RACK-001'},{id:'action',label:'Action Type',type:'select',opts:['All','PUTAWAY','PIV']}]},
+    {id:'short',icon:'bx-error-circle',color:'var(--danger)',bg:'var(--danger-dim)',title:'Short / Difference Report',desc:'All shortage, mismatch & difference records',extras:[{id:'vehicleNo',label:'Vehicle No',type:'text',ph:'MH-12-AB-1234'},{id:'material',label:'Material Keyword',type:'text',ph:'Material name'}]},
+    {id:'user_activity',icon:'bx-time-five',color:'#8B5CF6',bg:'rgba(139,92,246,.1)',title:'User Activity Report',desc:'Who did what, when — complete audit trail',extras:[{id:'userName',label:'User Name',type:'text',ph:'Name or username'},{id:'module',label:'Module',type:'select',opts:['All','Auth','Security Gate','Inbound','Unloading','Posting','Putaway','PIV','Picking','Loading','Admin','System']}]},
+    {id:'turnaround',icon:'bx-timer',color:'var(--warning)',bg:'var(--warning-dim)',title:'Vehicle Turnaround Report',desc:'Time analysis: arrival to posting per vehicle',extras:[{id:'vehicleNo',label:'Vehicle No',type:'text',ph:'MH-12-AB-1234'}]},
+    {id:'putaway',icon:'bxs-clipboard',color:'#06B6D4',bg:'rgba(6,182,212,.1)',title:'Putaway / PIV Report',desc:'Item placement details — rack, qty, packing',extras:[{id:'material',label:'Material Keyword',type:'text',ph:'Material name'},{id:'rack',label:'Rack',type:'text',ph:'RACK-001'},{id:'action',label:'Action Type',type:'select',opts:['All','PUTAWAY','PIV']}]}
+];
+
+var RSTATE = {view:'select',type:null,from:'',to:'',filters:{}};
+var LAST_REPORT = null;
+
+function renderReports(){
+    if(RSTATE.view==='select') renderReportSelect();
+    else if(RSTATE.view==='filter') renderReportFilter();
+    else if(RSTATE.view==='result') renderSAPReportView();
+}
+
+function renderReportSelect(){
+    var h='<div class="section-header"><h2><i class="bx bxs-bar-chart-alt-2"></i> Reports</h2><div style="font-size:11px;color:var(--text-muted)">SAP-Style Date-Wise Reports</div></div>';
+    h+='<div class="report-grid">';
+    REPORT_TYPES.forEach(function(rt){
+        h+='<div class="report-card" onclick="openReportFilter(\''+rt.id+'\')" style="--rc-color:'+rt.color+'">';
+        h+='<div class="rc-icon" style="background:'+rt.bg+';color:'+rt.color+'"><i class="bx '+rt.icon+'"></i></div>';
+        h+='<div class="rc-title">'+rt.title+'</div>';
+        h+='<div class="rc-desc">'+rt.desc+'</div>';
+        h+='</div>';
+    });
+    h+='</div>';
+    setHtml(h);
+}
+
+function openReportFilter(typeId){
+    RSTATE.view='filter';RSTATE.type=typeId;RSTATE.filters={};
+    renderReportFilter();
+}
+
+function renderReportFilter(){
+    var rt=null;
+    for(var i=0;i<REPORT_TYPES.length;i++){if(REPORT_TYPES[i].id===RSTATE.type){rt=REPORT_TYPES[i];break;}}
+    if(!rt){renderReportSelect();return;}
+    var firstOfMonth=new Date();firstOfMonth.setDate(1);
+    var fromDef=firstOfMonth.toISOString().split('T')[0];
+    var toDef=today();
+
+    var h='<div class="section-header"><h2><i class="bx bxs-bar-chart-alt-2"></i> Reports</h2></div>';
+    h+='<div class="report-back-row"><button class="btn btn-glass btn-sm" onclick="RSTATE.view=\'select\';renderReports()"><i class="bx bx-arrow-back"></i> All Reports</button></div>';
+
+    h+='<div class="report-filter-box">';
+    h+='<div class="report-filter-header"><button class="rfh-back" onclick="RSTATE.view=\'select\';renderReports()"><i class="bx bx-arrow-back"></i></button><div class="rfh-title"><i class="bx '+rt.icon+'"></i> '+rt.title+'</div></div>';
+
+    h+='<div class="report-date-row">';
+    h+='<div class="form-group"><label>Date From <span class="req">*</span></label><input type="date" id="rptFrom" value="'+(RSTATE.from||fromDef)+'" min="2024-01-01" max="'+toDef+'"></div>';
+    h+='<div class="form-group"><label>Date To <span class="req">*</span></label><input type="date" id="rptTo" value="'+(RSTATE.to||toDef)+'" min="2024-01-01" max="'+toDef+'"></div>';
+    h+='</div>';
+
+    if(rt.extras&&rt.extras.length){
+        h+='<div class="report-extra-filters">';
+        rt.extras.forEach(function(ex){
+            h+='<div class="form-group"><label>'+ex.label+'</label>';
+            if(ex.type==='text') h+='<input type="text" class="form-input" id="rptF_'+ex.id+'" placeholder="'+(ex.ph||'')+'">';
+            else if(ex.type==='select'){
+                h+='<select class="form-input" id="rptF_'+ex.id+'">';
+                ex.opts.forEach(function(o){h+='<option value="'+o+'">'+o+'</option>';});
+                h+='</select>';
+            }
+            h+='</div>';
+        });
+        h+='</div>';
+    }
+
+    h+='<div class="form-actions">';
+    h+='<button class="btn btn-primary" onclick="runReport()"><i class="bx bx-play-circle"></i> Generate Report</button>';
+    h+='<button class="btn btn-secondary" onclick="clearReportFilters()"><i class="bx bx-refresh"></i> Clear</button>';
+    h+='</div>';
+    h+='</div>';
+    setHtml(h);
+}
+
+function clearReportFilters(){
+    RSTATE.from='';RSTATE.to='';RSTATE.filters={};
+    renderReportFilter();
+}
+
+function runReport(){
+    var from=document.getElementById('rptFrom').value;
+    var to=document.getElementById('rptTo').value;
+    if(!from||!to){showToast('Date From aur Date To dono chahiye','error');return;}
+    if(from>to){showToast('Date From Date To se pehle hona chahiye','error');return;}
+    var filters={};
+    var rt=null;
+    for(var i=0;i<REPORT_TYPES.length;i++){if(REPORT_TYPES[i].id===RSTATE.type){rt=REPORT_TYPES[i];break;}}
+    if(rt&&rt.extras){
+        rt.extras.forEach(function(ex){
+            var el=document.getElementById('rptF_'+ex.id);
+            if(el)filters[ex.id]=el.value.trim();
+        });
+    }
+    RSTATE.from=from;RSTATE.to=to;RSTATE.filters=filters;
+    LAST_REPORT=buildReportData(RSTATE.type,from,to,filters);
+    RSTATE.view='result';
+    renderSAPReportView();
+    logAction('Reports','GENERATED',RSTATE.type+' report: '+from+' to '+to);
+}
+
+function dateInRange(isoStr,from,to){
+    if(!isoStr)return false;
+    var d=isoStr.split('T')[0];
+    return d>=from&&d<=to;
+}
+
+function statusBadge(s){
+    if(!s)return'<span class="sap-badge gray">-</span>';
+    var sl=s.toLowerCase();
+    if(sl.indexOf('pending')>-1&&sl.indexOf('approval')<0)return'<span class="sap-badge yellow">'+esc(s)+'</span>';
+    if(sl.indexOf('approval')>-1)return'<span class="sap-badge blue">'+esc(s)+'</span>';
+    if(sl.indexOf('posted')>-1||sl.indexOf('done')>-1||sl.indexOf('loaded')>-1||sl.indexOf('picked')>-1||sl.indexOf('unloaded')>-1)return'<span class="sap-badge green">'+esc(s)+'</span>';
+    if(sl.indexOf('reject')>-1)return'<span class="sap-badge red">'+esc(s)+'</span>';
+    if(sl.indexOf('assign')>-1)return'<span class="sap-badge blue">'+esc(s)+'</span>';
+    return'<span class="sap-badge gray">'+esc(s)+'</span>';
+}
+
+// ==================== BUILD REPORT DATA ====================
+function buildReportData(type,from,to,filters){
+    var u=APP.currentUser;
+    var genBy=u?u.name:'System';
+    var genAt=fmtDT(new Date());
+    var period=fmtDate(from)+' to '+fmtDate(to);
+    var data={type:type,period:period,generatedBy:genBy,generatedAt:genAt,headers:[],rows:[],totals:[],summary:[],numericCols:[],colWidths:[],colAlign:[]};
+
+    switch(type){
+    case 'inbound': buildInboundReport(data,from,to,filters); break;
+    case 'outbound': buildOutboundReport(data,from,to,filters); break;
+    case 'picking': buildPickingReport(data,from,to,filters); break;
+    case 'stock': buildStockReport(data,from,to,filters); break;
+    case 'short': buildShortReport(data,from,to,filters); break;
+    case 'user_activity': buildUserActivityReport(data,from,to,filters); break;
+    case 'turnaround': buildTurnaroundReport(data,from,to,filters); break;
+    case 'putaway': buildPutawayReport(data,from,to,filters); break;
+    }
+    return data;
+}
+
+// --- INBOUND REPORT ---
+function buildInboundReport(d,from,to,f){
+    d.title='INBOUND REPORT';d.subtitle='Vehicle-wise Unloading & GRN Details';
+    d.headers=['Sr','Vehicle No','LR No','Transport','Driver','Type','Status','Invoices','Materials','Reported At','Entry By'];
+    d.numericCols=[7,8];d.colWidths=[22,68,58,52,48,38,62,32,38,72,48];
+    d.colAlign=['center','left','left','left','left','center','center','center','center','center','left'];
+    var vehs=DB.get('vehicles').filter(function(v){
+        if(v.vehicleType!=='Unloading')return false;
+        if(!dateInRange(v.reportedAt,from,to))return false;
+        if(f.vehicleNo&&v.vehicleNo.toUpperCase().indexOf(f.vehicleNo.toUpperCase())<0)return false;
+        if(f.status&&f.status!=='All'&&v.status!==f.status)return false;
+        return true;
+    });
+    var totalInv=0,totalMat=0;
+    vehs.forEach(function(v,i){
+        var invs=DB.filter('invoices',function(inv){return inv.vehicleId===v.id;});
+        var matC=0;invs.forEach(function(inv){matC+=DB.filter('invoice_materials',function(m){return m.invoiceId===inv.id;}).length;});
+        totalInv+=invs.length;totalMat+=matC;
+        d.rows.push([i+1,esc(v.vehicleNo),esc(v.lrNo||'-'),esc(v.transportName||'-'),esc(v.driverName||'-'),esc(v.vehicleType||'-'),statusBadge(v.status),invs.length,matC,fmtDT(v.reportedAt),esc(v.entryByName||'-')]);
+    });
+    d.totals=[['','TOTAL','','','','','',totalInv,totalMat,'','']];
+    d.summary=[{label:'Total Vehicles',value:vehs.length},{label:'Total Invoices',value:totalInv},{label:'Total Material Lines',value:totalMat}];
+}
+
+// --- OUTBOUND/LOADING REPORT ---
+function buildOutboundReport(d,from,to,f){
+    d.title='OUTBOUND / LOADING REPORT';d.subtitle='Vehicle-wise Loading & Dispatch Details';
+    d.headers=['Sr','Load No','Vehicle No','OBD Count','OBD Nos','Loaded By','Load Status','Mismatch','Loaded At'];
+    d.numericCols=[3];d.colWidths=[22,68,68,32,100,52,48,32,72];
+    d.colAlign=['center','left','left','center','left','left','center','center','center'];
+    var loaded=DB.get('loaded_vehicles').filter(function(lv){
+        if(!dateInRange(lv.loadedAt,from,to))return false;
+        if(f.vehicleNo&&lv.vehicleNo.toUpperCase().indexOf(f.vehicleNo.toUpperCase())<0)return false;
+        if(f.status&&f.status!=='All'){
+            if(f.status==='Fully Loaded'&&lv.loadStatus!=='Fully Loaded')return false;
+            if(f.status==='Partial'&&lv.loadStatus==='Fully Loaded')return false;
+            if(f.status==='With Mismatch'&&!lv.mismatch)return false;
+        }
+        return true;
+    });
+    var totalOBD=0;
+    loaded.forEach(function(lv,i){
+        var obdNos=Array.isArray(lv.obdNos)?lv.obdNos.join(', '):(lv.obdNos||'-');
+        var obdC=Array.isArray(lv.obdIds)?lv.obdIds.length:1;
+        totalOBD+=obdC;
+        d.rows.push([i+1,esc(lv.loadNo||'-'),esc(lv.vehicleNo||'-'),obdC,esc(obdNos),esc(lv.loadedByName||'-'),statusBadge(lv.loadStatus||'Loaded'),lv.mismatch?'<span class="sap-badge red">Yes</span>':'<span class="sap-badge green">No</span>',fmtDT(lv.loadedAt)]);
+    });
+    d.totals=[['','TOTAL','',''+totalOBD,'','','','','']];
+    d.summary=[{label:'Vehicles Loaded',value:loaded.length},{label:'Total OBDs Dispatched',value:totalOBD},{label:'With Mismatch',value:loaded.filter(function(l){return l.mismatch;}).length}];
+}
+
+// --- PICKING REPORT ---
+function buildPickingReport(d,from,to,f){
+    d.title='PICKING REPORT';d.subtitle='OBD-wise Picking Activity';
+    d.headers=['Sr','OBD No','Vehicle No','Materials','Status','Assigned To','Picked At','Created At'];
+    d.numericCols=[3];d.colWidths=[22,68,68,32,52,58,72,72];
+    d.colAlign=['center','left','left','center','center','left','center','center'];
+    var obds=DB.get('obd_data').filter(function(o){
+        var dt=o.pickedAt||o.assignedAt||o.createdAt;
+        if(!dateInRange(dt,from,to))return false;
+        if(f.pickerName){
+            var pn=f.pickerName.toLowerCase();
+            var an=(o.assignedToName||'').toLowerCase();
+            if(an.indexOf(pn)<0)return false;
+        }
+        if(f.status&&f.status!=='All'&&o.status!==f.status)return false;
+        return true;
+    });
+    var totalMat=0;
+    obds.forEach(function(o,i){
+        var matC=Array.isArray(o.materials)?o.materials.length:0;
+        totalMat+=matC;
+        d.rows.push([i+1,esc(o.obdNo||o.id),esc(o.vehicleNo||'-'),matC,statusBadge(o.status),esc(o.assignedToName||'-'),fmtDT(o.pickedAt),fmtDT(o.createdAt)]);
+    });
+    d.totals=[['','TOTAL','',''+totalMat,'','','','']];
+    d.summary=[{label:'Total OBDs',value:obds.length},{label:'Total Material Lines',value:totalMat},{label:'Pending',value:obds.filter(function(o){return o.status==='Pending';}).length},{label:'Completed',value:obds.filter(function(o){return o.status==='Done'||o.status==='Picked'||o.status==='P&L Done';}).length}];
+}
+
+// --- STOCK POSITION REPORT ---
+function buildStockReport(d,from,to,f){
+    d.title='STOCK POSITION REPORT';d.subtitle='Current Stock by Material & Location';
+    d.headers=['Sr','Material','EAN','Rack','Qty','Packing','Box','Action','Date','User'];
+    d.numericCols=[4];d.colWidths=[22,130,72,48,28,38,38,38,52,48];
+    d.colAlign=['center','left','left','center','center','center','center','center','center','left'];
+    var locs=DB.get('location_master').filter(function(l){
+        if(!dateInRange(l.dateTime||l.date,from,to))return false;
+        if(f.material&&l.material.toUpperCase().indexOf(f.material.toUpperCase())<0)return false;
+        if(f.rack&&l.rack.toUpperCase().indexOf(f.rack.toUpperCase())<0)return false;
+        if(f.action&&f.action!=='All'&&l.action!==f.action)return false;
+        return true;
+    });
+    var totalQty=0;
+    locs.forEach(function(l,i){
+        totalQty+=(parseInt(l.quantity)||0);
+        d.rows.push([i+1,esc(l.material),esc(l.ean||'-'),esc(l.rack),(l.quantity||0),esc(l.packing||'-'),esc(l.box||'-'),'<span class="sap-badge '+(l.action==='PUTAWAY'?'green':'blue')+'">'+esc(l.action||'-')+'</span>',fmtDate(l.dateTime||l.date),esc(l.user||'-')]);
+    });
+    d.totals=[['','TOTAL','','',totalQty,'','','','','']];
+    // Group by material for summary
+    var byMat={};locs.forEach(function(l){if(!byMat[l.material])byMat[l.material]=0;byMat[l.material]+=(parseInt(l.quantity)||0);});
+    var matKeys=Object.keys(byMat);
+    d.summary=[{label:'Total Location Entries',value:locs.length},{label:'Total Quantity',value:totalQty},{label:'Unique Materials',value:matKeys.length},{label:'Racks Used',value:(function(){var s={};locs.forEach(function(l){s[l.rack]=1;});return Object.keys(s).length;})()}];
+}
+
+// --- SHORT / DIFFERENCE REPORT ---
+function buildShortReport(d,from,to,f){
+    d.title='SHORT / DIFFERENCE REPORT';d.subtitle='All Shortage & Mismatch Records';
+    d.headers=['Sr','Short No','Vehicle No','Material','EAN','Expected','Found','Short Qty','Reported By','Date'];
+    d.numericCols=[5,6,7];d.colWidths=[22,58,68,120,72,32,32,32,52,52];
+    d.colAlign=['center','left','left','left','left','center','center','center','left','center'];
+    var shorts=DB.get('short_reports').filter(function(s){
+        if(!dateInRange(s.createdAt,from,to))return false;
+        if(f.vehicleNo&&s.vehicleNo&&s.vehicleNo.toUpperCase().indexOf(f.vehicleNo.toUpperCase())<0)return false;
+        if(f.material&&s.material&&s.material.toUpperCase().indexOf(f.material.toUpperCase())<0)return false;
+        return true;
+    });
+    var totalExp=0,totalFnd=0,totalSrt=0;
+    shorts.forEach(function(s,i){
+        var exp=parseInt(s.expectedQty)||0;var fnd=parseInt(s.foundQty)||0;var srt=parseInt(s.shortQty)||(exp-fnd);
+        totalExp+=exp;totalFnd+=fnd;totalSrt+=srt;
+        d.rows.push([i+1,esc(s.shortNo||'-'),esc(s.vehicleNo||'-'),esc(s.material||'-'),esc(s.ean||'-'),exp,fnd,'<span style="color:var(--danger);font-weight:700">'+srt+'</span>',esc(s.reportedBy||s.reportedByName||'-'),fmtDT(s.createdAt)]);
+    });
+    d.totals=[['','TOTAL','','','',totalExp,totalFnd,'<span style="color:var(--danger);font-weight:700">'+totalSrt+'</span>','','']];
+    d.summary=[{label:'Total Short Reports',value:shorts.length},{label:'Total Expected',value:totalExp},{label:'Total Found',value:totalFnd},{label:'Total Shortage',value:totalSrt}];
+}
+
+// --- USER ACTIVITY REPORT ---
+function buildUserActivityReport(d,from,to,f){
+    d.title='USER ACTIVITY REPORT';d.subtitle='Complete Audit Trail';
+    d.headers=['Sr','Date / Time','User','Role','Module','Action','Details'];
+    d.numericCols=[];d.colWidths=[22,62,52,42,52,52,200];
+    d.colAlign=['center','center','left','center','left','left','left'];
+    var logs=DB.get('audit_log').filter(function(a){
+        if(!dateInRange(a.dateTime,from,to))return false;
+        if(f.userName){
+            var un=f.userName.toLowerCase();
+            if((a.userName||'').toLowerCase().indexOf(un)<0)return false;
+        }
+        if(f.module&&f.module!=='All'&&a.module!==f.module)return false;
+        return true;
+    });
+    logs.forEach(function(a,i){
+        var user=DB.find('users',a.userId);
+        var role=user?user.role:'-';
+        d.rows.push([i+1,fmtDT(a.dateTime),esc(a.userName||'-'),esc(role),esc(a.module||'-'),esc(a.action||'-'),esc(a.details||'-')]);
+    });
+    // Group by user for summary
+    var byUser={};logs.forEach(function(a){if(!byUser[a.userName])byUser[a.userName]=0;byUser[a.userName]++;});
+    var uKeys=Object.keys(byUser);
+    d.summary=[{label:'Total Actions',value:logs.length},{label:'Active Users',value:uKeys.length}];
+    if(uKeys.length>0){
+        d.summary.push({label:'Most Active',value:uKeys.reduce(function(a,b){return byUser[a]>byUser[b]?a:b;})+' ('+byUser[uKeys.reduce(function(a,b){return byUser[a]>byUser[b]?a:b;})]+' actions)'});
+    }
+}
+
+// --- VEHICLE TURNAROUND REPORT ---
+function buildTurnaroundReport(d,from,to,f){
+    d.title='VEHICLE TURNAROUND REPORT';d.subtitle='Time Analysis: Arrival to Posting';
+    d.headers=['Sr','Vehicle No','LR No','Transport','Arrival','Assigned At','Unload Start','Posted At','Total Time','Status'];
+    d.numericCols=[];d.colWidths=[22,64,56,50,60,60,60,60,50,52];
+    d.colAlign=['center','left','left','left','center','center','center','center','center','center'];
+    var vehs=DB.get('vehicles').filter(function(v){
+        if(v.vehicleType!=='Unloading')return false;
+        if(!dateInRange(v.reportedAt,from,to))return false;
+        if(f.vehicleNo&&v.vehicleNo.toUpperCase().indexOf(f.vehicleNo.toUpperCase())<0)return false;
+        return true;
+    });
+    var totalTimeMins=0;var timedCount=0;
+    vehs.forEach(function(v,i){
+        var arr=v.reportedAt;var assigned=v.assignedAt;var unloadStart=v.unloadStartAt;var posted=v.postedAt;
+        var totalTime='-';
+        if(arr&&posted){totalTime=timeDiff(arr,posted);var ms=new Date(posted)-new Date(arr);totalTimeMins+=Math.floor(ms/60000);timedCount++;}
+        d.rows.push([i+1,esc(v.vehicleNo),esc(v.lrNo||'-'),esc(v.transportName||'-'),fmtDT(arr),fmtDT(assigned),fmtDT(unloadStart),fmtDT(posted),totalTime,statusBadge(v.status)]);
+    });
+    var avgTime=timedCount>0?Math.round(totalTimeMins/timedCount):0;
+    var avgStr=avgTime>=60?Math.floor(avgTime/60)+'h '+avgTime%60+'m':avgTime+'m';
+    d.totals=[['','AVERAGE TURNAROUND: '+avgStr+'','','','','','','','','']];
+    d.summary=[{label:'Total Vehicles',value:vehs.length},{label:'Avg Turnaround',value:avgStr},{label:'Posted',value:vehs.filter(function(v){return v.status==='Posted'||v.status==='Unloaded';}).length},{label:'Pending',value:vehs.filter(function(v){return v.status==='Unload Pending'||v.status==='Assigned';}).length}];
+}
+
+// --- PUTAWAY / PIV REPORT ---
+function buildPutawayReport(d,from,to,f){
+    d.title='PUTAWAY / PIV REPORT';d.subtitle='Item Placement Details';
+    d.headers=['Sr','Date','Material','EAN','Rack','Qty','Packing','Box','Action','User','Time'];
+    d.numericCols=[5];d.colWidths=[22,42,120,72,48,28,38,38,38,42,42];
+    d.colAlign=['center','center','left','left','center','center','center','center','center','left','center'];
+    var locs=DB.get('location_master').filter(function(l){
+        if(!dateInRange(l.dateTime||l.date,from,to))return false;
+        if(f.material&&l.material.toUpperCase().indexOf(f.material.toUpperCase())<0)return false;
+        if(f.rack&&l.rack.toUpperCase().indexOf(f.rack.toUpperCase())<0)return false;
+        if(f.action&&f.action!=='All'&&l.action!==f.action)return false;
+        return true;
+    });
+    var totalQty=0;var putC=0;var pivC=0;
+    locs.forEach(function(l,i){
+        var q=parseInt(l.quantity)||0;totalQty+=q;
+        if(l.action==='PUTAWAY')putC++;else pivC++;
+        d.rows.push([i+1,fmtDate(l.dateTime||l.date),esc(l.material),esc(l.ean||'-'),esc(l.rack),q,esc(l.packing||'-'),esc(l.box||'-'),'<span class="sap-badge '+(l.action==='PUTAWAY'?'green':'blue')+'">'+esc(l.action||'-')+'</span>',esc(l.user||'-'),l.dateTime?new Date(l.dateTime).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}):'-']);
+    });
+    d.totals=[['','TOTAL','','','',totalQty,'','','','','']];
+    d.summary=[{label:'Total Entries',value:locs.length},{label:'Total Quantity',value:totalQty},{label:'Putaway',value:putC},{label:'PIV',value:pivC}];
+}
+
+// ==================== RENDER SAP REPORT VIEW ====================
+function renderSAPReportView(){
+    var d=LAST_REPORT;if(!d){renderReportSelect();return;}
+    var rt=null;for(var i=0;i<REPORT_TYPES.length;i++){if(REPORT_TYPES[i].id===d.type){rt=REPORT_TYPES[i];break;}}
+
+    var h='<div class="section-header"><h2><i class="bx bxs-bar-chart-alt-2"></i> Reports</h2></div>';
+    h+='<div class="report-back-row">';
+    h+='<button class="btn btn-glass btn-sm" onclick="RSTATE.view=\'filter\';renderReports()"><i class="bx bx-arrow-back"></i> Change Filters</button>';
+    h+='<button class="btn btn-glass btn-sm" onclick="RSTATE.view=\'select\';renderReports()"><i class="bx bx-grid-alt"></i> All Reports</button>';
+    h+='</div>';
+
+    // SAP Header
+    h+='<div class="sap-report-header">';
+    h+='<div class="srh-company"><h2>VIP INDUSTRIES LIMITED (MD20)</h2><p>Warehouse Management System</p></div>';
+    h+='<div class="srh-divider"></div>';
+    h+='<div class="srh-info">';
+    h+='<span>Report: <strong>'+esc(d.title)+'</strong></span>';
+    h+='<span>Period: <strong>'+esc(d.period)+'</strong></span>';
+    h+='<span>Generated: <strong>'+esc(d.generatedBy)+'</strong> | '+esc(d.generatedAt)+'</span>';
+    h+='</div>';
+
+    // Title bar with exports
+    h+='<div class="srh-title-bar"><h3><i class="bx '+(rt?rt.icon:'bxs-bar-chart-alt-2')+'"></i> '+esc(d.subtitle||d.title)+'</h3>';
+    h+='<div class="report-export-bar">';
+    h+='<button class="rex-btn excel" onclick="exportReportExcel()"><i class="bx bxs-file"></i> Excel</button>';
+    h+='<button class="rex-btn pdf" onclick="exportReportPDF()"><i class="bx bxs-file-pdf"></i> PDF</button>';
+    h+='<button class="rex-btn" onclick="window.print()"><i class="bx bx-printer"></i> Print</button>';
+    h+='</div></div>';
+
+    // Summary bar
+    if(d.summary&&d.summary.length){
+        h+='<div class="report-summary-bar">';
+        d.summary.forEach(function(s){h+='<div class="rsb-item">'+esc(s.label)+': <strong>'+esc(String(s.value))+'</strong></div>';});
+        h+='</div>';
+    }
+
+    h+='</div>'; // close sap-report-header
+
+    // Table
+    if(d.rows.length===0){
+        h+='<div class="report-empty"><i class="bx bx-inbox"></i><p>No records found for selected criteria</p><div class="re-filters">Period: '+esc(d.period)+'</div></div>';
+    }else{
+        h+='<div class="sap-table-wrap"><table class="sap-table"><thead><tr>';
+        d.headers.forEach(function(th,idx){
+            var cls='';if(d.numericCols.indexOf(idx)>-1)cls=' num';if(d.colAlign[idx]==='center')cls=' center';
+            h+='<th class="'+cls.trim()+'">'+esc(th)+'</th>';
+        });
+        h+='</tr></thead><tbody>';
+        d.rows.forEach(function(row){
+            h+='<tr>';
+            row.forEach(function(cell,idx){
+                var cls='';if(d.numericCols.indexOf(idx)>-1)cls=' num';if(d.colAlign[idx]==='center')cls=' center';
+                h+='<td class="'+cls.trim()+'">'+cell+'</td>';
+            });
+            h+='</tr>';
+        });
+        if(d.totals&&d.totals.length){
+            d.totals.forEach(function(trow,ti){
+                var isGrand=ti===d.totals.length-1;
+                h+='<tr class="'+(isGrand?'grand-total':'total-row')+'">';
+                trow.forEach(function(cell,idx){
+                    var cls='';if(d.numericCols.indexOf(idx)>-1)cls=' num';if(d.colAlign[idx]==='center')cls=' center';
+                    h+='<td class="'+cls.trim()+'">'+cell+'</td>';
+                });
+                h+='</tr>';
+            });
+        }
+        h+='</tbody></table></div>';
+        h+='<div class="report-record-count"><span>Showing '+d.rows.length+' record'+(d.rows.length!==1?'s':'')+'</span><span>VIP INDUSTRIES LIMITED (MD20) — Confidential</span></div>';
+    }
+    setHtml(h);
+}
+
+// ==================== EXCEL EXPORT ====================
+function exportReportExcel(){
+    if(!LAST_REPORT){showToast('No report to export','error');return;}
+    var d=LAST_REPORT;
+    var ws_data=[];
+    ws_data.push(['VIP INDUSTRIES LIMITED (MD20)']);
+    ws_data.push(['Warehouse Management System']);
+    ws_data.push([]);
+    ws_data.push([d.title]);
+    if(d.subtitle)ws_data.push([d.subtitle]);
+    ws_data.push(['Period: '+d.period]);
+    ws_data.push(['Generated By: '+d.generatedBy+' | '+d.generatedAt]);
+    ws_data.push([]);
+    if(d.summary&&d.summary.length){
+        d.summary.forEach(function(s){ws_data.push([s.label+': ',s.value]);});
+        ws_data.push([]);
+    }
+    ws_data.push(d.headers);
+    // Clean HTML from rows for Excel
+    d.rows.forEach(function(row){
+        ws_data.push(row.map(function(cell){
+            if(typeof cell!=='string')return cell;
+            return cell.replace(/<[^>]*>/g,'').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&#39;/g,"'").replace(/&quot;/g,'"');
+        }));
+    });
+    if(d.totals&&d.totals.length){
+        ws_data.push([]);
+        d.totals.forEach(function(trow){
+            ws_data.push(trow.map(function(cell){
+                if(typeof cell!=='string')return cell;
+                return cell.replace(/<[^>]*>/g,'').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>');
+            }));
+        });
+    }
+    var ws=XLSX.utils.aoa_to_sheet(ws_data);
+    var colCount=d.headers.length;
+    ws['!merges']=[
+        {s:{r:0,c:0},e:{r:0,c:colCount-1}},
+        {s:{r:1,c:0},e:{r:1,c:colCount-1}},
+        {s:{r:3,c:0},e:{r:3,c:colCount-1}}
+    ];
+    if(d.subtitle)ws['!merges'].push({s:{r:4,c:0},e:{r:4,c:colCount-1}});
+    var widths=d.colWidths||d.headers.map(function(){return 15;});
+    ws['!cols']=widths.map(function(w){return{wch:w};});
+    var wb=XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb,ws,d.title.substring(0,31));
+    XLSX.writeFile(wb,d.title.replace(/\s+/g,'_')+'_'+today()+'.xlsx');
+    showToast('Excel downloaded!','success');
+    logAction('Reports','EXPORT_EXCEL',d.title+' | '+d.period);
+}
+
+// ==================== PDF EXPORT ====================
+function exportReportPDF(){
+    if(!LAST_REPORT){showToast('No report to export','error');return;}
+    var d=LAST_REPORT;
+    var doc=new jspdf.jsPDF('l','mm','a4');
+    var pw=doc.internal.pageSize.getWidth();
+    var isDark=APP.theme==='dark';
+
+    // Company header
+    doc.setFontSize(15);doc.setFont(undefined,'bold');
+    doc.setTextColor(isDark?0:60,isDark?180:120,isDark?120:60);
+    doc.text('VIP INDUSTRIES LIMITED (MD20)',pw/2,14,{align:'center'});
+    doc.setFontSize(9);doc.setFont(undefined,'normal');doc.setTextColor(100);
+    doc.text('Warehouse Management System',pw/2,20,{align:'center'});
+
+    // Line
+    doc.setDrawColor(0,180,120);doc.setLineWidth(0.6);
+    doc.line(14,24,pw-14,24);
+
+    // Title
+    doc.setFontSize(12);doc.setFont(undefined,'bold');doc.setTextColor(30);
+    doc.text(d.title,14,32);
+    var yOff=38;
+    if(d.subtitle){doc.setFontSize(9);doc.setFont(undefined,'normal');doc.setTextColor(80);doc.text(d.subtitle,14,yOff);yOff+=5;}
+
+    // Period
+    doc.setFontSize(8);doc.setTextColor(100);
+    doc.text('Period: '+d.period+'    |    Generated By: '+d.generatedBy+'    |    '+d.generatedAt,14,yOff);
+    yOff+=6;
+
+    // Summary line
+    if(d.summary&&d.summary.length){
+        var sumStr=d.summary.map(function(s){return s.label+': '+s.value;}).join('   |   ');
+        doc.setFontSize(8);doc.setTextColor(50);doc.setFont(undefined,'bold');
+        doc.text(sumStr,14,yOff);
+        yOff+=4;
+        doc.setDrawColor(200);doc.setLineWidth(0.3);doc.line(14,yOff,pw-14,yOff);
+        yOff+=3;
+    }
+
+    // Clean rows for PDF
+    var cleanRows=d.rows.map(function(row){return row.map(function(cell){if(typeof cell!=='string')return cell;return cell.replace(/<[^>]*>/g,'');});});
+    var cleanTotals=d.totals?d.totals.map(function(row){return row.map(function(cell){if(typeof cell!=='string')return cell;return cell.replace(/<[^>]*>/g,'');});}):[];
+
+    var aligns=d.colAlign||[];
+
+    doc.autoTable({
+        head:[d.headers],
+        body:cleanRows,
+        startY:yOff,
+        theme:'grid',
+        headStyles:{fillColor:[0,180,120],textColor:[5,8,16],fontStyle:'bold',fontSize:7.5,halign:'center',cellPadding:3},
+        bodyStyles:{fontSize:7,textColor:[30,30,30],cellPadding:2.5},
+        alternateRowStyles:{fillColor:[245,248,250]},
+        columnStyles:aligns.map(function(a){return{halign:a==='center'?'center':a==='right'?'right':'left'};}),
+        didDrawPage:function(data){
+            doc.setFontSize(7);doc.setTextColor(150);
+            doc.text('Page '+doc.internal.getNumberOfPages(),pw/2,doc.internal.pageSize.getHeight()-8,{align:'center'});
+            doc.text('VIP INDUSTRIES LIMITED (MD20) — Confidential',14,doc.internal.pageSize.getHeight()-8);
+        }
+    });
+
+    // Totals
+    if(cleanTotals.length>0){
+        var finalY=doc.lastAutoTable.finalY+3;
+        if(finalY>doc.internal.pageSize.getHeight()-20){doc.addPage();finalY=20;}
+        doc.autoTable({
+            head:[d.headers],
+            body:cleanTotals,
+            startY:finalY,
+            theme:'plain',
+            bodyStyles:{fontStyle:'bold',fillColor:[220,240,230],fontSize:7.5,cellPadding:3,textColor:[20,20,20]},
+            columnStyles:aligns.map(function(a){return{halign:a==='center'?'center':a==='right'?'right':'left'};})
+        });
+    }
+
+    doc.save(d.title.replace(/\s+/g,'_')+'_'+today()+'.pdf');
+    showToast('PDF downloaded!','success');
+    logAction('Reports','EXPORT_PDF',d.title+' | '+d.period);
+}

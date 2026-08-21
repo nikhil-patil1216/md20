@@ -3,16 +3,21 @@
    Developed by Nikhil Patil
    ============================================================ */
 
-// ==================== SUPABASE SYNC (FIXED) ====================
+// ==================== SUPABASE SYNC (OPTIMIZED FOR PRODUCTION) ====================
 var supabaseClient = null;
 var _localWriteTs = {};
+var MEMORY_DB = {}; // In-memory database to bypass localStorage limits
+var pushTimers = {}; // Debounce timers for API calls
 
 try {
-    var SUPABASE_URL = 'https://whlqsapzywnadvkhfhzp.supabase.co';
+    var SUPABASE_URL = 'https://whlqsapzywnadvkhfhzp.supabase.co'; // Apna URL dalo
     var SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndobHFzYXB6eXduYWR2a2hmaHpwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUxNjE4ODMsImV4cCI6MjEwMDczNzg4M30.YaNFKPQ9vmhKHYa0DtaZPbbM44IqgSlibPSABId_bno';
+    
     if (typeof supabase !== 'undefined' && SUPABASE_URL.indexOf('supabase.co') > -1) {
-        supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
-        console.log('Supabase client initialized');
+        supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
+            realtime: { params: { eventsPerSecond: 10 } }
+        });
+        console.log('Supabase client initialized for Production');
     }
 } catch(e) {
     console.warn('Supabase init error:', e);
@@ -26,48 +31,50 @@ function _safeParse(val) {
     return null;
 }
 
+// Debounced Push - Prevents UI hang on bulk uploads
 function pushServer(key, val) {
     if (!supabaseClient) return;
-    try {
-        supabaseClient.from('app_data').upsert({key: key, value: val}, {onConflict: 'key'}).then(function(res) {
-            if (res.error) console.warn('pushServer error [' + key + ']:', res.error.message);
-            else console.log('pushServer OK:', key);
-        }).catch(function(e) {
-            console.warn('pushServer catch [' + key + ']:', e.message || e);
-        });
-    } catch(e) {
-        console.warn('pushServer error:', e);
-    }
+    
+    clearTimeout(pushTimers[key]);
+    pushTimers[key] = setTimeout(function() {
+        try {
+            supabaseClient.from('app_data').upsert({key: key, value: val}, {onConflict: 'key'}).then(function(res) {
+                if (res.error) console.warn('pushServer error [' + key + ']:', res.error.message);
+                else console.log('✅ Data synced to server:', key);
+            }).catch(function(e) {
+                console.warn('pushServer catch [' + key + ']:', e.message || e);
+            });
+        } catch(e) {
+            console.warn('pushServer error:', e);
+        }
+    }, 1500); // 1.5 second wait
 }
 
-function pullAll() {
+// Load all data from Supabase to Memory
+async function pullAll() {
     if (!supabaseClient) return;
     try {
-        var tables = ['users','location_master','material_master','rack_master','vehicles','invoices','invoice_materials','picking_reports','audit_log','notifications','difference_reports','obd_data','picking_assignments','loading_assignments','loading_data','user_sessions','grn_records','short_reports','unloading_records','loaded_vehicles','picking_done','loading_users','user_work_log'];
-        tables.forEach(function(t) {
-            supabaseClient.from('app_data').select('value').eq('key', t).single().then(function(res) {
-                if (res.error) return;
-                if (res.data && res.data.value != null) {
-                    var localRaw = localStorage.getItem('wms_' + t);
-                    if (!localRaw || localRaw === '[]' || localRaw === '{}') {
-                        var parsed = _safeParse(res.data.value);
-                        if (parsed) {
-                            localStorage.setItem('wms_' + t, JSON.stringify(parsed));
-                            console.log('pullAll: pulled', t, 'from server (' + (Array.isArray(parsed) ? parsed.length + ' items' : 'object') + ')');
-                        }
-                    } else {
-                        console.log('pullAll: SKIP', t, '(local data exists)');
-                    }
+        var tables = ['users','location_master','material_master','rack_master','vehicles','invoices','invoice_materials','picking_reports','audit_log','notifications','difference_reports','obd_data','picking_assignments','loading_assignments','loading_data','user_sessions','grn_records','short_reports','unloading_records','loaded_vehicles','picking_done','loading_users','user_work_log','partial_unloads','location_locks','loading_approvals'];
+        
+        for (var i=0; i<tables.length; i++) {
+            var t = tables[i];
+            var res = await supabaseClient.from('app_data').select('value').eq('key', t).single();
+            if (res.data && res.data.value != null) {
+                var parsed = _safeParse(res.data.value);
+                if (parsed) {
+                    MEMORY_DB[t] = parsed;
+                    try { localStorage.setItem('wms_' + t, JSON.stringify(parsed)); } catch(e) {}
+                    console.log('Pulled from server:', t);
                 }
-            }).catch(function(e) {
-                console.warn('pullAll error [' + t + ']:', e.message || e);
-            });
-        });
+            }
+        }
+        if (APP.currentUser && APP.currentSection) renderSection(APP.currentSection, APP.currentSub);
     } catch(e) {
         console.warn('pullAll error:', e);
     }
 }
 
+// Realtime Subscription
 if (supabaseClient) {
     try {
         supabaseClient.channel('wms-live').on('postgres_changes', {
@@ -75,29 +82,29 @@ if (supabaseClient) {
         }, function(p) {
             if (!p.new || !p.new.key || p.new.value == null) return;
             var k = p.new.key;
-            if (_localWriteTs[k] && (Date.now() - _localWriteTs[k]) < 5000) {
-                console.log('Realtime: IGNORE echo for', k, '(written locally ' + (Date.now() - _localWriteTs[k]) + 'ms ago)');
-                return;
-            }
+            if (_localWriteTs[k] && (Date.now() - _localWriteTs[k]) < 5000) return; // Ignore echo
+            
             var parsed = _safeParse(p.new.value);
             if (parsed) {
-                localStorage.setItem('wms_' + k, JSON.stringify(parsed));
-                console.log('Realtime: ACCEPTED remote update for', k);
+                MEMORY_DB[k] = parsed; // Update Memory
+                try { localStorage.setItem('wms_' + k, JSON.stringify(parsed)); } catch(e) {}
+                console.log('🔄 Realtime update received for:', k);
+                
+                // Live UI update for all users
                 if (APP.currentUser && APP.currentSection) {
                     renderSection(APP.currentSection, APP.currentSub);
+                    if (k === 'notifications') updateNotifBadge();
                 }
-            } else {
-                console.warn('Realtime: could not parse value for', k);
             }
         }).subscribe(function(status) {
-            console.log('Realtime subscription status:', status);
+            console.log('Realtime status:', status);
         });
     } catch(e) {
         console.warn('Realtime subscription error:', e);
     }
 }
 
-// ==================== STATE ====================
+// ==================== STATE & DATABASE (MEMORY-FIRST) ====================
 var APP = {
     currentUser: null, currentSection: 'dashboard', currentSub: null,
     theme: localStorage.getItem('wms_theme') || 'dark',
@@ -106,15 +113,33 @@ var APP = {
     scanCallback: null, html5QrCode: null
 };
 
-// ==================== DATABASE ====================
 var DB = {
     _k: function(k){return 'wms_'+k;},
-    get: function(k){try{return JSON.parse(localStorage.getItem(this._k(k))||'[]');}catch(e){return [];}},
-    getObj: function(k){try{return JSON.parse(localStorage.getItem(this._k(k))||'{}');}catch(e){return {};}},
+    get: function(k){
+        if(!MEMORY_DB[k]) {
+            try { MEMORY_DB[k] = JSON.parse(localStorage.getItem(this._k(k))||'[]'); }
+            catch(e) { MEMORY_DB[k] = []; }
+        }
+        return MEMORY_DB[k];
+    },
+    getObj: function(k){
+        if(!MEMORY_DB[k]) {
+            try { MEMORY_DB[k] = JSON.parse(localStorage.getItem(this._k(k))||'{}'); }
+            catch(e) { MEMORY_DB[k] = {}; }
+        }
+        return MEMORY_DB[k];
+    },
     set: function(k, v) {
-        localStorage.setItem(this._k(k), JSON.stringify(v));
+        MEMORY_DB[k] = v; // Pehle memory update karo (UI instantly fast)
         _localWriteTs[k] = Date.now();
-        pushServer(k, v);
+        
+        // LocalStorage mein save karo (agar size chota hai toh, warna skip)
+        try {
+            var str = JSON.stringify(v);
+            if(str.length < 4500000) localStorage.setItem(this._k(k), str);
+        } catch(e) { console.warn('LocalStorage quota exceeded, using memory only'); }
+        
+        pushServer(k, v); // Debounced Supabase Sync
     },
     add: function(k,item){
         var d=this.get(k); item.id=item.id||this.uid(); item.createdAt=item.createdAt||new Date().toISOString();
@@ -2243,7 +2268,6 @@ function processLocBulkUpload(){
     progDiv.style.display='';
     progDiv.innerHTML='<div style="background:var(--bg-secondary);padding:10px;border-radius:var(--radius-sm);text-align:center;color:var(--accent)"><i class="bx bx-loader-circle bx-spin" style="font-size:20px;display:block;margin-bottom:6px"></i>Processing... please wait</div>';
 
-    // Use setTimeout to allow UI to update
     setTimeout(function(){
         try{
             var reader=new FileReader();
@@ -2254,13 +2278,13 @@ function processLocBulkUpload(){
                     var ws=wb.Sheets[wb.SheetNames[0]];
                     var data=XLSX.utils.sheet_to_json(ws,{header:1,raw:false});
 
-                    if(!data||data.length<2){showToast('File mein data nahi hai (kam se kam header + 1 row)','error');progDiv.innerHTML='';return;}
+                    if(!data||data.length<2){showToast('File empty hai','error');progDiv.innerHTML='';return;}
 
-                    // Detect header row
                     var headerRow=data[0].map(function(h){return String(h||'').trim().toLowerCase();});
                     var colMap={date:-1,rack:-1,material:-1,ean:-1,qty:-1,action:-1,packing:-1,box:-1};
                     var keys=['date','rack','material','ean','qty','action','packing','box'];
-                    var aliases={date:['date','dt'],rack:['rack','location','rack_no'],material:['material','material_name','item'],ean:['ean','ean_no','barcode','upc'],qty:['qty','quantity','quant'],action:['action','type','activity'],packing:['packing','pack','pack_type'],box:['box','box_no','boxno']};
+                    var aliases={date:['date','dt'],rack:['rack','location'],material:['material','item'],ean:['ean','barcode'],qty:['qty','quantity'],action:['action','type'],packing:['packing','pack'],box:['box','boxno']};
+                    
                     keys.forEach(function(k){
                         aliases[k].forEach(function(a){
                             for(var ci=0;ci<headerRow.length;ci++){
@@ -2269,20 +2293,14 @@ function processLocBulkUpload(){
                         });
                     });
 
-                    // Validate required columns
-                    var missing=[];
-                    if(colMap.rack===-1)missing.push('Rack');
-                    if(colMap.material===-1)missing.push('Material');
-                    if(colMap.qty===-1)missing.push('Qty');
-                    if(missing.length){showToast('Missing columns: '+missing.join(', '),'error');progDiv.innerHTML='';return;}
+                    if(colMap.rack===-1||colMap.material===-1||colMap.qty===-1){
+                        showToast('Missing columns: Rack, Material ya Qty','error');progDiv.innerHTML='';return;
+                    }
 
-                    // Parse date helper
                     function parseDate(val){
                         if(!val)return today();
                         var s=String(val).trim();
-                        // YYYY-MM-DD
                         if(/^\d{4}-\d{2}-\d{2}$/.test(s))return s;
-                        // DD/MM/YYYY
                         var parts=s.split(/[\/\-\.]/);
                         if(parts.length===3){
                             if(parts[0].length===4)return parts[0]+'-'+parts[1].padStart(2,'0')+'-'+parts[2].padStart(2,'0');
@@ -2291,13 +2309,13 @@ function processLocBulkUpload(){
                         return today();
                     }
 
-                    // Process rows
-                    var startRow=1; // Skip header
+                    // Pehle se existing data lo
+                    var existingData = DB.get('location_master');
                     var added=0,skipped=0,errorRows=[];
                     var userName=APP.currentUser?APP.currentUser.name:'Bulk Upload';
                     var userId=APP.currentUser?APP.currentUser.id:'';
 
-                    for(var k=startRow;k<data.length;k++){
+                    for(var k=1;k<data.length;k++){
                         var r=data[k];
                         if(!r||!r.length)continue;
 
@@ -2312,19 +2330,13 @@ function processLocBulkUpload(){
 
                         if(!rack||!material||qty<=0){skipped++;errorRows.push(k+1);continue;}
 
-                        // Get description from material master if EAN exists
-                        var desc=material;
-                        if(ean){
-                            var mm=DB.filter('material_master',function(m){return m.ean&&m.ean.toUpperCase()===ean.toUpperCase();});
-                            if(mm.length>0)desc=mm[0].description||mm[0].material;
-                        }
-
-                        DB.add('location_master',{
+                        existingData.push({
+                            id: DB.uid(),
                             date:date,
                             rack:rack,
                             ean:ean,
                             material:material,
-                            description:desc,
+                            description:material,
                             quantity:qty,
                             packing:packing,
                             box:box,
@@ -2336,6 +2348,9 @@ function processLocBulkUpload(){
                         added++;
                     }
 
+                    // Ek hi baar DB.set call karo (No UI Hang)
+                    DB.set('location_master', existingData);
+
                     var t1=performance.now();
                     var timeSec=((t1-t0)/1000).toFixed(1);
 
@@ -2345,16 +2360,10 @@ function processLocBulkUpload(){
                     if(skipped>0)resHtml+='<div style="text-align:center;flex:1;min-width:80px"><div style="font-size:24px;font-weight:800;color:var(--danger)">'+skipped+'</div><div style="font-size:9px;color:var(--text-muted)">SKIPPED</div></div>';
                     resHtml+='<div style="text-align:center;flex:1;min-width:80px"><div style="font-size:24px;font-weight:800;color:var(--accent)">'+timeSec+'s</div><div style="font-size:9px;color:var(--text-muted)">TIME</div></div>';
                     resHtml+='</div>';
-                    if(errorRows.length>0&&errorRows.length<=20){
-                        resHtml+='<div style="font-size:10px;color:var(--danger);margin-bottom:8px"><i class="bx bx-error-circle"></i> Skipped rows: '+errorRows.join(', ')+'</div>';
-                    } else if(errorRows.length>20){
-                        resHtml+='<div style="font-size:10px;color:var(--danger);margin-bottom:8px"><i class="bx bx-error-circle"></i> Skipped rows: '+errorRows.length+' (first 20: '+errorRows.slice(0,20).join(', ')+')</div>';
-                    }
-                    resHtml+='<div style="font-size:11px;color:var(--text-muted)"><i class="bx bx-check-circle" style="color:var(--success)"></i> Upload complete!</div>';
                     resHtml+='</div>';
                     progDiv.innerHTML=resHtml;
 
-                    logAction('Location Master','BULK_UPLOAD',added+' rows added, '+skipped+' skipped in '+timeSec+'s');
+                    logAction('Location Master','BULK_UPLOAD',added+' rows added in '+timeSec+'s');
                     showToast(added+' rows uploaded! ('+timeSec+'s)','success');
 
                 }catch(err){

@@ -3,11 +3,13 @@
    Developed by Nikhil Patil
    ============================================================ */
 
-// ==================== SUPABASE SYNC (PRODUCTION ROW-LEVEL ARCHITECTURE) ====================
+// ==================== SUPABASE SYNC (BULLETPROOF DATA PERSISTENCE) ====================
 var supabaseClient = null;
 var _localWriteTs = {};
-var MEMORY_DB = {}; // In-memory cache for instant UI
-var pushTimers = {}; // Debounce timers for API calls
+var MEMORY_DB = {}; 
+var pushTimers = {};
+var _isSyncing = false;
+var _pendingPushes = {};
 
 try {
     var SUPABASE_URL = 'https://whlqsapzywnadvkhfhzp.supabase.co'; // Apna URL dalo
@@ -15,79 +17,137 @@ try {
     
     if (typeof supabase !== 'undefined' && SUPABASE_URL.indexOf('supabase.co') > -1) {
         supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
-            realtime: { params: { eventsPerSecond: 10 } }
+            realtime: { params: { eventsPerSecond: 10 } },
+            auth: { persistSession: false }
         });
-        console.log('Supabase client initialized for Production (Row-Level)');
+        console.log('✅ Supabase client initialized');
     }
 } catch(e) {
     console.warn('Supabase init error:', e);
 }
 
-// All App Tables
 var ALL_TABLES = ['users','location_master','material_master','rack_master','vehicles','invoices','invoice_materials','picking_reports','audit_log','notifications','difference_reports','obd_data','picking_assignments','loading_assignments','loading_data','user_sessions','grn_records','short_reports','unloading_records','loaded_vehicles','picking_done','loading_users','user_work_log','partial_unloads','location_locks','loading_approvals','short_excess_reports'];
 
-// Debounced Push - Now batches data in chunks of 500 rows to prevent payload limits
-function pushServer(key, val) {
-    if (!supabaseClient) return;
+// Immediate Push with Retry
+async function pushServer(key, val) {
+    if (!supabaseClient || !Array.isArray(val)) return;
+    
+    _pendingPushes[key] = val; 
     
     clearTimeout(pushTimers[key]);
     pushTimers[key] = setTimeout(async function() {
-        try {
-            if (!Array.isArray(val)) return;
-            
-            var chunkSize = 500; // 500 rows per API call
-            for (var i = 0; i < val.length; i += chunkSize) {
-                var chunk = val.slice(i, i + chunkSize);
-                // Convert array of objects to array of {id, data}
-                var rows = chunk.map(function(item) {
-                    return { id: item.id || DB.uid(), data: item };
-                });
-                
-                var res = await supabaseClient.from(key)
-                    .upsert(rows, { onConflict: 'id' });
-                    
-                if (res.error) console.warn('pushServer error [' + key + ']:', res.error.message);
-            }
-            console.log('✅ Data synced to server:', key, '(' + val.length + ' rows)');
-        } catch(e) {
-            console.warn('pushServer catch [' + key + ']:', e.message || e);
-        }
-    }, 1500); // 1.5 second wait
+        await flushPush(key);
+    }, 500); // 500ms debounce
 }
 
-// Delete a single row from Supabase
-function deleteServerRow(key, id) {
-    if (!supabaseClient || !id) return;
-    supabaseClient.from(key).delete().eq('id', id).then(function(res) {
-        if (res.error) console.warn('Delete error:', res.error.message);
-    });
-}
-
-// Load all data from Supabase to Memory
-async function pullAll() {
+// Flush data to Supabase
+async function flushPush(key) {
     if (!supabaseClient) return;
+    var val = _pendingPushes[key];
+    if (!val || !Array.isArray(val)) return;
+    
     try {
-        for (var i=0; i<ALL_TABLES.length; i++) {
-            var t = ALL_TABLES[i];
-            // Select only the 'data' column
-            var res = await supabaseClient.from(t).select('data');
-            if (res.data && res.data.length > 0) {
-                // Extract 'data' object from each row
-                var parsed = res.data.map(function(row) { return row.data; });
-                MEMORY_DB[t] = parsed;
-                try { localStorage.setItem('wms_' + t, JSON.stringify(parsed)); } catch(e) {}
-                console.log('Pulled from server:', t, '(' + parsed.length + ' rows)');
-            } else {
-                MEMORY_DB[t] = [];
+        var chunkSize = 500;
+        for (var i = 0; i < val.length; i += chunkSize) {
+            var chunk = val.slice(i, i + chunkSize);
+            var rows = chunk.map(function(item) {
+                return { 
+                    id: item.id || (Date.now().toString(36) + Math.random().toString(36).substr(2,6)), 
+                    data: item,
+                    created_at: new Date().toISOString()
+                };
+            });
+            
+            var res = await supabaseClient.from(key)
+                .upsert(rows, { onConflict: 'id' });
+                
+            if (res.error) {
+                console.warn('❌ Push Error [' + key + ']:', res.error.message);
             }
         }
-        if (APP.currentUser && APP.currentSection) renderSection(APP.currentSection, APP.currentSub);
+        
+        delete _pendingPushes[key];
+        console.log('✅ Synced:', key, '(' + val.length + ' rows)');
     } catch(e) {
-        console.warn('pullAll error:', e);
+        console.warn('❌ Push Catch [' + key + ']:', e.message || e);
     }
 }
 
-// Realtime Subscription for All Tables
+// Flush all pending (Called before logout)
+async function flushAllPendingPushes() {
+    if (!supabaseClient) return;
+    var keys = Object.keys(_pendingPushes);
+    console.log('🔄 Flushing', keys.length, 'pending tables...');
+    
+    var promises = keys.map(function(k) {
+        clearTimeout(pushTimers[k]);
+        return flushPush(k);
+    });
+    
+    await Promise.all(promises);
+    console.log('✅ All pending data flushed');
+}
+
+// Delete from Supabase
+async function deleteServerRow(key, id) {
+    if (!supabaseClient || !id) return;
+    try {
+        var res = await supabaseClient.from(key).delete().eq('id', id);
+        if (res.error) console.warn('Delete error [' + key + ']:', res.error.message);
+    } catch(e) {
+        console.warn('Delete catch:', e);
+    }
+}
+
+// Pull all data
+async function pullAll() {
+    if (!supabaseClient) return false;
+    
+    _isSyncing = true;
+    console.log('🔄 Starting data sync from Supabase...');
+    
+    try {
+        for (var i = 0; i < ALL_TABLES.length; i++) {
+            var t = ALL_TABLES[i];
+            var res = await supabaseClient.from(t).select('data');
+            
+            if (res.error) {
+                console.warn('⚠️ Table not accessible:', t, '—', res.error.message);
+                if (!MEMORY_DB[t]) {
+                    try { MEMORY_DB[t] = JSON.parse(localStorage.getItem('wms_' + t) || '[]'); }
+                    catch(e) { MEMORY_DB[t] = []; }
+                }
+                continue;
+            }
+            
+            if (res.data && res.data.length > 0) {
+                var parsed = res.data.map(function(row) { return row.data; }).filter(function(d) { return d !== null; });
+                MEMORY_DB[t] = parsed;
+                try { localStorage.setItem('wms_' + t, JSON.stringify(parsed)); } catch(e) {}
+            } else {
+                if (!MEMORY_DB[t]) {
+                    try { MEMORY_DB[t] = JSON.parse(localStorage.getItem('wms_' + t) || '[]'); }
+                    catch(e) { MEMORY_DB[t] = []; }
+                }
+            }
+        }
+        
+        _isSyncing = false;
+        console.log('✅ Data sync complete!');
+        
+        if (APP.currentUser && APP.currentSection) {
+            renderSection(APP.currentSection, APP.currentSub);
+            if (typeof updateNotifBadge === 'function') updateNotifBadge();
+        }
+        return true;
+    } catch(e) {
+        _isSyncing = false;
+        console.warn('❌ pullAll error:', e);
+        return false;
+    }
+}
+
+// Realtime Subscription
 if (supabaseClient) {
     try {
         supabaseClient.channel('wms-live-all').on('postgres_changes', {
@@ -96,8 +156,7 @@ if (supabaseClient) {
             var tableName = p.table;
             if (!tableName || !MEMORY_DB[tableName]) return;
             
-            // Ignore own echo (within 5 seconds)
-            if (_localWriteTs[tableName] && (Date.now() - _localWriteTs[tableName]) < 5000) return;
+            if (_localWriteTs[tableName] && (Date.now() - _localWriteTs[tableName]) < 3000) return;
             
             if (p.eventType === 'DELETE' && p.old && p.old.id) {
                 MEMORY_DB[tableName] = MEMORY_DB[tableName].filter(function(item) { return item.id !== p.old.id; });
@@ -115,17 +174,14 @@ if (supabaseClient) {
             }
             
             try { localStorage.setItem('wms_' + tableName, JSON.stringify(MEMORY_DB[tableName])); } catch(e) {}
-            console.log('🔄 Realtime update received for:', tableName);
             
-            if (APP.currentUser && APP.currentSection) {
+            if (APP.currentUser && APP.currentSection && !_isSyncing) {
                 renderSection(APP.currentSection, APP.currentSub);
                 if (tableName === 'notifications') updateNotifBadge();
             }
-        }).subscribe(function(status) {
-            console.log('Realtime status:', status);
-        });
+        }).subscribe();
     } catch(e) {
-        console.warn('Realtime subscription error:', e);
+        console.warn('Realtime error:', e);
     }
 }
 
@@ -469,29 +525,71 @@ function seedData(){
 }
 
 // ==================== AUTH ====================
-function doLogin(uname,pass){
-    var users=DB.get('users'),user=null;
-    for(var i=0;i<users.length;i++){if(users[i].username===uname&&users[i].password===pass){user=users[i];break;}}
-    if(!user){showToast('Invalid username or password','error');return false;}
-    APP.currentUser=user;APP.sessionStart=Date.now();
-    localStorage.setItem('wms_session',JSON.stringify({userId:user.id,loginTime:new Date().toISOString()}));
-    DB.add('user_sessions',{userId:user.id,userName:user.name,loginTime:new Date().toISOString(),logoutTime:null,status:'Active'});
-    logAction('Auth','LOGIN','User '+user.name+' logged in');
-    pullAll();return true;
-}
-function doLogout(){
-    if(APP.currentUser){
-        logAction('Auth','LOGOUT','User '+APP.currentUser.name+' logged out');
-        var sessions=DB.get('user_sessions');
-        for(var i=sessions.length-1;i>=0;i--){
-            if(sessions[i].userId===APP.currentUser.id&&!sessions[i].logoutTime){
-                DB.update('user_sessions',sessions[i].id,{logoutTime:new Date().toISOString(),status:'Logged Out'});break;
+async function doLogin(uname, pass) {
+    var users = DB.get('users');
+    var user = null;
+    
+    for (var i = 0; i < users.length; i++) {
+        if (users[i].username === uname && users[i].password === pass) {
+            user = users[i];
+            break;
+        }
+    }
+    
+    if (!user && supabaseClient) {
+        await pullAll();
+        users = DB.get('users');
+        for (var i = 0; i < users.length; i++) {
+            if (users[i].username === uname && users[i].password === pass) {
+                user = users[i];
+                break;
             }
         }
     }
-    APP.currentUser=null;localStorage.removeItem('wms_session');
-    document.getElementById('mainApp').style.display='none';
-    document.getElementById('loginPage').style.display='flex';
+    
+    if (!user) {
+        showToast('Invalid username or password', 'error');
+        return false;
+    }
+    
+    APP.currentUser = user;
+    APP.sessionStart = Date.now();
+    localStorage.setItem('wms_session', JSON.stringify({ userId: user.id, loginTime: new Date().toISOString() }));
+    
+    DB.add('user_sessions', { userId: user.id, userName: user.name, loginTime: new Date().toISOString(), logoutTime: null, status: 'Active' });
+    logAction('Auth', 'LOGIN', 'User ' + user.name + ' logged in');
+    
+    showLoader();
+    await pullAll(); // Get latest data before showing dashboard
+    hideLoader();
+    
+    return true;
+}
+async function doLogout() {
+    if (APP.currentUser) {
+        showLoader();
+        logAction('Auth', 'LOGOUT', 'User ' + APP.currentUser.name + ' logged out');
+        
+        var sessions = DB.get('user_sessions');
+        for (var i = sessions.length - 1; i >= 0; i--) {
+            if (sessions[i].userId === APP.currentUser.id && !sessions[i].logoutTime) {
+                DB.update('user_sessions', sessions[i].id, { logoutTime: new Date().toISOString(), status: 'Logged Out' });
+                break;
+            }
+        }
+        
+        await flushAllPendingPushes(); // Data save before logout
+        await new Promise(function(r) { setTimeout(r, 500); });
+        
+        APP.currentUser = null;
+        localStorage.removeItem('wms_session');
+        
+        hideLoader();
+        document.getElementById('mainApp').style.display = 'none';
+        document.getElementById('loginPage').style.display = 'flex';
+        if (typeof initMatrix === 'function') initMatrix();
+        showToast('Logged out successfully', 'success');
+    }
 }
 function chkPerm(mod){
     if(!APP.currentUser)return false;
@@ -5704,17 +5802,33 @@ function initSessionTimeout(){
 // ==================== EVENT LISTENERS ====================
 function initEvents(){
     // Login form
-    document.getElementById('loginForm').addEventListener('submit',function(e){
-        e.preventDefault();
-        if(doLogin(document.getElementById('loginUser').value.trim(),document.getElementById('loginPass').value)){
-            document.getElementById('loginPage').style.display='none';
-            document.getElementById('mainApp').style.display='flex';
-            if(window._matrixInterval)clearInterval(window._matrixInterval);
-            document.getElementById('userAvatar').textContent=APP.currentUser.name.charAt(0).toUpperCase();
-            document.getElementById('userName').textContent=APP.currentUser.name;
-            renderSidebar();initBottomNav();navTo('dashboard');initSessionTimeout();
+document.getElementById('loginForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    var btn = this.querySelector('button[type="submit"]');
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<i class="bx bx-loader-alt bx-spin"></i> <span>PLEASE WAIT...</span>';
+    }
+    
+    try {
+        var success = await doLogin(document.getElementById('loginUser').value.trim(), document.getElementById('loginPass').value);
+        if (success) {
+            document.getElementById('loginPage').style.display = 'none';
+            document.getElementById('mainApp').style.display = 'flex';
+            if (window._matrixInterval) clearInterval(window._matrixInterval);
+            document.getElementById('userAvatar').textContent = APP.currentUser.name.charAt(0).toUpperCase();
+            document.getElementById('userName').textContent = APP.currentUser.name;
+            renderSidebar(); initBottomNav(); navTo('dashboard'); initSessionTimeout();
         }
-    });
+    } catch(err) {
+        showToast('Login failed: ' + (err.message || 'Unknown error'), 'error');
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = '<span>ACCESS SYSTEM</span><i class="bx bx-log-in"></i>';
+        }
+    }
+});
 
     // Menu toggle
     document.getElementById('menuToggle').addEventListener('click',function(){

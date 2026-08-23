@@ -3,10 +3,10 @@
    Developed by Nikhil Patil
    ============================================================ */
 
-// ==================== SUPABASE SYNC (OPTIMIZED FOR PRODUCTION) ====================
+// ==================== SUPABASE SYNC (PRODUCTION ROW-LEVEL ARCHITECTURE) ====================
 var supabaseClient = null;
 var _localWriteTs = {};
-var MEMORY_DB = {}; // In-memory database to bypass localStorage limits
+var MEMORY_DB = {}; // In-memory cache for instant UI
 var pushTimers = {}; // Debounce timers for API calls
 
 try {
@@ -17,55 +17,68 @@ try {
         supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
             realtime: { params: { eventsPerSecond: 10 } }
         });
-        console.log('Supabase client initialized for Production');
+        console.log('Supabase client initialized for Production (Row-Level)');
     }
 } catch(e) {
     console.warn('Supabase init error:', e);
 }
 
-function _safeParse(val) {
-    if (val && typeof val === 'object') return val;
-    if (typeof val === 'string') {
-        try { return JSON.parse(val); } catch(e) { return null; }
-    }
-    return null;
-}
+// All App Tables
+var ALL_TABLES = ['users','location_master','material_master','rack_master','vehicles','invoices','invoice_materials','picking_reports','audit_log','notifications','difference_reports','obd_data','picking_assignments','loading_assignments','loading_data','user_sessions','grn_records','short_reports','unloading_records','loaded_vehicles','picking_done','loading_users','user_work_log','partial_unloads','location_locks','loading_approvals','short_excess_reports'];
 
-// Debounced Push - Prevents UI hang on bulk uploads
+// Debounced Push - Now batches data in chunks of 500 rows to prevent payload limits
 function pushServer(key, val) {
     if (!supabaseClient) return;
     
     clearTimeout(pushTimers[key]);
-    pushTimers[key] = setTimeout(function() {
+    pushTimers[key] = setTimeout(async function() {
         try {
-            supabaseClient.from('app_data').upsert({key: key, value: val}, {onConflict: 'key'}).then(function(res) {
+            if (!Array.isArray(val)) return;
+            
+            var chunkSize = 500; // 500 rows per API call
+            for (var i = 0; i < val.length; i += chunkSize) {
+                var chunk = val.slice(i, i + chunkSize);
+                // Convert array of objects to array of {id, data}
+                var rows = chunk.map(function(item) {
+                    return { id: item.id || DB.uid(), data: item };
+                });
+                
+                var res = await supabaseClient.from(key)
+                    .upsert(rows, { onConflict: 'id' });
+                    
                 if (res.error) console.warn('pushServer error [' + key + ']:', res.error.message);
-                else console.log('✅ Data synced to server:', key);
-            }).catch(function(e) {
-                console.warn('pushServer catch [' + key + ']:', e.message || e);
-            });
+            }
+            console.log('✅ Data synced to server:', key, '(' + val.length + ' rows)');
         } catch(e) {
-            console.warn('pushServer error:', e);
+            console.warn('pushServer catch [' + key + ']:', e.message || e);
         }
     }, 1500); // 1.5 second wait
+}
+
+// Delete a single row from Supabase
+function deleteServerRow(key, id) {
+    if (!supabaseClient || !id) return;
+    supabaseClient.from(key).delete().eq('id', id).then(function(res) {
+        if (res.error) console.warn('Delete error:', res.error.message);
+    });
 }
 
 // Load all data from Supabase to Memory
 async function pullAll() {
     if (!supabaseClient) return;
     try {
-        var tables = ['users','location_master','material_master','rack_master','vehicles','invoices','invoice_materials','picking_reports','audit_log','notifications','difference_reports','obd_data','picking_assignments','loading_assignments','loading_data','user_sessions','grn_records','short_reports','unloading_records','loaded_vehicles','picking_done','loading_users','user_work_log','partial_unloads','location_locks','loading_approvals'];
-        
-        for (var i=0; i<tables.length; i++) {
-            var t = tables[i];
-            var res = await supabaseClient.from('app_data').select('value').eq('key', t).single();
-            if (res.data && res.data.value != null) {
-                var parsed = _safeParse(res.data.value);
-                if (parsed) {
-                    MEMORY_DB[t] = parsed;
-                    try { localStorage.setItem('wms_' + t, JSON.stringify(parsed)); } catch(e) {}
-                    console.log('Pulled from server:', t);
-                }
+        for (var i=0; i<ALL_TABLES.length; i++) {
+            var t = ALL_TABLES[i];
+            // Select only the 'data' column
+            var res = await supabaseClient.from(t).select('data');
+            if (res.data && res.data.length > 0) {
+                // Extract 'data' object from each row
+                var parsed = res.data.map(function(row) { return row.data; });
+                MEMORY_DB[t] = parsed;
+                try { localStorage.setItem('wms_' + t, JSON.stringify(parsed)); } catch(e) {}
+                console.log('Pulled from server:', t, '(' + parsed.length + ' rows)');
+            } else {
+                MEMORY_DB[t] = [];
             }
         }
         if (APP.currentUser && APP.currentSection) renderSection(APP.currentSection, APP.currentSub);
@@ -74,27 +87,39 @@ async function pullAll() {
     }
 }
 
-// Realtime Subscription
+// Realtime Subscription for All Tables
 if (supabaseClient) {
     try {
-        supabaseClient.channel('wms-live').on('postgres_changes', {
-            event: '*', schema: 'public', table: 'app_data'
+        supabaseClient.channel('wms-live-all').on('postgres_changes', {
+            event: '*', schema: 'public', table: '*'
         }, function(p) {
-            if (!p.new || !p.new.key || p.new.value == null) return;
-            var k = p.new.key;
-            if (_localWriteTs[k] && (Date.now() - _localWriteTs[k]) < 5000) return; // Ignore echo
+            var tableName = p.table;
+            if (!tableName || !MEMORY_DB[tableName]) return;
             
-            var parsed = _safeParse(p.new.value);
-            if (parsed) {
-                MEMORY_DB[k] = parsed; // Update Memory
-                try { localStorage.setItem('wms_' + k, JSON.stringify(parsed)); } catch(e) {}
-                console.log('🔄 Realtime update received for:', k);
-                
-                // Live UI update for all users
-                if (APP.currentUser && APP.currentSection) {
-                    renderSection(APP.currentSection, APP.currentSub);
-                    if (k === 'notifications') updateNotifBadge();
+            // Ignore own echo (within 5 seconds)
+            if (_localWriteTs[tableName] && (Date.now() - _localWriteTs[tableName]) < 5000) return;
+            
+            if (p.eventType === 'DELETE' && p.old && p.old.id) {
+                MEMORY_DB[tableName] = MEMORY_DB[tableName].filter(function(item) { return item.id !== p.old.id; });
+            } else if (p.new && p.new.data) {
+                var newItem = p.new.data;
+                var found = false;
+                for (var j=0; j<MEMORY_DB[tableName].length; j++) {
+                    if (MEMORY_DB[tableName][j].id === newItem.id) {
+                        MEMORY_DB[tableName][j] = newItem;
+                        found = true;
+                        break;
+                    }
                 }
+                if (!found) MEMORY_DB[tableName].push(newItem);
+            }
+            
+            try { localStorage.setItem('wms_' + tableName, JSON.stringify(MEMORY_DB[tableName])); } catch(e) {}
+            console.log('🔄 Realtime update received for:', tableName);
+            
+            if (APP.currentUser && APP.currentSection) {
+                renderSection(APP.currentSection, APP.currentSub);
+                if (tableName === 'notifications') updateNotifBadge();
             }
         }).subscribe(function(status) {
             console.log('Realtime status:', status);
@@ -130,16 +155,17 @@ var DB = {
         return MEMORY_DB[k];
     },
     set: function(k, v) {
-        MEMORY_DB[k] = v; // Pehle memory update karo (UI instantly fast)
+        MEMORY_DB[k] = v; // Memory update for instant UI
         _localWriteTs[k] = Date.now();
         
-        // LocalStorage mein save karo (agar size chota hai toh, warna skip)
+        // LocalStorage mein save karo (agar size chota hai toh)
         try {
             var str = JSON.stringify(v);
             if(str.length < 4500000) localStorage.setItem(this._k(k), str);
+            else localStorage.removeItem(this._k(k)); // Free up space if too big
         } catch(e) { console.warn('LocalStorage quota exceeded, using memory only'); }
         
-        pushServer(k, v); // Debounced Supabase Sync
+        pushServer(k, v); // Sync to Supabase in batches
     },
     add: function(k,item){
         var d=this.get(k); item.id=item.id||this.uid(); item.createdAt=item.createdAt||new Date().toISOString();
@@ -148,10 +174,21 @@ var DB = {
     update: function(k,id,up){
         var d=this.get(k),idx=-1;
         for(var i=0;i<d.length;i++){if(d[i].id===id){idx=i;break;}}
-        if(idx>-1){for(var key in up){d[idx][key]=up[key];} d[idx].updatedAt=new Date().toISOString(); this.set(k,d); return d[idx];}
+        if(idx>-1){
+            for(var key in up){d[idx][key]=up[key];} 
+            d[idx].updatedAt=new Date().toISOString(); 
+            this.set(k,d); 
+            return d[idx];
+        }
         return null;
     },
-    remove: function(k,id){this.set(k,this.get(k).filter(function(d){return d.id!==id;}));},
+    remove: function(k,id){
+        // Delete from Supabase
+        deleteServerRow(k, id);
+        // Remove from memory and update local
+        var filtered = this.get(k).filter(function(d){return d.id!==id;});
+        this.set(k, filtered);
+    },
     find: function(k,id){return this.get(k).filter(function(d){return d.id===id;})[0]||null;},
     filter: function(k,fn){return this.get(k).filter(fn);},
     count: function(k,fn){return fn?this.get(k).filter(fn).length:this.get(k).length;},

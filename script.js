@@ -2359,15 +2359,16 @@ function deleteLocRow(id){
 
 // --- Download Template ---
 function downloadLocTemplate(){
+    // ★ Description Column Added Here ★
     var rows=[
-        ['Date','Rack','Material','EAN','Qty','Action','Packing','Box'],
-        ['2025-01-15','RACK-A01','Sample Material 1','8901234567890','10','PUTAWAY','Bag','B001'],
-        ['2025-01-15','RACK-B02','Sample Material 2','8901234567891','25','PIV','Box','B002'],
-        ['2025-01-15','RACK-C03','Sample Material 3','8901234567892','50','EAN-SCAN','Pallet','P001']
+        ['Date','Rack','Material','Description','EAN','Qty','Action','Packing','Box'],
+        ['2025-01-15','RACK-A01','Sample Material 1','Premium Quality Rice','8901234567890','10','PUTAWAY','Bag','B001'],
+        ['2025-01-15','RACK-B02','Sample Material 2','Golden Wheat Atta','8901234567891','25','PIV','Box','B002'],
+        ['2025-01-15','RACK-C03','Sample Material 3','Refined Sugar','8901234567892','50','EAN-SCAN','Pallet','P001']
     ];
     var ws=XLSX.utils.aoa_to_sheet(rows);
-    // Column widths
-    ws['!cols']=[{wch:12},{wch:14},{wch:30},{wch:18},{wch:8},{wch:12},{wch:10},{wch:10}];
+    // Column widths set ki hain
+    ws['!cols']=[{wch:12},{wch:14},{wch:30},{wch:25},{wch:18},{wch:8},{wch:12},{wch:10},{wch:10}];
     var wb=XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb,ws,'Template');
     XLSX.writeFile(wb,'Location_Master_Template.xlsx');
@@ -2383,8 +2384,11 @@ function showLocBulkUpload(){
     h+='<div style="background:var(--bg-secondary);padding:12px;border-radius:var(--radius-sm);font-size:11px;color:var(--text-muted);border:1px dashed var(--border)">';
     h+='<div style="font-weight:700;color:var(--warning);margin-bottom:6px"><i class="bx bx-table"></i> Required Column Format (Row 1 = Header):</div>';
     h+='<div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px">';
-    var cols=['Date','Rack','Material','EAN','Qty','Action','Packing','Box'];
+    
+    // ★ DESCRIPTION ADDED HERE ★
+    var cols=['Date','Rack','Material','Description','EAN','Qty','Action','Packing','Box'];
     cols.forEach(function(c){h+='<span style="background:var(--accent-dim);color:var(--accent);padding:3px 8px;border-radius:4px;font-size:10px;font-weight:600;border:1px solid var(--accent)">'+c+'</span>';});
+    
     h+='</div>';
     h+='<div><strong>Action values:</strong> PUTAWAY, PIV, EAN-SCAN (ya jo bhi custom ho)</div>';
     h+='<div><strong>Date format:</strong> YYYY-MM-DD ya DD/MM/YYYY</div>';
@@ -2416,9 +2420,21 @@ function processLocBulkUpload(){
                     if(!data||data.length<2){showToast('File empty hai','error');progDiv.innerHTML='';return;}
 
                     var headerRow=data[0].map(function(h){return String(h||'').trim().toLowerCase();});
-                    var colMap={date:-1,rack:-1,material:-1,ean:-1,qty:-1,action:-1,packing:-1,box:-1};
-                    var keys=['date','rack','material','ean','qty','action','packing','box'];
-                    var aliases={date:['date','dt'],rack:['rack','location'],material:['material','item'],ean:['ean','barcode'],qty:['qty','quantity'],action:['action','type'],packing:['packing','pack'],box:['box','boxno']};
+                    
+                    // ★ Description added to colMap, keys, and aliases ★
+                    var colMap={date:-1,rack:-1,material:-1,description:-1,ean:-1,qty:-1,action:-1,packing:-1,box:-1};
+                    var keys=['date','rack','material','description','ean','qty','action','packing','box'];
+                    var aliases={
+                        date:['date','dt'],
+                        rack:['rack','location'],
+                        material:['material','item'],
+                        description:['description','desc','material description'], 
+                        ean:['ean','barcode'],
+                        qty:['qty','quantity'],
+                        action:['action','type'],
+                        packing:['packing','pack'],
+                        box:['box','boxno']
+                    };
                     
                     keys.forEach(function(k){
                         aliases[k].forEach(function(a){
@@ -2444,7 +2460,6 @@ function processLocBulkUpload(){
                         return today();
                     }
 
-                    // Pehle se existing data lo
                     var existingData = DB.get('location_master');
                     var added=0,skipped=0,errorRows=[];
                     var userName=APP.currentUser?APP.currentUser.name:'Bulk Upload';
@@ -2456,6 +2471,10 @@ function processLocBulkUpload(){
 
                         var rack=colMap.rack>=0?String(r[colMap.rack]||'').trim().toUpperCase():'';
                         var material=colMap.material>=0?String(r[colMap.material]||'').trim():'';
+                        
+                        // ★ Extract Description safely ★
+                        var description=colMap.description>=0?String(r[colMap.description]||'').trim():'';
+                        
                         var ean=colMap.ean>=0?String(r[colMap.ean]||'').trim():'';
                         var qty=colMap.qty>=0?parseInt(r[colMap.qty])||0:0;
                         var action=colMap.action>=0?String(r[colMap.action]||'').trim().toUpperCase():'BULK';
@@ -2471,7 +2490,7 @@ function processLocBulkUpload(){
                             rack:rack,
                             ean:ean,
                             material:material,
-                            description:material,
+                            description:description||material, // ★ Save description (fallback to material name if empty)
                             quantity:qty,
                             packing:packing,
                             box:box,
@@ -2483,7 +2502,6 @@ function processLocBulkUpload(){
                         added++;
                     }
 
-                    // Ek hi baar DB.set call karo (No UI Hang)
                     DB.set('location_master', existingData);
 
                     var t1=performance.now();

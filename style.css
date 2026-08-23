@@ -3,58 +3,78 @@
    Glass Morphism + SAP Fiori Design System
    ============================================================ */
 
+/* ============================================================
+   VIP INDUSTRIES LIMITED MD20 — WMS STYLESHEET
+   SAP Fiori Design System (Clean & Flat)
+   ============================================================ */
+
 :root {
-    --font-display: 'Orbitron', monospace;
-    --font-body: 'Inter', -apple-system, sans-serif;
+    /* ★ Changed to SAP "72" Font */
+    --font-display: "72", "72full", Arial, sans-serif;
+    --font-body: "72", "72full", Arial, sans-serif;
     --sidebar-w: 250px;
     --shell-h: 54px;
-    --radius: 12px;
-    --radius-sm: 8px;
-    --transition: .25s cubic-bezier(.4,0,.2,1);
-    --shadow: 0 4px 24px rgba(0,0,0,.2);
-    --shadow-lg: 0 12px 48px rgba(0,0,0,.35);
+    --radius: 8px; /* Fiori uses slightly less rounded corners */
+    --radius-sm: 4px;
+    --transition: .2s cubic-bezier(.4,0,.2,1);
+    --shadow: 0 2px 12px rgba(0,0,0,.1);
+    --shadow-lg: 0 8px 32px rgba(0,0,0,.2);
     --glass-bg: rgba(255,255,255,.04);
     --glass-border: rgba(255,255,255,.08);
-    --glass-blur: blur(16px);
+    --glass-blur: blur(12px);
 }
-/* SAP Fiori Typography & Base Styles */
+
+/* Force SAP font everywhere and remove cyber letter-spacing */
 * {
-    font-family: "72", "72full", Arial, sans-serif;
+    font-family: "72", "72full", Arial, sans-serif !important;
+    letter-spacing: normal !important;
 }
 
 body {
     font-size: 14px;
-    letter-spacing: 0.01em; /* SAP uses slight letter spacing */
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.5;
+    overflow-x: hidden;
+    transition:background var(--transition),color var(--transition);
 }
 
-/* SAP-style flat buttons */
-.btn, .btn-glass, .btn-primary, .btn-danger, .btn-warning, .btn-info {
-    border-radius: 4px !important; /* Fiori uses slightly sharp corners */
-    text-transform: none !important; /* Normal case, not UPPERCASE */
-    letter-spacing: normal !important;
-    font-weight: 600;
-    box-shadow: none !important; /* Fiori prefers flat buttons */
-}
-
-/* SAP-style Headers */
+/* Remove uppercase and weird spacing from headers */
 .section-header h2 {
-    text-transform: none;
-    font-weight: 700;
-    letter-spacing: -0.01em;
+    text-transform: none !important;
+    font-weight: 700 !important;
+    letter-spacing: -0.01em !important;
 }
 
-/* SAP-style Sidebar (Shell Bar) */
+/* Remove uppercase from Sidebar */
 .sidebar-logo strong {
-    text-transform: uppercase;
-    font-weight: 700;
-    font-size: 12px;
-    letter-spacing: 0.5px;
+    text-transform: none !important;
+    font-weight: 700 !important;
+    letter-spacing: normal !important;
+}
+.sidebar-logo small {
+    text-transform: none !important;
+    letter-spacing: normal !important;
 }
 
-/* SAP-style Inputs */
-.form-input, .input-icon input {
-    border-radius: 4px;
-    font-family: "72", Arial, sans-serif !important;
+/* Remove uppercase from Login Page */
+.login-brand h1 {
+    font-family: "72", "72full", Arial, sans-serif !important;
+    text-transform: none !important;
+    letter-spacing: -0.5px !important;
+    font-weight: 700 !important;
+}
+.login-brand p {
+    text-transform: none !important;
+    letter-spacing: normal !important;
+}
+
+/* Make buttons flat like SAP */
+.btn, .btn-glass, .btn-primary, .btn-danger, .btn-warning, .btn-info {
+    text-transform: none !important;
+    letter-spacing: normal !important;
+    border-radius: var(--radius-sm) !important;
+    box-shadow: none !important;
 }
 
 [data-theme="dark"] {
@@ -679,4 +699,129 @@ textarea.form-input{resize:vertical;min-height:70px}
 }
 @media(max-width:480px){
     .report-grid{grid-template-columns:1fr}
+}
+
+/* ============================================================
+   SAP FIORI LARGER FONT & SPACING OVERRIDES
+   ============================================================ */
+
+/* 1. Base Body Text Size (14px -> 15px) */
+body {
+    font-size: 15px !important;
+    line-height: 1.6 !important;
+}
+
+/* 2. Headings & Titles */
+.section-header h2 {
+    font-size: 22px !important;
+}
+.card-title {
+    font-size: 14px !important;
+    margin-bottom: 16px !important;
+}
+.modal-header h3 {
+    font-size: 17px !important;
+}
+
+/* 3. Sidebar Navigation */
+.sidebar-logo strong {
+    font-size: 12px !important;
+}
+.sidebar-logo small {
+    font-size: 10px !important;
+}
+.nav-item {
+    font-size: 14px !important;
+    padding: 12px 18px !important;
+}
+.nav-item i:first-child {
+    font-size: 20px !important;
+}
+.nav-sub-item {
+    font-size: 13px !important;
+    padding: 10px 18px 10px 50px !important;
+}
+
+/* 4. Shell Bar (Top Header) */
+#breadcrumb .bc-item {
+    font-size: 14px !important;
+}
+.global-search input {
+    font-size: 14px !important;
+    padding: 9px 38px 9px 36px !important;
+}
+.user-menu span {
+    font-size: 14px !important;
+}
+
+/* 5. Forms & Inputs */
+.form-group label {
+    font-size: 13px !important;
+    margin-bottom: 6px !important;
+}
+.form-input {
+    font-size: 14px !important;
+    padding: 10px 12px !important;
+}
+select.form-input {
+    height: 40px !important;
+}
+
+/* 6. Buttons */
+.btn {
+    font-size: 14px !important;
+    padding: 10px 18px !important;
+    border-radius: 4px !important;
+}
+.btn-sm {
+    font-size: 12px !important;
+    padding: 7px 12px !important;
+}
+.btn-icon {
+    width: 34px !important;
+    height: 34px !important;
+    font-size: 16px !important;
+}
+
+/* 7. Tables (Data Grid) */
+.data-table {
+    font-size: 14px !important;
+}
+.data-table th {
+    font-size: 12px !important;
+    padding: 12px 14px !important;
+}
+.data-table td {
+    padding: 11px 14px !important;
+}
+
+/* 8. KPI Cards (Dashboard Numbers) */
+.kpi-value {
+    font-size: 30px !important;
+}
+.kpi-label {
+    font-size: 12px !important;
+}
+.kpi-icon {
+    width: 42px !important;
+    height: 42px !important;
+    font-size: 20px !important;
+}
+
+/* 9. Badges */
+.badge {
+    font-size: 12px !important;
+    padding: 4px 10px !important;
+}
+
+/* 10. Login Page Text */
+.login-brand h1 {
+    font-size: 22px !important;
+}
+.login-brand p {
+    font-size: 13px !important;
+}
+.btn-glass-login {
+    font-size: 15px !important;
+    padding: 14px !important;
 }

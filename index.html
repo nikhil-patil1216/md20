@@ -1,55 +1,50 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="light">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="manifest" href="manifest.json">
-    <meta name="theme-color" content="#00E5A0">
+    <meta name="theme-color" content="#0A6ED1">
     <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
     <meta name="mobile-web-app-capable" content="yes">
-    <title>VIP INDUSTRIES LIMITED MD20 — Warehouse Management System</title>
+    <title>VIP Industries Ltd. (MD20) — Warehouse Management System</title>
     <link href="https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://ui5.sap.com/resources/sap/ui/core/themes/base/fonts/72-font.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js"></script>
-    <link rel="stylesheet" href="style.css">
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
-    <!-- SAP Fiori "72" Font -->
-<link rel="stylesheet" href="https://ui5.sap.com/resources/sap/ui/core/themes/base/fonts/72-font.css">
+    <link rel="stylesheet" href="style.css">
 </head>
 <body>
+
     <!-- LOGIN PAGE -->
     <div id="loginPage">
         <canvas id="matrixCanvas"></canvas>
         <div class="scan-line"></div>
         <div class="login-card">
             <div class="login-brand">
-                <div class="brand-icon"><i class='bx bxs-building-house'></i></div>
-                <h1>VIP INDUSTRIES LIMITED <span>(MD20)</span></h1>
+                <div class="brand-icon"><i class="bx bxs-building-house"></i></div>
+                <h1>VIP Industries Limited <span>(MD20)</span></h1>
                 <p>Warehouse Management System</p>
             </div>
             <form id="loginForm" autocomplete="off">
                 <div class="form-group">
                     <label>Username</label>
                     <div class="input-icon">
-                        <i class='bx bx-user'></i>
+                        <i class="bx bx-user"></i>
                         <input type="text" id="loginUser" placeholder="Enter username" required>
                     </div>
                 </div>
                 <div class="form-group">
                     <label>Password</label>
                     <div class="input-icon">
-                        <i class='bx bx-lock-alt'></i>
+                        <i class="bx bx-lock-alt"></i>
                         <input type="password" id="loginPass" placeholder="Enter password" required>
                     </div>
                 </div>
-                <button type="submit" class="btn-glass-login">
-                    <span>ACCESS SYSTEM</span>
-                    <i class='bx bx-log-in'></i>
-                </button>
+                <button type="submit" class="btn-glass-login"><span>Sign In</span><i class="bx bx-log-in"></i></button>
             </form>
             <div class="login-footer">Secured Enterprise Access Portal</div>
         </div>
@@ -57,59 +52,64 @@
 
     <!-- MAIN APP -->
     <div id="mainApp" style="display:none">
-               <aside id="sidebar">
+        <aside id="sidebar">
             <div class="sidebar-header">
                 <div class="sidebar-logo">
                     <img src="https://z-cdn-media.chatglm.cn/files/3739b31e-9d0d-42c1-be57-77783d6b96db.png?auth_key=1887329044-b9e8ba0dd8d84ecca3a3be593df3f2cf-0-10bfe59c0a274860bde6b1d4ca8face5" alt="VIP Logo" class="sidebar-logo-img">
                     <div>
-                        <strong>INDUSTRIES</strong>
+                        <strong>VIP Industries Ltd.</strong>
                         <small>MD20 — WMS</small>
                     </div>
                 </div>
-                <button id="sidebarClose" class="sidebar-close-btn"><i class='bx bx-x'></i></button>
+                <button id="sidebarClose" class="sidebar-close-btn"><i class="bx bx-x"></i></button>
             </div>
-            
             <nav id="sidebarNav"></nav>
             <div class="sidebar-footer">
                 <div class="dev-credit">
-                    <i class='bx bx-code-alt'></i>
+                    <i class="bx bx-code-alt"></i>
                     <span>Developed by <strong>Nikhil Patil</strong></span>
                 </div>
             </div>
         </aside>
         <div id="sidebarOverlay" class="sidebar-overlay"></div>
+
         <div id="mainContent">
             <header id="shellBar">
                 <div class="shell-left">
-                    <button id="menuToggle" class="shell-btn"><i class='bx bx-menu'></i></button>
+                    <button id="menuToggle" class="shell-btn" title="Toggle sidebar"><i class="bx bx-menu"></i></button>
                     <div id="breadcrumb"><span class="bc-item active" id="bcCurrent">Dashboard</span></div>
                 </div>
                 <div class="shell-center">
                     <div id="globalSearch" class="global-search">
-                        <i class='bx bx-search'></i>
-                        <input type="text" id="searchInput" placeholder="Search everywhere... (Ctrl+K)">
+                        <i class="bx bx-search"></i>
+                        <input type="text" id="searchInput" placeholder="Search material, EAN, OBD, vehicle, invoice...">
                         <kbd>Ctrl+K</kbd>
                     </div>
                 </div>
                 <div class="shell-right">
-                    <button id="notifBtn" class="shell-btn notif-btn">
-                        <i class='bx bx-bell'></i>
+                    <button id="notifBtn" class="shell-btn" title="Notifications">
+                        <i class="bx bx-bell"></i>
                         <span class="notif-badge" id="notifBadge" style="display:none">0</span>
                     </button>
-                    <button id="themeToggle" class="shell-btn"><i class='bx bx-moon'></i></button>
+                    <button id="helpBtn" class="shell-btn" title="Help"><i class="bx bx-help-circle"></i></button>
+                    <button id="themeToggle" class="shell-btn" title="Toggle compact density"><i class="bx bx-font-size"></i></button>
                     <div class="user-menu" id="userMenu">
                         <div class="user-avatar" id="userAvatar">A</div>
-                        <span id="userName">Admin</span>
-                        <i class='bx bx-chevron-down'></i>
+                        <div class="um-meta">
+                            <span id="userName">Admin</span>
+                            <small id="userRole">—</small>
+                        </div>
+                        <i class="bx bx-chevron-down"></i>
                         <div class="user-dropdown" id="userDropdown">
-                            <a href="#" id="ddProfile"><i class='bx bx-user'></i> Profile</a>
-                            <a href="#" id="ddPassword"><i class='bx bx-lock'></i> Change Password</a>
+                            <a href="#" id="ddProfile"><i class="bx bx-user"></i> Profile</a>
+                            <a href="#" id="ddPassword"><i class="bx bx-lock"></i> Change Password</a>
                             <hr>
-                            <a href="#" id="ddLogout"><i class='bx bx-log-out'></i> Logout</a>
+                            <a href="#" id="ddLogout"><i class="bx bx-log-out"></i> Logout</a>
                         </div>
                     </div>
                 </div>
             </header>
+
             <div id="notifPanel" class="notif-panel">
                 <div class="notif-header">
                     <h3>Notifications</h3>
@@ -117,6 +117,7 @@
                 </div>
                 <div id="notifList" class="notif-list"></div>
             </div>
+
             <main id="contentArea"></main>
         </div>
     </div>
@@ -130,16 +131,16 @@
     <div id="scannerModal" class="modal-overlay" style="z-index:99999;display:none;">
         <div class="modal-container" style="max-width:420px;">
             <div class="modal-header">
-                <h3><i class='bx bx-qr-scan'></i> Scan Code</h3>
+                <h3><i class="bx bx-qr-scan"></i> Scan Code</h3>
                 <button class="modal-close" onclick="closeScannerModal()"><i class="bx bx-x"></i></button>
             </div>
             <div class="modal-body" style="text-align:center;padding:10px;">
-                <div style="margin-bottom:15px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">
-                    <button class="btn btn-glass" onclick="startCameraScan()"><i class="bx bx-camera"></i> Camera</button>
-                    <button class="btn btn-glass" onclick="focusForBluetoothScanner()"><i class="bx bx-bluetooth"></i> Device</button>
+                <div style="margin-bottom:12px;display:flex;gap:8px;justify-content:center;flex-wrap:wrap;">
+                    <button class="btn btn-secondary" onclick="startCameraScan()"><i class="bx bx-camera"></i> Camera</button>
+                    <button class="btn btn-secondary" onclick="focusForBluetoothScanner()"><i class="bx bx-bluetooth"></i> Device</button>
                 </div>
-                <div id="qr-reader" style="width:100%;border-radius:8px;overflow:hidden;background:#000;min-height:50px;"></div>
-                <p style="color:var(--text-muted);margin-top:10px;font-size:12px;">Camera open hone pe barcode ko saamne rakhna.</p>
+                <div id="qr-reader" style="width:100%;border-radius:6px;overflow:hidden;background:#000;min-height:50px;"></div>
+                <p style="color:var(--text-muted);margin-top:10px;font-size:12px;">Hold the barcode in front of the camera.</p>
             </div>
         </div>
     </div>
@@ -177,5 +178,6 @@
     </div>
 
     <script src="script.js"></script>
+    <script src="ui-enterprise.js"></script>
 </body>
 </html>

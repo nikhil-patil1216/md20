@@ -111,14 +111,16 @@ async function pullAll() {
             var t = ALL_TABLES[i];
             var res = await supabaseClient.from(t).select('data');
             
-            if (res.error) {
-                console.warn('⚠️ Table not accessible:', t, '—', res.error.message);
-                if (!MEMORY_DB[t]) {
-                    try { MEMORY_DB[t] = JSON.parse(localStorage.getItem('wms_' + t) || '[]'); }
-                    catch(e) { MEMORY_DB[t] = []; }
-                }
-                continue;
-            }
+if (res.error) {
+    console.error('❌ Table "' + t + '" ERROR:', res.error.message);
+    console.error('   → Solution: Supabase SQL Editor mein supabase_setup.sql run karo');
+    console.error('   → Check: Dashboard → Database → Tables mein "' + t + '" exist karta hai?');
+    if (!MEMORY_DB[t]) {
+        try { MEMORY_DB[t] = JSON.parse(localStorage.getItem('wms_' + t) || '[]'); }
+        catch(e) { MEMORY_DB[t] = []; }
+    }
+    continue;
+}
             
             if (res.data && res.data.length > 0) {
                 var parsed = res.data.map(function(row) { return row.data; }).filter(function(d) { return d !== null; });
@@ -133,7 +135,11 @@ async function pullAll() {
         }
         
         _isSyncing = false;
-        console.log('✅ Data sync complete!');
+       console.log('✅ Data sync complete!');
+if (APP.currentUser) {
+    console.log('👤 Logged in as:', APP.currentUser.name, '(' + APP.currentUser.role + ')');
+    console.log('🌐 Realtime active — sab users ka data automatically sync hoga');
+}
         
         if (APP.currentUser && APP.currentSection) {
             renderSection(APP.currentSection, APP.currentSub);
@@ -150,38 +156,79 @@ async function pullAll() {
 // Realtime Subscription
 if (supabaseClient) {
     try {
-        supabaseClient.channel('wms-live-all').on('postgres_changes', {
-            event: '*', schema: 'public', table: '*'
-        }, function(p) {
-            var tableName = p.table;
-            if (!tableName || !MEMORY_DB[tableName]) return;
-            
-            if (_localWriteTs[tableName] && (Date.now() - _localWriteTs[tableName]) < 3000) return;
-            
-            if (p.eventType === 'DELETE' && p.old && p.old.id) {
-                MEMORY_DB[tableName] = MEMORY_DB[tableName].filter(function(item) { return item.id !== p.old.id; });
-            } else if (p.new && p.new.data) {
-                var newItem = p.new.data;
-                var found = false;
-                for (var j=0; j<MEMORY_DB[tableName].length; j++) {
-                    if (MEMORY_DB[tableName][j].id === newItem.id) {
-                        MEMORY_DB[tableName][j] = newItem;
-                        found = true;
-                        break;
+        ALL_TABLES.forEach(function(tableName) {
+            supabaseClient
+                .channel('wms-realtime-' + tableName)
+                .on('postgres_changes',
+                    { event: '*', schema: 'public', table: tableName },
+                    function(payload) {
+                        handleRealtimeChange(tableName, payload);
                     }
-                }
-                if (!found) MEMORY_DB[tableName].push(newItem);
-            }
-            
-            try { localStorage.setItem('wms_' + tableName, JSON.stringify(MEMORY_DB[tableName])); } catch(e) {}
-            
-            if (APP.currentUser && APP.currentSection && !_isSyncing) {
-                renderSection(APP.currentSection, APP.currentSub);
-                if (tableName === 'notifications') updateNotifBadge();
-            }
-        }).subscribe();
+                )
+                .subscribe(function(status) {
+                    if (status === 'SUBSCRIBED') {
+                        console.log('📡 Realtime ready:', tableName);
+                    } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+                        console.error('❌ Realtime channel error:', tableName, status);
+                    }
+                });
+        });
+        console.log('✅ Realtime subscriptions enabled for', ALL_TABLES.length, 'tables');
     } catch(e) {
-        console.warn('Realtime error:', e);
+        console.warn('Realtime setup error:', e);
+    }
+}
+
+// Realtime event handler — global function
+function handleRealtimeChange(tableName, payload) {
+    if (!MEMORY_DB[tableName]) {
+        try { MEMORY_DB[tableName] = JSON.parse(localStorage.getItem('wms_' + tableName) || '[]'); }
+        catch(e) { MEMORY_DB[tableName] = []; }
+    }
+
+    // Apne local writes ko skip karo (3 second window)
+    if (_localWriteTs[tableName] && (Date.now() - _localWriteTs[tableName]) < 3000) {
+        return;
+    }
+
+    if (payload.eventType === 'DELETE' && payload.old && payload.old.id) {
+        // Delete event — item hatao
+        MEMORY_DB[tableName] = MEMORY_DB[tableName].filter(function(item) {
+            return item.id !== payload.old.id;
+        });
+        console.log('🗑️ Realtime DELETE:', tableName, payload.old.id);
+    } else if (payload.new && payload.new.data) {
+        // Insert/Update event
+        var newItem = payload.new.data;
+        var found = false;
+        for (var j = 0; j < MEMORY_DB[tableName].length; j++) {
+            if (MEMORY_DB[tableName][j].id === newItem.id) {
+                // Avoid overwriting if same content (prevent infinite loop)
+                if (JSON.stringify(MEMORY_DB[tableName][j]) === JSON.stringify(newItem)) return;
+                MEMORY_DB[tableName][j] = newItem;
+                found = true;
+                break;
+            }
+        }
+        if (!found) MEMORY_DB[tableName].push(newItem);
+        console.log('🔄 Realtime UPDATE:', tableName, newItem.id);
+    }
+
+    // localStorage update
+    try {
+        localStorage.setItem('wms_' + tableName, JSON.stringify(MEMORY_DB[tableName]));
+    } catch(e) {}
+
+    // UI re-render sirf agar user login hai aur sync nahi chal raha
+    if (APP.currentUser && APP.currentSection && !_isSyncing) {
+        // Debounce UI re-render (100ms wait, multiple events combine ho jaye)
+        clearTimeout(window._realtimeRenderTimer);
+        window._realtimeRenderTimer = setTimeout(function() {
+            renderSection(APP.currentSection, APP.currentSub);
+            if (tableName === 'notifications' && typeof updateNotifBadge === 'function') {
+                updateNotifBadge();
+            }
+        }, 100);
     }
 }
 

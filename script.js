@@ -99,48 +99,113 @@ async function deleteServerRow(key, id) {
     }
 }
 
-// Pull all data
-async function pullAll() {
-    if (!supabaseClient) return false;
-    
-    _isSyncing = true;
-    console.log('🔄 Starting data sync from Supabase...');
-    
+// Pull a SINGLE table with pagination (fetches ALL rows in batches of 1000)
+async function pullTable(tableName) {
+    if (!supabaseClient) return [];
+
     try {
-        for (var i = 0; i < ALL_TABLES.length; i++) {
-            var t = ALL_TABLES[i];
-            var res = await supabaseClient.from(t).select('data');
-            
-if (res.error) {
-    console.error('❌ Table "' + t + '" ERROR:', res.error.message);
-    console.error('   → Solution: Supabase SQL Editor mein supabase_setup.sql run karo');
-    console.error('   → Check: Dashboard → Database → Tables mein "' + t + '" exist karta hai?');
-    if (!MEMORY_DB[t]) {
-        try { MEMORY_DB[t] = JSON.parse(localStorage.getItem('wms_' + t) || '[]'); }
-        catch(e) { MEMORY_DB[t] = []; }
-    }
-    continue;
-}
-            
+        var allData = [];
+        var pageSize = 1000;  // Supabase max per query
+        var from = 0;
+        var hasMore = true;
+        var pageCount = 0;
+
+        while (hasMore) {
+            pageCount++;
+            var res = await supabaseClient
+                .from(tableName)
+                .select('data')
+                .range(from, from + pageSize - 1);
+
+            if (res.error) {
+                console.error('❌ pullTable error [' + tableName + ' page ' + pageCount + ']:', res.error.message);
+                break;
+            }
+
             if (res.data && res.data.length > 0) {
-                var parsed = res.data.map(function(row) { return row.data; }).filter(function(d) { return d !== null; });
-                MEMORY_DB[t] = parsed;
-                try { localStorage.setItem('wms_' + t, JSON.stringify(parsed)); } catch(e) {}
-            } else {
-                if (!MEMORY_DB[t]) {
-                    try { MEMORY_DB[t] = JSON.parse(localStorage.getItem('wms_' + t) || '[]'); }
-                    catch(e) { MEMORY_DB[t] = []; }
+                var parsed = res.data.map(function(row) {
+                    return row.data;
+                }).filter(function(d) { return d !== null; });
+                allData = allData.concat(parsed);
+
+                // If we got fewer than pageSize rows, we've reached the end
+                if (res.data.length < pageSize) {
+                    hasMore = false;
+                } else {
+                    from += pageSize;
                 }
+            } else {
+                hasMore = false;
             }
         }
-        
-        _isSyncing = false;
-       console.log('✅ Data sync complete!');
-if (APP.currentUser) {
-    console.log('👤 Logged in as:', APP.currentUser.name, '(' + APP.currentUser.role + ')');
-    console.log('🌐 Realtime active — sab users ka data automatically sync hoga');
+
+        MEMORY_DB[tableName] = allData;
+
+        // Save to localStorage (with size check — split if too big)
+        safeSetLocalStorage(tableName, allData);
+
+        console.log('✅ ' + tableName + ': ' + allData.length + ' records loaded (' + pageCount + ' pages)');
+        return allData;
+
+    } catch(e) {
+        console.error('❌ pullTable catch [' + tableName + ']:', e);
+        // Fallback to localStorage
+        if (!MEMORY_DB[tableName]) {
+            try { MEMORY_DB[tableName] = JSON.parse(localStorage.getItem('wms_' + tableName) || '[]'); }
+            catch(err) { MEMORY_DB[tableName] = []; }
+        }
+        return MEMORY_DB[tableName];
+    }
 }
-        
+
+// Safe localStorage save — handles large datasets
+function safeSetLocalStorage(tableName, data) {
+    try {
+        var str = JSON.stringify(data);
+
+        if (str.length < 4500000) {
+            // Under 4.5MB — save normally
+            localStorage.setItem('wms_' + tableName, str);
+        } else {
+            // Over 4.5MB — save last 2000 items as cache (most recent)
+            // Data still in MEMORY_DB, so it'll work during session
+            console.warn('⚠️ ' + tableName + ' is large (' + (str.length/1024/1024).toFixed(1) + 'MB), saving last 2000 items as cache');
+            var cache = data.slice(-2000);
+            try {
+                localStorage.setItem('wms_' + tableName, JSON.stringify(cache));
+            } catch(e2) {
+                // Even cache is too big — clear it
+                localStorage.removeItem('wms_' + tableName);
+                console.warn('⚠️ ' + tableName + ' cache also too big, using memory only');
+            }
+        }
+    } catch(e) {
+        console.warn('⚠️ localStorage save failed for ' + tableName + ':', e.message);
+    }
+}
+
+// Pull ALL data with pagination
+async function pullAll() {
+    if (!supabaseClient) return false;
+
+    _isSyncing = true;
+    console.log('🔄 Starting FULL data sync from Supabase (with pagination)...');
+
+    try {
+        var totalRows = 0;
+        var tableCounts = {};
+
+        for (var i = 0; i < ALL_TABLES.length; i++) {
+            var t = ALL_TABLES[i];
+            var data = await pullTable(t);
+            tableCounts[t] = data.length;
+            totalRows += data.length;
+        }
+
+        _isSyncing = false;
+        console.log('✅ Data sync complete! Total: ' + totalRows + ' rows across ' + ALL_TABLES.length + ' tables');
+        console.log('📊 Table counts:', tableCounts);
+
         if (APP.currentUser && APP.currentSection) {
             renderSection(APP.currentSection, APP.currentSub);
             if (typeof updateNotifBadge === 'function') updateNotifBadge();
@@ -148,7 +213,7 @@ if (APP.currentUser) {
         return true;
     } catch(e) {
         _isSyncing = false;
-        console.warn('❌ pullAll error:', e);
+        console.error('❌ pullAll error:', e);
         return false;
     }
 }

@@ -6681,3 +6681,637 @@ function exportReportPDF(){
     showToast('PDF downloaded!','success');
     logAction('Reports','EXPORT_PDF',d.title+' | '+d.period);
 }
+(function() {
+    'use strict';
+
+    // Don't run twice
+    if (window.__WMS_SYNC_SERVICE__) {
+        console.log('ℹ️ Background Sync Service already running');
+        return;
+    }
+    window.__WMS_SYNC_SERVICE__ = true;
+
+    // ==================== CONFIG ====================
+    var SYNC_CONFIG = {
+        PULL_INTERVAL_MS: 30000,      // Pull from Supabase every 30 sec
+        PUSH_INTERVAL_MS: 5000,       // Push queue to Supabase every 5 sec
+        MAX_RETRIES: 3,               // Max retry attempts per item
+        BATCH_SIZE: 500,              // Rows per push batch
+        PULL_BATCH_SIZE: 1000,        // Rows per pull batch (Supabase max)
+        CONFLICT_WINDOW_MS: 5000,     // Skip realtime events for 5 sec after local write
+        ENABLED: true                 // Master switch
+    };
+
+    // ==================== STATE ====================
+    var writeQueue = {};        // { tableName: [{ id, data, action, retries, ts }] }
+    var pullTimers = {};        // Per-table pull timers
+    var pushTimer = null;
+    var lastPullTs = {};        // { tableName: timestamp }
+    var localWriteTs = {};      // { tableName+itemId: timestamp }
+    var isSyncing = false;
+    var syncStats = {
+        pushed: 0,
+        pulled: 0,
+        failed: 0,
+        lastPushAt: null,
+        lastPullAt: null,
+        queueSize: 0
+    };
+
+    // Try to load queue from localStorage (survives page reload)
+    try {
+        var saved = localStorage.getItem('wms_sync_queue');
+        if (saved) {
+            writeQueue = JSON.parse(saved) || {};
+            console.log('📦 Loaded ' + Object.keys(writeQueue).length + ' queued tables from localStorage');
+        }
+    } catch(e) {}
+
+    function saveQueue() {
+        try {
+            localStorage.setItem('wms_sync_queue', JSON.stringify(writeQueue));
+            // Update stats
+            var total = 0;
+            Object.keys(writeQueue).forEach(function(t) { total += writeQueue[t].length; });
+            syncStats.queueSize = total;
+        } catch(e) {
+            console.warn('⚠️ Could not save sync queue:', e.message);
+        }
+    }
+
+    // ==================== UTILITY ====================
+    function getSupabase() {
+        if (typeof supabaseClient !== 'undefined') return supabaseClient;
+        return null;
+    }
+
+    function getAllTables() {
+        if (typeof ALL_TABLES !== 'undefined') return ALL_TABLES;
+        return [];
+    }
+
+    function log(msg, level) {
+        level = level || 'info';
+        var prefix = '🔄 [BG-SYNC]';
+        if (level === 'error') prefix = '❌ [BG-SYNC]';
+        else if (level === 'success') prefix = '✅ [BG-SYNC]';
+        else if (level === 'warn') prefix = '⚠️ [BG-SYNC]';
+        console.log(prefix, msg);
+    }
+
+    // Track local writes (to skip realtime events for these items)
+    function trackLocalWrite(tableName, itemId) {
+        var key = tableName + ':' + itemId;
+        localWriteTs[key] = Date.now();
+    }
+
+    function isLocalRecentWrite(tableName, itemId) {
+        var key = tableName + ':' + itemId;
+        var ts = localWriteTs[key];
+        if (!ts) return false;
+        if (Date.now() - ts < SYNC_CONFIG.CONFLICT_WINDOW_MS) return true;
+        delete localWriteTs[key];
+        return false;
+    }
+
+    // Cleanup old timestamps every minute
+    setInterval(function() {
+        var now = Date.now();
+        var maxAge = 30000;  // 30 sec
+        Object.keys(localWriteTs).forEach(function(key) {
+            if (now - localWriteTs[key] > maxAge) {
+                delete localWriteTs[key];
+            }
+        });
+    }, 60000);
+
+    // ==================== QUEUE OPERATIONS ====================
+
+    // Add an item to the write queue
+    function enqueueWrite(tableName, item, action) {
+        if (!writeQueue[tableName]) writeQueue[tableName] = [];
+
+        action = action || 'upsert';  // 'upsert' or 'delete'
+
+        // Find existing queue entry for same item — replace it
+        var existingIdx = -1;
+        for (var i = 0; i < writeQueue[tableName].length; i++) {
+            if (writeQueue[tableName][i].id === item.id) {
+                existingIdx = i;
+                break;
+            }
+        }
+
+        var entry = {
+            id: item.id,
+            data: item,
+            action: action,
+            retries: 0,
+            ts: Date.now()
+        };
+
+        if (existingIdx >= 0) {
+            writeQueue[tableName][existingIdx] = entry;
+        } else {
+            writeQueue[tableName].push(entry);
+        }
+
+        // Track local write
+        trackLocalWrite(tableName, item.id);
+
+        saveQueue();
+    }
+
+    // Process the queue — push to Supabase
+    async function processQueue() {
+        var sb = getSupabase();
+        if (!sb || !SYNC_CONFIG.ENABLED) return;
+
+        var tableNames = Object.keys(writeQueue);
+        if (tableNames.length === 0) return;
+
+        for (var t = 0; t < tableNames.length; t++) {
+            var tableName = tableNames[t];
+            var queue = writeQueue[tableName];
+            if (!queue || queue.length === 0) continue;
+
+            // Separate upserts and deletes
+            var upserts = queue.filter(function(e) { return e.action === 'upsert'; });
+            var deletes = queue.filter(function(e) { return e.action === 'delete'; });
+
+            // Process upserts in batches
+            for (var i = 0; i < upserts.length; i += SYNC_CONFIG.BATCH_SIZE) {
+                var batch = upserts.slice(i, i + SYNC_CONFIG.BATCH_SIZE);
+                var rows = batch.map(function(e) {
+                    return {
+                        id: e.id,
+                        data: e.data,
+                        created_at: new Date().toISOString()
+                    };
+                });
+
+                try {
+                    var res = await sb.from(tableName).upsert(rows, { onConflict: 'id' });
+                    if (res.error) {
+                        log('Push error [' + tableName + ']: ' + res.error.message, 'error');
+                        // Mark retries
+                        batch.forEach(function(e) { e.retries = (e.retries || 0) + 1; });
+                        // If max retries exceeded, drop the item
+                        batch = batch.filter(function(e) { return e.retries < SYNC_CONFIG.MAX_RETRIES; });
+                    } else {
+                        syncStats.pushed += batch.length;
+                        syncStats.lastPushAt = new Date().toISOString();
+                        // Remove from queue
+                        batch.forEach(function(e) {
+                            var idx = queue.indexOf(e);
+                            if (idx >= 0) queue.splice(idx, 1);
+                        });
+                    }
+                } catch(err) {
+                    log('Push exception [' + tableName + ']: ' + err.message, 'error');
+                    batch.forEach(function(e) { e.retries = (e.retries || 0) + 1; });
+                    batch = batch.filter(function(e) { return e.retries < SYNC_CONFIG.MAX_RETRIES; });
+                }
+            }
+
+            // Process deletes
+            for (var j = 0; j < deletes.length; j++) {
+                var entry = deletes[j];
+                try {
+                    var res2 = await sb.from(tableName).delete().eq('id', entry.id);
+                    if (res2.error) {
+                        log('Delete error [' + tableName + ']: ' + res2.error.message, 'error');
+                        entry.retries = (entry.retries || 0) + 1;
+                    } else {
+                        var dIdx = queue.indexOf(entry);
+                        if (dIdx >= 0) queue.splice(dIdx, 1);
+                    }
+                } catch(err) {
+                    entry.retries = (entry.retries || 0) + 1;
+                }
+            }
+
+            // Clean up empty table queues
+            if (queue.length === 0) {
+                delete writeQueue[tableName];
+            }
+
+            saveQueue();
+        }
+
+        // Update UI status if function exists
+        if (typeof updateSyncStatus === 'function') {
+            updateSyncStatus();
+        }
+    }
+
+    // ==================== SILENT PULLER ====================
+
+    // Pull a single table from Supabase silently (no UI block)
+    async function silentPullTable(tableName) {
+        var sb = getSupabase();
+        if (!sb || !SYNC_CONFIG.ENABLED) return;
+        if (typeof MEMORY_DB === 'undefined') return;
+
+        // Skip if already pulling this table
+        if (isSyncing && lastPullTs[tableName] && (Date.now() - lastPullTs[tableName] < 10000)) {
+            return;
+        }
+
+        lastPullTs[tableName] = Date.now();
+
+        try {
+            var allData = [];
+            var from = 0;
+            var hasMore = true;
+            var pageCount = 0;
+
+            while (hasMore && pageCount < 50) {  // Safety limit: 50 pages = 50,000 rows
+                pageCount++;
+                var res = await sb.from(tableName)
+                    .select('data')
+                    .range(from, from + SYNC_CONFIG.PULL_BATCH_SIZE - 1);
+
+                if (res.error) {
+                    log('Silent pull error [' + tableName + ']: ' + res.error.message, 'error');
+                    break;
+                }
+
+                if (res.data && res.data.length > 0) {
+                    var parsed = res.data.map(function(row) {
+                        return row.data;
+                    }).filter(function(d) { return d !== null; });
+                    allData = allData.concat(parsed);
+
+                    if (res.data.length < SYNC_CONFIG.PULL_BATCH_SIZE) {
+                        hasMore = false;
+                    } else {
+                        from += SYNC_CONFIG.PULL_BATCH_SIZE;
+                    }
+                } else {
+                    hasMore = false;
+                }
+            }
+
+            // Merge with local pending writes (don't lose unsynced data)
+            var localPendingIds = {};
+            if (writeQueue[tableName]) {
+                writeQueue[tableName].forEach(function(e) {
+                    localPendingIds[e.id] = e.data;
+                });
+            }
+
+            // Update memory
+            MEMORY_DB[tableName] = allData;
+
+            // Re-apply pending local writes (these haven't synced yet)
+            Object.keys(localPendingIds).forEach(function(id) {
+                var found = false;
+                for (var k = 0; k < allData.length; k++) {
+                    if (allData[k].id === id) {
+                        allData[k] = localPendingIds[id];
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    allData.push(localPendingIds[id]);
+                }
+            });
+
+            // Save to localStorage (with size check)
+            try {
+                var str = JSON.stringify(allData);
+                if (str.length < 4500000) {
+                    localStorage.setItem('wms_' + tableName, str);
+                } else {
+                    // Save last 2000 as cache
+                    localStorage.setItem('wms_' + tableName, JSON.stringify(allData.slice(-2000)));
+                }
+            } catch(e) {}
+
+            syncStats.pulled += allData.length;
+            syncStats.lastPullAt = new Date().toISOString();
+
+        } catch(err) {
+            log('Silent pull exception [' + tableName + ']: ' + err.message, 'error');
+        }
+    }
+
+    // Pull all tables silently
+    async function silentPullAll() {
+        if (!SYNC_CONFIG.ENABLED) return;
+        var sb = getSupabase();
+        if (!sb) return;
+
+        if (isSyncing) {
+            log('Skipping pull — sync already in progress', 'warn');
+            return;
+        }
+
+        isSyncing = true;
+        log('Silent background sync started...');
+
+        var tables = getAllTables();
+        for (var i = 0; i < tables.length; i++) {
+            await silentPullTable(tables[i]);
+        }
+
+        isSyncing = false;
+        log('Silent background sync complete', 'success');
+
+        // Re-render UI if logged in (but debounced, so no UI freeze)
+        if (typeof APP !== 'undefined' && APP.currentUser && APP.currentSection) {
+            clearTimeout(window._silentRenderTimer);
+            window._silentRenderTimer = setTimeout(function() {
+                if (typeof renderSection === 'function') {
+                    renderSection(APP.currentSection, APP.currentSub);
+                }
+                if (typeof updateNotifBadge === 'function') {
+                    updateNotifBadge();
+                }
+            }, 500);
+        }
+    }
+
+    // ==================== HOOK INTO DB OPERATIONS ====================
+
+    // Override DB.set to enqueue writes
+    function hookDB() {
+        if (typeof DB === 'undefined' || DB.__syncHooked) return;
+
+        var originalSet = DB.set.bind(DB);
+        var originalAdd = DB.add.bind(DB);
+        var originalUpdate = DB.update.bind(DB);
+        var originalRemove = DB.remove.bind(DB);
+
+        DB.set = function(k, v) {
+            // Call original (updates memory + localStorage + calls pushServer)
+            originalSet(k, v);
+
+            // Enqueue each item for background sync
+            if (Array.isArray(v)) {
+                v.forEach(function(item) {
+                    if (item && item.id) {
+                        enqueueWrite(k, item, 'upsert');
+                    }
+                });
+            }
+        };
+
+        DB.add = function(k, item) {
+            var result = originalAdd(k, item);
+            if (result && result.id) {
+                enqueueWrite(k, result, 'upsert');
+            }
+            return result;
+        };
+
+        DB.update = function(k, id, updates) {
+            var result = originalUpdate(k, id, updates);
+            if (result && result.id) {
+                enqueueWrite(k, result, 'upsert');
+            }
+            return result;
+        };
+
+        DB.remove = function(k, id) {
+            originalRemove(k, id);
+            if (id) {
+                enqueueWrite(k, { id: id }, 'delete');
+            }
+        };
+
+        DB.__syncHooked = true;
+        log('DB operations hooked (queue-based writes enabled)');
+    }
+
+    // ==================== REALTIME HANDLER ====================
+
+    function setupRealtime() {
+        var sb = getSupabase();
+        if (!sb) return;
+
+        var tables = getAllTables();
+        tables.forEach(function(tableName) {
+            sb.channel('wms-bg-realtime-' + tableName)
+                .on('postgres_changes',
+                    { event: '*', schema: 'public', table: tableName },
+                    function(payload) {
+                        handleRealtimeEvent(tableName, payload);
+                    }
+                )
+                .subscribe(function(status) {
+                    if (status === 'SUBSCRIBED') {
+                        // Silent — don't spam console
+                    } else if (status === 'CHANNEL_ERROR') {
+                        log('Realtime channel error: ' + tableName, 'error');
+                    }
+                });
+        });
+
+        log('Realtime subscriptions active for ' + tables.length + ' tables', 'success');
+    }
+
+    function handleRealtimeEvent(tableName, payload) {
+        if (typeof MEMORY_DB === 'undefined') return;
+        if (!MEMORY_DB[tableName]) {
+            try { MEMORY_DB[tableName] = JSON.parse(localStorage.getItem('wms_' + tableName) || '[]'); }
+            catch(e) { MEMORY_DB[tableName] = []; }
+        }
+
+        // Get item ID
+        var itemId = null;
+        if (payload.new && payload.new.data) {
+            itemId = payload.new.data.id;
+        } else if (payload.old && payload.old.id) {
+            itemId = payload.old.id;
+        }
+
+        // Skip if we just wrote this item locally
+        if (itemId && isLocalRecentWrite(tableName, itemId)) {
+            return;
+        }
+
+        if (payload.eventType === 'DELETE' && payload.old && payload.old.id) {
+            // Remove from memory
+            MEMORY_DB[tableName] = MEMORY_DB[tableName].filter(function(item) {
+                return item.id !== payload.old.id;
+            });
+        } else if (payload.new && payload.new.data) {
+            var newItem = payload.new.data;
+            if (!newItem.id) return;
+
+            var found = false;
+            for (var j = 0; j < MEMORY_DB[tableName].length; j++) {
+                if (MEMORY_DB[tableName][j].id === newItem.id) {
+                    // Update only if different
+                    if (JSON.stringify(MEMORY_DB[tableName][j]) !== JSON.stringify(newItem)) {
+                        MEMORY_DB[tableName][j] = newItem;
+                    }
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                MEMORY_DB[tableName].push(newItem);
+            }
+        }
+
+        // Save to localStorage
+        try {
+            var str = JSON.stringify(MEMORY_DB[tableName]);
+            if (str.length < 4500000) {
+                localStorage.setItem('wms_' + tableName, str);
+            }
+        } catch(e) {}
+
+        // Update UI (debounced)
+        if (typeof APP !== 'undefined' && APP.currentUser && APP.currentSection && !isSyncing) {
+            clearTimeout(window._realtimeRenderTimer);
+            window._realtimeRenderTimer = setTimeout(function() {
+                if (typeof renderSection === 'function') {
+                    renderSection(APP.currentSection, APP.currentSub);
+                }
+            }, 300);
+        }
+    }
+
+    // ==================== START SERVICE ====================
+
+    function start() {
+        if (!SYNC_CONFIG.ENABLED) {
+            log('Background Sync Service DISABLED', 'warn');
+            return;
+        }
+
+        log('Enterprise Background Sync Service starting...', 'success');
+        log('Config: Pull every ' + (SYNC_CONFIG.PULL_INTERVAL_MS/1000) + 's, Push every ' + (SYNC_CONFIG.PUSH_INTERVAL_MS/1000) + 's');
+
+        // Hook DB operations
+        hookDB();
+
+        // Setup realtime (cross-user instant sync)
+        setTimeout(setupRealtime, 2000);
+
+        // Start push loop (process queue every 5 sec)
+        pushTimer = setInterval(processQueue, SYNC_CONFIG.PUSH_INTERVAL_MS);
+
+        // Start pull loop (refresh data every 30 sec)
+        setInterval(silentPullAll, SYNC_CONFIG.PULL_INTERVAL_MS);
+
+        // Process any existing queue immediately
+        setTimeout(processQueue, 3000);
+
+        // Initial silent pull after login (if logged in)
+        setTimeout(function() {
+            if (typeof APP !== 'undefined' && APP.currentUser) {
+                silentPullAll();
+            }
+        }, 5000);
+
+        // Hook into login — pull after login
+        if (typeof window.doLogin === 'function' && !window.doLogin.__syncHooked) {
+            var originalDoLogin = window.doLogin;
+            window.doLogin = async function(u, p) {
+                var result = await originalDoLogin(u, p);
+                if (result && typeof APP !== 'undefined' && APP.currentUser) {
+                    log('User logged in — triggering background sync');
+                    setTimeout(silentPullAll, 1000);
+                }
+                return result;
+            };
+            window.doLogin.__syncHooked = true;
+        }
+
+        // Hook into logout — flush queue before logout
+        if (typeof window.doLogout === 'function' && !window.doLogout.__syncHooked) {
+            var originalDoLogout = window.doLogout;
+            window.doLogout = async function() {
+                log('User logging out — flushing queue...');
+                await processQueue();
+                await new Promise(function(r) { setTimeout(r, 500); });
+                return originalDoLogout();
+            };
+            window.doLogout.__syncHooked = true;
+        }
+
+        // Online/offline detection
+        window.addEventListener('online', function() {
+            log('Back online — processing queue');
+            processQueue();
+            silentPullAll();
+        });
+
+        window.addEventListener('offline', function() {
+            log('Offline — writes queued, will sync when online', 'warn');
+        });
+
+        // Save queue before page unload
+        window.addEventListener('beforeunload', function() {
+            saveQueue();
+            // Try one last sync (best-effort, may not complete)
+            if (navigator.sendBeacon) {
+                // sendBeacon doesn't really work for Supabase, but we tried
+            }
+        });
+
+        log('Background Sync Service started successfully', 'success');
+    }
+
+    // ==================== PUBLIC API ====================
+    window.WMS_SYNC = {
+        // Manual triggers
+        syncNow: async function() {
+            log('Manual sync triggered');
+            await processQueue();
+            await silentPullAll();
+            log('Manual sync complete', 'success');
+        },
+
+        // Get sync status
+        getStatus: function() {
+            return {
+                enabled: SYNC_CONFIG.ENABLED,
+                queueSize: syncStats.queueSize,
+                pushed: syncStats.pushed,
+                pulled: syncStats.pulled,
+                failed: syncStats.failed,
+                lastPushAt: syncStats.lastPushAt,
+                lastPullAt: syncStats.lastPullAt,
+                isSyncing: isSyncing,
+                online: navigator.onLine
+            };
+        },
+
+        // Enable/disable
+        enable: function() { SYNC_CONFIG.ENABLED = true; log('Sync ENABLED'); },
+        disable: function() { SYNC_CONFIG.ENABLED = false; log('Sync DISABLED', 'warn'); },
+
+        // Force push all (used before logout)
+        flushAll: async function() {
+            await processQueue();
+        },
+
+        // Force pull all
+        pullAll: async function() {
+            await silentPullAll();
+        },
+
+        // Reset stats
+        resetStats: function() {
+            syncStats = { pushed: 0, pulled: 0, failed: 0, lastPushAt: null, lastPullAt: null, queueSize: 0 };
+            log('Stats reset');
+        }
+    };
+
+    // ==================== START ====================
+    // Start after a small delay to let other scripts initialize
+    setTimeout(start, 1000);
+
+    // Log final message
+    console.log('%c🔄 WMS Background Sync Service loaded', 'color: #0a6ed1; font-weight: bold; font-size: 14px');
+    console.log('%cUse WMS_SYNC.getStatus() to check sync status', 'color: #666; font-size: 11px');
+    console.log('%cUse WMS_SYNC.syncNow() to force sync', 'color: #666; font-size: 11px');
+
+})();

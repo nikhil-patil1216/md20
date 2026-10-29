@@ -602,6 +602,7 @@ function seedData(){
         {material:'VIP SPICE TURMERIC 100G',description:'Turmeric Powder 100g',division:'Spices',ean:'8901234567008',brand:'VIP'},
         {material:'VIP CHOLE MASALA 200G',description:'Chole Masala 200g',division:'Spices',ean:'8901234567009',brand:'VIP'},
         {material:'VIP BASMATI RICE 25KG',description:'Extra Long Basmati 25kg',division:'Rice',ean:'8901234567010',brand:'VIP'}
+        
     ];
     mats.forEach(function(m){DB.add('material_master',m);});
     for(var r=1;r<=30;r++){DB.add('rack_master',{rack:'RACK-'+String(r).padStart(3,'0')});}

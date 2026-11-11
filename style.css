@@ -680,3 +680,343 @@ textarea.form-input{resize:vertical;min-height:70px}
 @media(max-width:480px){
     .report-grid{grid-template-columns:1fr}
 }
+/* ============================================================
+   SAP FIORI HORIZON THEME OVERRIDE
+   ============================================================ */
+:root{
+    --font-display:"72","72full",Arial,Helvetica,sans-serif;
+    --font-body:"72","72full",Arial,Helvetica,sans-serif;
+    --radius:8px;--radius-sm:4px;
+    --shell-h:48px;--sidebar-w:240px;
+    --shadow:0 0 0 1px rgba(34,53,72,.1),0 2px 4px rgba(34,53,72,.08);
+    --shadow-lg:0 0 0 1px rgba(34,53,72,.15),0 8px 24px rgba(34,53,72,.2);
+    --sap-blue:#0A6ED1;--sap-blue-dark:#0854A0;
+    --sap-shell:#354A5F;--sap-shell-dark:#2A3B4C;
+}
+[data-theme="light"],[data-theme="dark"]{
+    --bg-primary:#F5F6F7;--bg-secondary:#EFF1F2;
+    --bg-card:#FFFFFF;--bg-card-hover:#FAFBFC;--bg-card-solid:#FFFFFF;
+    --bg-input:#FFFFFF;--bg-shell:#354A5F;--bg-sidebar:#FFFFFF;
+    --border:#D9D9D9;--border-light:#BFBFBF;
+    --text-primary:#32363A;--text-secondary:#556B82;--text-muted:#6A6D70;
+    --accent:#0A6ED1;--accent-rgb:10,110,209;--accent-dim:rgba(10,110,209,.08);
+    --accent2:#E9730C;--accent2-rgb:233,115,12;--accent2-dim:rgba(233,115,12,.1);
+    --danger:#BB0000;--danger-rgb:187,0,0;--danger-dim:rgba(187,0,0,.08);
+    --warning:#E9730C;--warning-rgb:233,115,12;--warning-dim:rgba(233,115,12,.1);
+    --info:#0A6ED1;--info-rgb:10,110,209;--info-dim:rgba(10,110,209,.08);
+    --success:#107E3E;--success-rgb:16,126,62;
+    --table-row-hover:#F5F9FD;
+    --glass-blur:none;
+    --scrollbar-thumb:rgba(0,0,0,.2);
+}
+*{font-family:"72","72full",Arial,Helvetica,sans-serif}
+body{background:var(--bg-primary);color:var(--text-primary);font-size:14px;letter-spacing:0}
+::selection{background:var(--sap-blue);color:#fff}
+.bx,i[class^="bx"]{font-family:'boxicons'!important}
+
+/* ---- Cards / flat ---- */
+.card,.kpi-card,.mat-card,.loc-card,.time-card,.settings-card,.report-card,.report-filter-box,.sap-report-header{
+    backdrop-filter:none!important;border-radius:8px;border:1px solid #E5E5E5;box-shadow:0 0 0 1px rgba(34,53,72,.05),0 2px 4px rgba(34,53,72,.06);
+}
+.card:hover,.kpi-card:hover,.settings-card:hover{box-shadow:0 0 0 1px rgba(10,110,209,.3),0 4px 8px rgba(34,53,72,.12);transform:none}
+.card-title{color:#556B82;font-size:12px;letter-spacing:.3px;text-transform:uppercase;font-weight:700}
+
+/* ---- Buttons: Fiori style ---- */
+.btn{border-radius:4px!important;text-transform:none;font-weight:600;font-size:13px;padding:7px 14px;box-shadow:none!important;backdrop-filter:none}
+.btn-glass,.btn-secondary,.btn-info{background:#fff;color:#0A6ED1;border:1px solid #0A6ED1}
+.btn-glass:hover,.btn-secondary:hover,.btn-info:hover{background:#EBF5FE;color:#0854A0;border-color:#0854A0;box-shadow:none}
+.btn-primary{background:#0A6ED1;color:#fff;border:1px solid #0A6ED1}
+.btn-primary:hover{background:#0854A0;transform:none;box-shadow:none}
+.btn-danger{background:#fff;color:#BB0000;border:1px solid #BB0000}
+.btn-danger:hover{background:#BB0000;color:#fff}
+.btn-warning{background:#fff;color:#E9730C;border:1px solid #E9730C}
+.btn-warning:hover{background:#E9730C;color:#fff}
+.btn-icon{background:#fff;color:#0A6ED1;border:1px solid #D9D9D9}
+.btn-icon:hover{background:#EBF5FE;color:#0854A0}
+
+/* ---- Shell bar (SAP dark blue) ---- */
+#shellBar{background:#354A5F;border-bottom:none;backdrop-filter:none;height:48px;box-shadow:0 2px 4px rgba(0,0,0,.2)}
+#shellBar .shell-btn{color:#fff}
+#shellBar .shell-btn:hover{background:rgba(255,255,255,.15);color:#fff}
+#breadcrumb .bc-item{color:#C5D3E0}
+#breadcrumb .bc-item.active{color:#fff;font-weight:600}
+.global-search input{background:#2A3B4C;border:1px solid #4A6178;color:#fff;border-radius:18px}
+.global-search input::placeholder{color:#9FB3C8}
+.global-search input:focus{background:#fff;color:#32363A;border-color:#fff}
+.global-search i{color:#9FB3C8}
+.global-search kbd{background:#4A6178;border-color:#4A6178;color:#C5D3E0}
+.user-menu:hover{background:rgba(255,255,255,.15)}
+.user-menu span,.um-meta span{color:#fff}
+.um-meta{display:flex;flex-direction:column;line-height:1.2}
+.um-meta small{color:#9FB3C8;font-size:10px}
+.user-menu>i{color:#C5D3E0}
+.user-avatar{background:#0A6ED1;color:#fff;border:2px solid #fff}
+.user-dropdown{background:#fff}
+.notif-panel{background:#fff}
+
+/* ---- Sidebar (SAP side navigation) ---- */
+#sidebar{background:#fff;border-right:1px solid #D9D9D9;backdrop-filter:none;top:48px}
+.sidebar-header{display:none}
+#sidebarNav{padding:8px 0}
+.nav-item{color:#32363A;font-size:14px;padding:10px 16px;font-weight:400}
+.nav-item:hover{background:#F5F9FD;color:#0A6ED1}
+.nav-item.active{background:#EBF5FE;color:#0A6ED1;font-weight:600}
+.nav-item.active::before{background:#0A6ED1;box-shadow:none;width:4px;top:0;bottom:0;border-radius:0}
+.nav-sub-item{color:#556B82;font-size:13px;padding:8px 16px 8px 46px}
+.nav-sub-item:hover,.nav-sub-item.active{background:#EBF5FE;color:#0A6ED1}
+.sidebar-footer{border-top:1px solid #E5E5E5}
+.dev-credit,.dev-credit strong{color:#6A6D70}
+#mainContent{background:#F5F6F7;margin-left:240px;padding-top:0}
+#mainApp{padding-top:48px}
+#shellBar{position:fixed;top:0;left:0;right:0;z-index:1100}
+#sidebar{z-index:1000}
+
+/* ---- Tables: SAP grid ---- */
+.table-wrapper,.sap-table-wrap{border:1px solid #D9D9D9;border-radius:4px;backdrop-filter:none;background:#fff}
+.data-table thead{background:#F2F2F2}
+.data-table th{color:#32363A;font-size:12px;text-transform:none;letter-spacing:0;font-weight:700;border-bottom:1px solid #D9D9D9;padding:10px 12px}
+.data-table td{border-bottom:1px solid #EDEDED;font-size:13px}
+.data-table tbody tr{animation:none}
+.data-table tbody tr:hover{background:#F5F9FD}
+.sap-table th{background:#F2F2F2;color:#32363A;border:1px solid #D9D9D9;text-transform:none;font-size:12px}
+.sap-table td{border:1px solid #EDEDED}
+
+/* ---- Forms ---- */
+.form-input,.report-date-row input[type="date"]{background:#fff;border:1px solid #89919A;border-radius:4px;color:#32363A;backdrop-filter:none}
+.form-input:focus{border-color:#0A6ED1;box-shadow:0 0 0 1px #0A6ED1}
+.form-group label{text-transform:none;font-size:12px;letter-spacing:0;color:#556B82;font-weight:600}
+.search-box input{border-radius:4px;border:1px solid #89919A;background:#fff}
+
+/* ---- Badges (Object Status) ---- */
+.badge{border-radius:4px;font-size:11px;font-weight:700;padding:3px 8px}
+.badge-success{background:#F1FDF6;color:#107E3E;border:1px solid #107E3E}
+.badge-warning{background:#FFF8D6;color:#E9730C;border:1px solid #E9730C}
+.badge-danger{background:#FFEBEB;color:#BB0000;border:1px solid #BB0000}
+.badge-info,.badge-accent{background:#EBF5FE;color:#0A6ED1;border:1px solid #0A6ED1}
+
+/* ---- Modal / Tabs / Toast ---- */
+.modal-container{border-radius:8px;background:#fff;backdrop-filter:none}
+.modal-header{background:#F7F7F7;border-radius:8px 8px 0 0}
+.modal-header h3{font-size:16px;color:#32363A}
+.toast{background:#fff;border-radius:4px}
+.tab-btn.active{color:#0A6ED1;border-bottom-color:#0A6ED1}
+.page-btn.active{background:#0A6ED1;border-color:#0A6ED1;color:#fff}
+.section-header h2{font-size:20px;font-weight:700;color:#32363A}
+.section-header h2 i{color:#0A6ED1}
+.bottom-nav{background:#fff;border-top:1px solid #D9D9D9;backdrop-filter:none}
+.bnav-item.active{color:#0A6ED1}
+
+/* ---- Login (SAP style) ---- */
+/* ---- Login (GLASS MORPHISM) ---- */
+#loginPage{
+    background:linear-gradient(135deg,#0B2E5C 0%,#0A6ED1 45%,#4FB0F0 100%);
+    overflow:hidden;
+}
+#loginPage::before,#loginPage::after{
+    content:'';position:absolute;border-radius:50%;filter:blur(60px);opacity:.55;pointer-events:none;
+}
+#loginPage::before{width:420px;height:420px;background:#7DD3FC;top:-120px;left:-100px;animation:orbFloat 9s ease-in-out infinite}
+#loginPage::after{width:380px;height:380px;background:#1D4ED8;bottom:-120px;right:-80px;animation:orbFloat 11s ease-in-out infinite reverse}
+@keyframes orbFloat{0%,100%{transform:translate(0,0)}50%{transform:translate(40px,30px)}}
+#matrixCanvas,.scan-line{display:none}
+
+.login-card{
+    background:rgba(255,255,255,.14);
+    border:1px solid rgba(255,255,255,.35);
+    border-radius:20px;
+    padding:42px 36px 30px;
+    -webkit-backdrop-filter:blur(22px) saturate(160%);
+    backdrop-filter:blur(22px) saturate(160%);
+    box-shadow:0 8px 32px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.45);
+}
+.brand-icon{
+    background:rgba(255,255,255,.22);color:#fff;clip-path:none;border-radius:16px;
+    border:1px solid rgba(255,255,255,.45);box-shadow:inset 0 1px 0 rgba(255,255,255,.5);
+    -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);
+}
+.login-brand h1{color:#fff;font-family:"72",Arial,sans-serif;letter-spacing:0;font-size:20px;font-weight:700;text-shadow:0 1px 6px rgba(0,0,0,.25)}
+.login-brand h1 span{color:#BFE3FF}
+.login-brand p{color:rgba(255,255,255,.8);letter-spacing:.8px}
+.login-card label{color:rgba(255,255,255,.9)}
+.input-icon i{color:rgba(255,255,255,.75)}
+.input-icon input{
+    background:rgba(255,255,255,.16);
+    border:1px solid rgba(255,255,255,.35);
+    color:#fff;border-radius:8px;
+}
+.input-icon input::placeholder{color:rgba(255,255,255,.65)}
+.input-icon input:focus{
+    background:rgba(255,255,255,.26);
+    border-color:#fff;box-shadow:0 0 0 3px rgba(255,255,255,.2);
+}
+.input-icon input:focus~i{color:#fff}
+.input-icon input:-webkit-autofill{
+    -webkit-text-fill-color:#fff;
+    transition:background-color 9999s ease-in-out 0s;
+    box-shadow:0 0 0 1000px rgba(255,255,255,.16) inset;
+}
+.btn-glass-login{
+    background:rgba(255,255,255,.92);color:#0854A0;
+    border-radius:8px;letter-spacing:.5px;font-size:14px;text-transform:none;font-weight:700;
+}
+.btn-glass-login:hover{background:#fff;box-shadow:0 6px 20px rgba(0,0,0,.25);transform:translateY(-1px)}
+.login-footer{color:rgba(255,255,255,.75)}
+
+/* ---- Rack grid ---- */
+.rack-cell.occupied{background:#F1FDF6;color:#107E3E;border-color:#107E3E}
+.rack-cell.empty{background:#FFEBEB;color:#BB0000;border-color:#BB0000}
+
+/* ============================================================
+   UNIQUE DASHBOARD  (SAP Launchpad + Monitor)
+   ============================================================ */
+.lp-hero{background:linear-gradient(120deg,#0A6ED1 0%,#0854A0 60%,#354A5F 100%);color:#fff;border-radius:12px;padding:22px 26px;margin-bottom:18px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:14px;position:relative;overflow:hidden}
+.lp-hero::after{content:'';position:absolute;right:-40px;top:-40px;width:220px;height:220px;border-radius:50%;background:rgba(255,255,255,.07)}
+.lp-hero h1{font-size:22px;font-weight:700;margin-bottom:4px}
+.lp-hero p{font-size:13px;opacity:.85}
+.lp-hero-meta{display:flex;gap:10px;flex-wrap:wrap;position:relative;z-index:1}
+.lp-chip{background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.3);border-radius:16px;padding:5px 12px;font-size:12px;display:flex;align-items:center;gap:6px}
+.lp-group-title{font-size:14px;font-weight:700;color:#32363A;margin:20px 0 10px;display:flex;align-items:center;gap:8px}
+.lp-group-title::after{content:'';flex:1;height:1px;background:#D9D9D9}
+.lp-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(176px,1fr));gap:14px}
+.lp-tile{background:#fff;border:1px solid #E5E5E5;border-radius:12px;padding:14px 16px;cursor:pointer;min-height:132px;display:flex;flex-direction:column;justify-content:space-between;transition:all .2s;box-shadow:0 0 0 1px rgba(34,53,72,.05),0 2px 4px rgba(34,53,72,.06);position:relative;overflow:hidden}
+.lp-tile:hover{transform:translateY(-3px);box-shadow:0 8px 20px rgba(10,110,209,.18);border-color:#0A6ED1}
+.lp-tile::before{content:'';position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--tc,#0A6ED1)}
+.lp-tile-top{display:flex;justify-content:space-between;align-items:flex-start}
+.lp-tile-title{font-size:13px;font-weight:700;color:#32363A;line-height:1.3}
+.lp-tile-sub{font-size:11px;color:#6A6D70;margin-top:2px}
+.lp-tile-ico{width:34px;height:34px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:19px;background:var(--tb,#EBF5FE);color:var(--tc,#0A6ED1)}
+.lp-tile-num{font-size:34px;font-weight:300;color:var(--tc,#0A6ED1);line-height:1}
+.lp-tile-unit{font-size:11px;color:#6A6D70;margin-left:4px}
+.lp-tile-foot{display:flex;justify-content:space-between;align-items:flex-end}
+.lp-trend{font-size:11px;font-weight:700;padding:2px 6px;border-radius:4px}
+.lp-trend.up{background:#F1FDF6;color:#107E3E}
+.lp-trend.down{background:#FFEBEB;color:#BB0000}
+.lp-trend.neutral{background:#F2F2F2;color:#556B82}
+.lp-row{display:grid;grid-template-columns:2fr 1fr;gap:16px;margin-top:6px}
+.lp-panel{background:#fff;border:1px solid #E5E5E5;border-radius:12px;padding:18px;box-shadow:0 2px 4px rgba(34,53,72,.06)}
+.lp-panel h3{font-size:14px;font-weight:700;margin-bottom:14px;display:flex;align-items:center;gap:8px;color:#32363A}
+.lp-panel h3 i{color:#0A6ED1;font-size:18px}
+.lp-bars{display:flex;flex-direction:column;gap:12px}
+.lp-bar-row{display:grid;grid-template-columns:120px 1fr 50px;gap:10px;align-items:center;font-size:12px}
+.lp-bar-lbl{color:#556B82;font-weight:600}
+.lp-bar-track{height:14px;background:#EFF1F2;border-radius:7px;overflow:hidden}
+.lp-bar-fill{height:100%;border-radius:7px;background:var(--bc,#0A6ED1);transition:width .8s}
+.lp-bar-val{text-align:right;font-weight:700;color:#32363A}
+.lp-donut-wrap{display:flex;align-items:center;gap:18px;flex-wrap:wrap;justify-content:center}
+.lp-donut{width:130px;height:130px;border-radius:50%;position:relative;flex-shrink:0}
+.lp-donut::after{content:attr(data-center);position:absolute;inset:20px;background:#fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:700;color:#32363A}
+.lp-legend{display:flex;flex-direction:column;gap:7px;font-size:12px}
+.lp-legend span{display:flex;align-items:center;gap:7px;color:#556B82}
+.lp-legend i{width:10px;height:10px;border-radius:2px;display:inline-block}
+.lp-alert{display:flex;gap:10px;padding:10px 12px;border-radius:6px;margin-bottom:8px;font-size:12px;align-items:flex-start;border-left:4px solid}
+.lp-alert.warn{background:#FFF8D6;border-color:#E9730C}
+.lp-alert.err{background:#FFEBEB;border-color:#BB0000}
+.lp-alert.ok{background:#F1FDF6;border-color:#107E3E}
+.lp-alert i{font-size:16px;margin-top:1px}
+.lp-timeline{position:relative;padding-left:18px}
+.lp-timeline::before{content:'';position:absolute;left:5px;top:4px;bottom:4px;width:2px;background:#D9D9D9}
+.lp-tl-item{position:relative;padding:0 0 12px;font-size:12px}
+.lp-tl-item::before{content:'';position:absolute;left:-17px;top:3px;width:10px;height:10px;border-radius:50%;background:#0A6ED1;border:2px solid #fff;box-shadow:0 0 0 1px #0A6ED1}
+.lp-tl-item b{color:#32363A}
+.lp-tl-item small{display:block;color:#6A6D70;font-size:10px;margin-top:1px}
+@media(max-width:1024px){.lp-row{grid-template-columns:1fr}}
+@media(max-width:768px){
+    #sidebar{top:0}
+    #mainContent{margin-left:0}
+    .lp-bar-row{grid-template-columns:90px 1fr 40px}
+    .lp-tile-num{font-size:28px}
+}
+@media(max-width:768px){
+    #sidebar{top:48px}
+    #mainApp{padding-top:48px}
+}
+/* ============================================================
+   SAP BUTTONS (Horizon)
+   ============================================================ */
+.btn{height:32px;padding:0 14px;font-size:14px;font-weight:600;line-height:1;border-radius:8px!important;gap:6px;
+    transition:background .15s,border-color .15s,color .15s}
+.btn i{font-size:16px}
+.btn-sm{height:26px;padding:0 10px;font-size:12px}
+.btn-sm i{font-size:14px}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn:focus-visible{outline:2px solid #0A6ED1;outline-offset:2px}
+
+/* Default */
+.btn-glass,.btn-secondary,.btn-info{background:#fff;color:#0A6ED1;border:1px solid #BCC3CA}
+.btn-glass:hover,.btn-secondary:hover,.btn-info:hover{background:#EBF5FE;border-color:#0A6ED1;color:#0854A0}
+
+/* Emphasized */
+.btn-primary,.form-actions>.btn-glass:first-child,.modal-footer>.btn-glass:last-child:not(:only-child){
+    background:#0A6ED1;color:#fff;border:1px solid #0A6ED1}
+.btn-primary:hover,.form-actions>.btn-glass:first-child:hover,.modal-footer>.btn-glass:last-child:not(:only-child):hover{
+    background:#0854A0;border-color:#0854A0;color:#fff}
+
+/* Negative / Attention */
+.btn-danger{background:#fff;color:#BB0000;border:1px solid #BB0000}
+.btn-danger:hover{background:#BB0000;color:#fff}
+.btn-warning{background:#fff;color:#E9730C;border:1px solid #E9730C}
+.btn-warning:hover{background:#E9730C;color:#fff}
+
+/* Transparent (table row actions) */
+.table-actions .btn-glass{background:transparent;border-color:transparent}
+.table-actions .btn-glass:hover{background:#EBF5FE;border-color:#BCC3CA}
+.table-actions .btn-danger{background:transparent;border-color:transparent}
+.table-actions .btn-danger:hover{background:#BB0000;color:#fff}
+
+/* Inline-styled buttons (accent/success/warning bg with black text) -> proper SAP colours */
+.btn[style*="background:var(--accent)"]{background:#0A6ED1!important;color:#fff!important;border-color:#0A6ED1!important}
+.btn[style*="background:var(--accent)"]:hover{background:#0854A0!important}
+.btn[style*="background:var(--success)"]{background:#107E3E!important;color:#fff!important;border-color:#107E3E!important}
+.btn[style*="background:var(--warning)"]{background:#E9730C!important;color:#fff!important;border-color:#E9730C!important}
+.form-actions{gap:8px}
+.modal-footer{background:#F7F7F7;border-radius:0 0 8px 8px}
+
+/* ============================================================
+   OBJECT PAGE
+   ============================================================ */
+.op-header{background:#fff;border-bottom:1px solid #D9D9D9;margin:-20px -20px 18px;padding:18px 24px 0}
+.op-top{display:flex;align-items:center;gap:14px}
+.op-avatar{width:52px;height:52px;border-radius:12px;background:#EBF5FE;color:#0A6ED1;display:flex;align-items:center;justify-content:center;font-size:28px;flex-shrink:0}
+.op-title{font-size:22px;font-weight:700;color:#32363A;line-height:1.2}
+.op-sub{font-size:13px;color:#6A6D70;margin-top:2px}
+.op-facts{display:flex;flex-wrap:wrap;gap:12px 40px;padding:16px 0}
+.op-fact small{display:block;font-size:12px;color:#6A6D70;margin-bottom:2px}
+.op-fact b{font-size:20px;font-weight:600;color:#32363A}
+.op-fact.warn b{color:#E9730C}
+.op-fact.ok b{color:#107E3E}
+.op-fact.bad b{color:#BB0000}
+.op-fact.info b{color:#0A6ED1}
+.op-tabs{display:flex;gap:4px;overflow-x:auto;border-top:1px solid #EDEDED}
+.op-tab{padding:11px 14px;font-size:14px;color:#556B82;cursor:pointer;border-bottom:3px solid transparent;white-space:nowrap;text-decoration:none}
+.op-tab:hover{color:#0A6ED1}
+.op-tab.active{color:#0A6ED1;border-bottom-color:#0A6ED1;font-weight:600}
+.op-page .card{scroll-margin-top:70px;border-radius:12px;padding:20px 22px;margin-bottom:16px}
+.op-page .card-title{font-size:16px;font-weight:700;color:#32363A;text-transform:none;letter-spacing:0;padding-bottom:10px;margin-bottom:14px;border-bottom:1px solid #EDEDED}
+.op-page .card-title i{font-size:18px}
+@media(max-width:768px){
+    .op-header{margin:-14px -14px 14px;padding:14px 14px 0}
+    .op-title{font-size:18px}
+    .op-facts{gap:10px 24px}
+}
+
+/* ============================================================
+   SMART TABLE (filter bar + variant management)
+   ============================================================ */
+.card:has(.st-bar){overflow:visible}
+.st-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px 12px;background:#F7F7F7;border:1px solid #D9D9D9;border-bottom:none;border-radius:8px 8px 0 0;position:relative}
+.st-bar+.table-wrapper{border-top-left-radius:0;border-top-right-radius:0}
+.st-var{display:flex;align-items:center;gap:2px}
+.st-var select,.st-col{height:32px;border:1px solid #89919A;border-radius:8px;padding:0 8px;background:#fff;font-size:13px;color:#32363A}
+.st-var select{max-width:180px;font-weight:600}
+.st-col{max-width:150px}
+.st-ic{width:32px;height:32px;border:1px solid transparent;background:transparent;border-radius:8px;color:#0A6ED1;cursor:pointer;font-size:17px;display:inline-flex;align-items:center;justify-content:center}
+.st-ic:hover{background:#EBF5FE;border-color:#BCC3CA}
+.st-search{position:relative;flex:1;min-width:160px;max-width:300px}
+.st-search input{width:100%;height:32px;border:1px solid #89919A;border-radius:8px;padding:0 10px 0 30px;font-size:13px;background:#fff;color:#32363A}
+.st-search input:focus{border-color:#0A6ED1;outline:none;box-shadow:0 0 0 1px #0A6ED1}
+.st-search i{position:absolute;left:9px;top:50%;transform:translateY(-50%);color:#6A6D70}
+.st-count{margin-left:auto;font-size:12px;color:#6A6D70}
+.st-pop{display:none;position:absolute;top:46px;right:12px;z-index:50;background:#fff;border:1px solid #D9D9D9;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.18);padding:8px;min-width:190px;max-height:240px;overflow:auto}
+.st-pop.open{display:block}
+.st-pop label{display:flex;gap:8px;align-items:center;padding:6px 8px;font-size:13px;cursor:pointer;border-radius:6px;color:#32363A}
+.st-pop label:hover{background:#F5F9FD}

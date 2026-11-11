@@ -604,39 +604,39 @@ function chkAct(act){
 // ==================== SIDEBAR ====================
 function renderSidebar(){
     if(!APP.currentUser)return;
-    var mods=[
-        {id:'dashboard',icon:'bxs-dashboard',label:'Overview',subs:[]},
-        {id:'inbound',icon:'bxs-truck',label:'Inbound Process',subs:[
-            {id:'security-gate',label:'Create Vehicle Entry'},
-            {id:'pending-vehicle',label:'Pending Vehicles'},
-            {id:'unloading-screen',label:'Goods Receipt / Unloading'},
-            {id:'posting-pending',label:'Posting Pending'},
-            {id:'inbound-record',label:'Inbound Records'},
-            {id:'unloading-stock',label:'Unloading Stock'}
+        var mods=[
+        {id:'dashboard',icon:'bxs-home',label:'My Home',subs:[]},
+        {id:'inbound',icon:'bxs-truck',label:'Inbound Processing',subs:[
+            {id:'security-gate',label:'Gate Check-In'},
+            {id:'pending-vehicle',label:'Inbound Control Tower'},
+            {id:'unloading-screen',label:'Goods Receipt'},
+            {id:'posting-pending',label:'GR Posting Pending'},
+            {id:'inbound-record',label:'Inbound Delivery Records'},
+            {id:'unloading-stock',label:'Stock in GR Area'}
         ]},
         {id:'putaway',icon:'bxs-package',label:'Putaway',subs:[]},
-        {id:'piv',icon:'bxs-clipboard',label:'PIV',subs:[]},
-        {id:'location',icon:'bxs-map-pin',label:'Storage Locations',subs:[]},
+        {id:'piv',icon:'bxs-clipboard',label:'Physical Inventory',subs:[]},
+        {id:'location',icon:'bxs-map-pin',label:'Warehouse Stock',subs:[]},
         {id:'rack',icon:'bxs-grid-alt',label:'Storage Bins',subs:[]},
-        {id:'material',icon:'bxs-label',label:'Materials',subs:[]},
-        {id:'picking',icon:'bxs-box',label:'Outbound Picking',subs:[
+        {id:'material',icon:'bxs-label',label:'Product Master',subs:[]},
+        {id:'picking',icon:'bxs-box',label:'Outbound — Picking',subs:[
             {id:'obd-upload',label:'Create Outbound Delivery'},
-            {id:'picking-assign',label:'Assign Picking Tasks'},
-            {id:'start-picking',label:'Execute Picking'},
-            {id:'picking-done',label:'Picking Records'},
-            {id:'picking-with-loading',label:'Picking with Loading'}
+            {id:'picking-assign',label:'Assign Warehouse Tasks'},
+            {id:'start-picking',label:'Confirm Picking'},
+            {id:'picking-done',label:'Confirmed Tasks'},
+            {id:'picking-with-loading',label:'Pick & Load'}
         ]},
-        {id:'loading',icon:'bxs-truck',label:'Outbound Loading',subs:[
-            {id:'loading-assign',label:'Assign Loading Tasks'},
+        {id:'loading',icon:'bxs-truck',label:'Outbound — Loading',subs:[
+            {id:'loading-assign',label:'Assign Loading'},
             {id:'start-loading',label:'Execute Loading'},
-            {id:'loading-done',label:'Loading Records'},
+            {id:'loading-done',label:'Goods Issue Records'},
             {id:'qty-mismatch',label:'Quantity Differences'}
         ]},
-        {id:'user-time',icon:'bx-time-five',label:'User Activity Log',subs:[]},
-        {id:'admin',icon:'bxs-user-detail',label:'User Management',subs:[]},
-        {id:'settings',icon:'bxs-cog',label:'System Settings',subs:[]},
-        {id:'reports',icon:'bxs-bar-chart-alt-2',label:'Reports / Analytics',subs:[]},
-        {id:'audit',icon:'bxs-receipt',label:'Audit Log',subs:[]}
+        {id:'user-time',icon:'bx-time-five',label:'Resource Activity',subs:[]},
+        {id:'admin',icon:'bxs-user-detail',label:'User Administration',subs:[]},
+        {id:'settings',icon:'bxs-cog',label:'Configuration',subs:[]},
+        {id:'reports',icon:'bxs-bar-chart-alt-2',label:'Analytics',subs:[]},
+        {id:'audit',icon:'bxs-receipt',label:'Change Documents',subs:[]}
     ];
     var h='';
     mods.forEach(function(mod){
@@ -684,37 +684,37 @@ function renderSidebar(){
 
 // ==================== NAVIGATION ====================
 var sectionNames={
-    dashboard:'Overview',
-    inbound:'Inbound Process', 
-    putaway:'Putaway', 
-    piv:'Picking & Issue Verification (PIV)', 
-    location:'Storage Locations', 
-    rack:'Storage Bins', 
-    material:'Materials', 
-    admin:'User Management', 
-    settings:'System Settings', 
-    reports:'Reports / Analytics', 
-    audit:'Audit Log', 
-    picking:'Outbound Picking', 
-    loading:'Outbound Loading', 
-    'user-time':'User Activity Log'
+    dashboard:'My Home',
+    inbound:'Inbound Processing',
+    putaway:'Warehouse Task: Putaway',
+    piv:'Physical Inventory',
+    location:'Warehouse Stock (Storage Locations)',
+    rack:'Storage Bin Master',
+    material:'Product Master',
+    admin:'User Administration',
+    settings:'System Configuration',
+    reports:'Reports & Analytics',
+    audit:'Change Documents (Audit)',
+    picking:'Outbound Processing — Picking',
+    loading:'Outbound Processing — Loading',
+    'user-time':'Resource Activity Log'
 };
 
 var subNames={
-    'security-gate':'Create Vehicle Entry',
-    'pending-vehicle':'Pending Vehicles',
+    'security-gate':'Create Gate Check-In',
+    'pending-vehicle':'Inbound Control Tower',
     'unloading-screen':'Goods Receipt / Unloading',
-    'posting-pending':'Posting Pending',
-    'inbound-record':'Inbound Records',
-    'unloading-stock':'Unloading Stock',
-    'obd-upload':'Create Outbound Delivery',
-    'picking-assign':'Assign Picking Tasks',
-    'start-picking':'Execute Picking',
-    'picking-done':'Picking Records',
-    'picking-with-loading':'Picking with Loading',
+    'posting-pending':'Goods Receipt Posting Pending',
+    'inbound-record':'Inbound Delivery Records',
+    'unloading-stock':'Stock in GR Area',
+    'obd-upload':'Create Outbound Delivery Order',
+    'picking-assign':'Assign Warehouse Tasks',
+    'start-picking':'Confirm Picking Task',
+    'picking-done':'Confirmed Picking Tasks',
+    'picking-with-loading':'Pick & Load (Combined)',
     'loading-assign':'Assign Loading Tasks',
     'start-loading':'Execute Loading',
-    'loading-done':'Loading Records',
+    'loading-done':'Goods Issue Records',
     'qty-mismatch':'Quantity Differences'
 };
 
@@ -735,7 +735,7 @@ function navTo(sec,sub){
         var ps=document.getElementById(sec+'Sub');if(ps)ps.classList.add('open');
     }
     // Breadcrumb
-    var bc='<span class="bc-item">VIP MD20</span> <i class="bx bx-chevron-right" style="font-size:10px;color:var(--text-muted)"></i> <span class="bc-item active">'+(sectionNames[sec]||sec)+'</span>';
+    var bc='<span class="bc-item">Home</span> <i class="bx bx-chevron-right" style="font-size:10px;color:var(--text-muted)"></i> <span class="bc-item active">'+(sectionNames[sec]||sec)+'</span>';
     if(sub)bc+=' <i class="bx bx-chevron-right" style="font-size:10px;color:var(--text-muted)"></i> <span class="bc-item active">'+(subNames[sub]||sub)+'</span>';
     document.getElementById('breadcrumb').innerHTML=bc;
     // Section
@@ -778,45 +778,135 @@ function setHtml(html){var el=document.getElementById('sec-content');if(el)el.in
 // ==================== DASHBOARD ====================
 function renderDashboard(){
     var vehs=DB.get('vehicles'),locs=DB.get('location_master'),racks=DB.get('rack_master'),td=today();
-    var pending=0,posted=0,postingPend=0,loaded=0;
-    vehs.forEach(function(v){
-        if(v.status==='Unload Pending'||v.status==='Assigned')pending++;
-        if(v.status==='Posted'||v.status==='Unloaded')posted++;
-        if(v.status==='Posting Pending Approval')postingPend++;
-        if(v.status==='Loading Done'||v.status==='Loaded')loaded++;
-    });
-    var todayPut=0,todayPIV=0;
-    locs.forEach(function(l){if(l.action==='PUTAWAY'&&l.date===td)todayPut++;if(l.action==='PIV'&&l.date===td)todayPIV++;});
-    var occSet={};locs.forEach(function(l){occSet[l.rack]=true;});
-    var occ=0;racks.forEach(function(r){if(occSet[r.rack])occ++;});
-    var empty=racks.length-occ;
-    var recent=DB.get('audit_log').slice(-8).reverse();
-    var pendV=vehs.filter(function(v){return v.status==='Unload Pending'||v.status==='Assigned';});
+    var obds=DB.get('obd_data'),loadedV=DB.get('loaded_vehicles'),grns=DB.get('grn_records'),pickDone=DB.get('picking_done');
+    var u=APP.currentUser||{name:'User',role:''};
 
-    var h='<div class="section-header"><h2><i class="bx bxs-dashboard"></i> Dashboard</h2><div style="color:var(--text-muted);font-size:12px">'+fmtDT(new Date())+'</div></div>';
-    h+='<div class="kpi-grid">';
-    h+=kpi('bxs-truck',vehs.length,'Total Vehicles','accent');
-    h+=kpi('bx-time-five',pending,'Pending Unload','warning');
-    h+=kpi('bxs-package',todayPut,"Today Putaway","info");
-    h+=kpi('bxs-clipboard',todayPIV,"Today PIV","accent2");
-    h+=kpi('bxs-grid-alt',occ,'Occupied Racks','success');
-    h+=kpi('bx-grid',empty,'Empty Racks','danger');
-    h+=kpi('bxs-check-circle',posted,'Posted GRN','accent');
-    h+=kpi('bx-error-circle',postingPend,'Pending Approval','warning');
-    h+=kpi('bxs-truck',loaded,'Loaded Vehicles','info');
+    // --- Counts ---
+    var pending=0,posted=0,postPend=0;
+    vehs.forEach(function(v){
+        if(v.vehicleType==='Unloading'){
+            if(v.status==='Unload Pending'||v.status==='Assigned'||v.status==='Partial Unload')pending++;
+            if(v.status==='Posted'||v.status==='Unloaded')posted++;
+            if(v.status==='Posting Pending Approval')postPend++;
+        }
+    });
+    var obdOpen=obds.filter(function(o){return o.status==='Pending';}).length;
+    var obdAssigned=obds.filter(function(o){return o.status==='Assigned'||o.status==='P&L Assigned';}).length;
+    var obdPicked=obds.filter(function(o){return o.status==='Picking Done';}).length;
+    var obdDone=obds.filter(function(o){return o.status==='P&L Done';}).length;
+    var loadReady=pickDone.length-loadedV.filter(function(l){return l.loadStatus==='Fully Loaded'&&l.type!=='pickandload';}).length;
+    if(loadReady<0)loadReady=0;
+    var pendApprovals=DB.filter('loading_approvals',function(a){return a.status==='Pending';}).length;
+
+    var todayPut=0,todayPIV=0,totalStockQty=0;
+    locs.forEach(function(l){
+        totalStockQty+=(parseInt(l.quantity)||0);
+        if(l.date===td){if(l.action==='PUTAWAY')todayPut++;if(l.action==='PIV')todayPIV++;}
+    });
+    var occSet={};locs.forEach(function(l){if(l.quantity>0)occSet[l.rack]=1;});
+    var occ=0;racks.forEach(function(r){if(occSet[r.rack])occ++;});
+    var totalBins=racks.length,emptyBins=totalBins-occ;
+    var utilPct=totalBins>0?Math.round((occ/totalBins)*100):0;
+    var shorts=DB.get('short_excess_reports').length+DB.get('short_reports').length;
+
+    // --- Greeting ---
+    var hr=new Date().getHours();
+    var greet=hr<12?'Good Morning':(hr<17?'Good Afternoon':'Good Evening');
+
+    var h='';
+    // HERO
+    h+='<div class="lp-hero"><div style="position:relative;z-index:1">';
+    h+='<h1>'+greet+', '+esc(u.name)+'</h1>';
+    h+='<p>Warehouse Overview — Plant MD20 | '+fmtDT(new Date())+'</p></div>';
+    h+='<div class="lp-hero-meta">';
+    h+='<div class="lp-chip"><i class="bx bx-building"></i> Plant MD20</div>';
+    h+='<div class="lp-chip"><i class="bx bx-id-card"></i> '+esc(u.role||'User')+'</div>';
+    h+='<div class="lp-chip"><i class="bx bx-grid-alt"></i> Bin Utilization '+utilPct+'%</div>';
+    h+='</div></div>';
+
+    // ===== INBOUND TILES =====
+    h+='<div class="lp-group-title"><i class="bx bxs-truck" style="color:#0A6ED1"></i> Inbound</div><div class="lp-tiles">';
+    h+=lpTile('Pending Goods Receipt','Vehicles waiting',pending,'Vehicles','bx-time-five','#E9730C','#FFF8D6',pending>0?'Action':'Clear',pending>0?'down':'up',"navTo('inbound','pending-vehicle')");
+    h+=lpTile('GR Posting Pending','Awaiting approval',postPend,'Docs','bx-error-circle','#0A6ED1','#EBF5FE',postPend>0?'Review':'Clear',postPend>0?'neutral':'up',"navTo('inbound','posting-pending')");
+    h+=lpTile('GR Posted','Goods receipt done',posted,'Vehicles','bxs-check-circle','#107E3E','#F1FDF6','Done','up',"navTo('inbound','inbound-record')");
+    h+=lpTile('Putaway Today','Warehouse tasks',todayPut,'Tasks','bxs-package','#0A6ED1','#EBF5FE','Today','neutral',"navTo('putaway')");
     h+='</div>';
-    h+='<div class="grid-2">';
-    // Recent Activity
-    h+='<div class="card"><div class="card-title"><i class="bx bx-history"></i> Recent Activity</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>Module</th><th>Action</th><th>User</th><th>Time</th></tr></thead><tbody>';
-    if(!recent.length)h+='<tr><td colspan="4" style="text-align:center;color:var(--text-muted);padding:24px">No activity yet</td></tr>';
-    else recent.forEach(function(a){h+='<tr><td>'+esc(a.module)+'</td><td>'+esc(a.action)+'</td><td>'+esc(a.userName)+'</td><td style="font-size:11px;color:var(--text-muted)">'+fmtDT(a.dateTime)+'</td></tr>';});
-    h+='</tbody></table></div></div>';
-    // Pending Vehicles
-    h+='<div class="card"><div class="card-title"><i class="bx bx-time-five"></i> Pending Vehicles</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>Vehicle</th><th>LR No</th><th>Transport</th><th>Status</th></tr></thead><tbody>';
-    if(!pendV.length)h+='<tr><td colspan="4" style="text-align:center;color:var(--text-muted);padding:24px">No pending vehicles</td></tr>';
-    else pendV.forEach(function(v){h+='<tr style="cursor:pointer" onclick="navTo(\'inbound\',\'pending-vehicle\')"><td><strong>'+esc(v.vehicleNo)+'</strong></td><td>'+esc(v.lrNo||'-')+'</td><td>'+esc(v.transportName||'-')+'</td><td><span class="badge badge-warning">'+esc(v.status)+'</span></td></tr>';});
-    h+='</tbody></table></div></div></div>';
+
+    // ===== OUTBOUND TILES =====
+    h+='<div class="lp-group-title"><i class="bx bxs-box" style="color:#E9730C"></i> Outbound</div><div class="lp-tiles">';
+    h+=lpTile('Open Deliveries','Not yet assigned',obdOpen,'ODs','bx-file','#E9730C','#FFF8D6',obdOpen>0?'Open':'Clear',obdOpen>0?'down':'up',"navTo('picking','picking-assign')");
+    h+=lpTile('Picking In Process','Assigned tasks',obdAssigned,'ODs','bxs-box','#0A6ED1','#EBF5FE','Active','neutral',"navTo('picking','start-picking')");
+    h+=lpTile('Ready for Loading','Picking confirmed',loadReady,'ODs','bxs-truck','#107E3E','#F1FDF6','Ready','up',"navTo('loading','loading-assign')");
+    h+=lpTile('Approval Requests','Qty differences',pendApprovals,'Requests','bx-shield-quarter','#BB0000','#FFEBEB',pendApprovals>0?'Urgent':'Clear',pendApprovals>0?'down':'up',"navTo('loading','qty-mismatch')");
+    h+='</div>';
+
+    // ===== INVENTORY TILES =====
+    h+='<div class="lp-group-title"><i class="bx bxs-grid-alt" style="color:#107E3E"></i> Inventory</div><div class="lp-tiles">';
+    h+=lpTile('Total Stock','All storage bins',totalStockQty,'Units','bxs-package','#0A6ED1','#EBF5FE','Live','neutral',"navTo('location')");
+    h+=lpTile('Occupied Bins','Bins with stock',occ+' / '+totalBins,'','bxs-grid-alt','#107E3E','#F1FDF6',utilPct+'%',utilPct>85?'down':'up',"navTo('rack')");
+    h+=lpTile('Empty Bins','Available capacity',emptyBins,'Bins','bx-grid','#556B82','#F2F2F2','Free','neutral',"navTo('rack')");
+    h+=lpTile('Physical Inventory','Counts today',todayPIV,'Counts','bxs-clipboard','#E9730C','#FFF8D6','Today','neutral',"navTo('piv')");
+    h+='</div>';
+
+    // ===== PANELS ROW =====
+    h+='<div class="lp-row" style="margin-top:20px">';
+
+    // Panel 1: Warehouse Activity Monitor (bars)
+    var maxBar=Math.max(obdOpen,obdAssigned,obdPicked,obdDone,pending,postPend,posted,1);
+    h+='<div class="lp-panel"><h3><i class="bx bx-bar-chart-alt-2"></i> Warehouse Activity Monitor</h3><div class="lp-bars">';
+    h+=lpBar('GR Pending',pending,maxBar,'#E9730C');
+    h+=lpBar('GR Posted',posted,maxBar,'#107E3E');
+    h+=lpBar('OD Open',obdOpen,maxBar,'#BB0000');
+    h+=lpBar('OD Assigned',obdAssigned,maxBar,'#0A6ED1');
+    h+=lpBar('Picking Done',obdPicked,maxBar,'#8B5CF6');
+    h+=lpBar('Goods Issued',obdDone+loadedV.length,Math.max(maxBar,obdDone+loadedV.length),'#107E3E');
+    h+='</div></div>';
+
+    // Panel 2: Donut — bin utilization
+    var deg=Math.round(utilPct*3.6);
+    h+='<div class="lp-panel"><h3><i class="bx bx-pie-chart-alt-2"></i> Bin Utilization</h3><div class="lp-donut-wrap">';
+    h+='<div class="lp-donut" data-center="'+utilPct+'%" style="background:conic-gradient(#0A6ED1 0deg '+deg+'deg,#E5E5E5 '+deg+'deg 360deg)"></div>';
+    h+='<div class="lp-legend"><span><i style="background:#0A6ED1"></i> Occupied: <b>'+occ+'</b></span><span><i style="background:#E5E5E5"></i> Empty: <b>'+emptyBins+'</b></span><span><i style="background:#32363A"></i> Total Bins: <b>'+totalBins+'</b></span></div>';
+    h+='</div></div></div>';
+
+    // ===== ALERTS + TIMELINE =====
+    h+='<div class="lp-row" style="margin-top:16px;grid-template-columns:1fr 1fr">';
+
+    // Alerts
+    h+='<div class="lp-panel"><h3><i class="bx bx-bell"></i> Alerts & Exceptions</h3>';
+    var alerts=0;
+    if(pendApprovals>0){alerts++;h+='<div class="lp-alert err"><i class="bx bx-error-circle" style="color:#BB0000"></i><div><b>'+pendApprovals+' loading approval(s)</b> pending — quantity difference detected.</div></div>';}
+    if(postPend>0){alerts++;h+='<div class="lp-alert warn"><i class="bx bx-time" style="color:#E9730C"></i><div><b>'+postPend+' vehicle(s)</b> waiting for GR posting.</div></div>';}
+    if(pending>0){alerts++;h+='<div class="lp-alert warn"><i class="bx bxs-truck" style="color:#E9730C"></i><div><b>'+pending+' vehicle(s)</b> at gate, goods receipt not started.</div></div>';}
+    if(obdOpen>0){alerts++;h+='<div class="lp-alert warn"><i class="bx bx-file" style="color:#E9730C"></i><div><b>'+obdOpen+' outbound deliver'+(obdOpen>1?'ies':'y')+'</b> not yet assigned for picking.</div></div>';}
+    if(shorts>0){alerts++;h+='<div class="lp-alert err"><i class="bx bx-error" style="color:#BB0000"></i><div><b>'+shorts+' short/excess report(s)</b> on record.</div></div>';}
+    if(utilPct>85){alerts++;h+='<div class="lp-alert warn"><i class="bx bx-grid-alt" style="color:#E9730C"></i><div>Bin utilization is high (<b>'+utilPct+'%</b>). Plan capacity.</div></div>';}
+    if(!alerts)h+='<div class="lp-alert ok"><i class="bx bx-check-circle" style="color:#107E3E"></i><div><b>All clear.</b> No exceptions at the moment.</div></div>';
+    h+='</div>';
+
+    // Timeline (recent activity)
+    var recent=DB.get('audit_log').slice(-7).reverse();
+    h+='<div class="lp-panel"><h3><i class="bx bx-history"></i> Recent Activity</h3><div class="lp-timeline">';
+    if(!recent.length)h+='<div style="color:#6A6D70;font-size:12px">No activity yet</div>';
+    recent.forEach(function(a){
+        h+='<div class="lp-tl-item"><b>'+esc(a.module)+' — '+esc(a.action)+'</b> by '+esc(a.userName)+'<small>'+fmtDT(a.dateTime)+'</small></div>';
+    });
+    h+='</div></div></div>';
+
     setHtml(h);
+}
+
+// ---- Dashboard helpers ----
+function lpTile(title,sub,num,unit,icon,color,bg,trendTxt,trendCls,onclick){
+    return '<div class="lp-tile" style="--tc:'+color+';--tb:'+bg+'" onclick="'+onclick+'">'+
+        '<div class="lp-tile-top"><div><div class="lp-tile-title">'+title+'</div><div class="lp-tile-sub">'+sub+'</div></div>'+
+        '<div class="lp-tile-ico"><i class="bx '+icon+'"></i></div></div>'+
+        '<div class="lp-tile-foot"><div><span class="lp-tile-num">'+num+'</span><span class="lp-tile-unit">'+unit+'</span></div>'+
+        '<span class="lp-trend '+trendCls+'">'+trendTxt+'</span></div></div>';
+}
+function lpBar(label,val,max,color){
+    var pct=max>0?Math.round((val/max)*100):0;
+    return '<div class="lp-bar-row"><div class="lp-bar-lbl">'+label+'</div><div class="lp-bar-track"><div class="lp-bar-fill" style="width:'+pct+'%;--bc:'+color+'"></div></div><div class="lp-bar-val">'+val+'</div></div>';
 }
 function kpi(icon,val,label,color){
     var colors={accent:'var(--accent)',warning:'var(--warning)',info:'var(--info)',accent2:'var(--accent2)',success:'var(--success)',danger:'var(--danger)'};
@@ -5807,7 +5897,7 @@ document.getElementById('loginForm').addEventListener('submit', async function(e
     var btn = this.querySelector('button[type="submit"]');
     if (btn) {
         btn.disabled = true;
-        btn.innerHTML = '<i class="bx bx-loader-alt bx-spin"></i> <span>PLEASE WAIT...</span>';
+        btn.innerHTML = '<i class="bx bx-loader-alt bx-spin"></i> <span>Logging on...</span>';
     }
     
     try {
@@ -5825,7 +5915,7 @@ document.getElementById('loginForm').addEventListener('submit', async function(e
     } finally {
         if (btn) {
             btn.disabled = false;
-            btn.innerHTML = '<span>ACCESS SYSTEM</span><i class="bx bx-log-in"></i>';
+            btn.innerHTML = '<span>Log On</span><i class="bx bx-log-in"></i>';
         }
     }
 });
@@ -6551,3 +6641,284 @@ function exportReportPDF(){
     showToast('PDF downloaded!','success');
     logAction('Reports','EXPORT_PDF',d.title+' | '+d.period);
 }
+// ============================================================
+// SAP SMART TABLE — filter bar + variant management
+// ============================================================
+var ST = { seq: 0 };
+
+function stRows(t) {
+    return [].filter.call(t.querySelectorAll('tbody tr'), function (tr) {
+        return tr.children.length > 1 && !tr.querySelector('td[colspan]');
+    });
+}
+function stKey(t) {
+    var h = [].map.call(t.querySelectorAll('thead th'), function (x) { return x.textContent.trim(); }).join('|');
+    return 'wms_var_' + (APP.currentSection || '') + '_' + (APP.currentSub || '') + '_' + h.substring(0, 120);
+}
+function stLoad(k) {
+    try { var o = JSON.parse(localStorage.getItem(k) || ''); if (o && o.list) return o; } catch (e) {}
+    return { list: {}, def: '' };
+}
+function stPersist(bar) { try { localStorage.setItem(bar._key, JSON.stringify(bar._vars)); } catch (e) {} }
+function stClone(s) { return { search: s.search || '', col: s.col || '', hidden: (s.hidden || []).slice() }; }
+function stClean(n) { return String(n || '').replace(/["'<>&]/g, '').trim().substring(0, 30); }
+
+function stApply(bar) {
+    var t = bar._table, s = bar._state, q = (s.search || '').toLowerCase(), shown = 0, total = 0;
+    stRows(t).forEach(function (tr) {
+        total++;
+        var ok = true;
+        if (q) {
+            if (s.col === '') ok = tr.textContent.toLowerCase().indexOf(q) > -1;
+            else { var td = tr.children[parseInt(s.col, 10)]; ok = !!td && td.textContent.toLowerCase().indexOf(q) > -1; }
+        }
+        tr.style.display = ok ? '' : 'none';
+        if (ok) shown++;
+    });
+    var n = t.querySelectorAll('thead th').length;
+    for (var i = 0; i < n; i++) {
+        var hid = s.hidden.indexOf(i) > -1;
+        [].forEach.call(t.querySelectorAll('tr'), function (tr) {
+            if (tr.querySelector('td[colspan]')) return;
+            var c = tr.children[i]; if (c) c.style.display = hid ? 'none' : '';
+        });
+    }
+    bar.querySelector('.st-count').textContent = shown + ' / ' + total + ' rows';
+}
+function stSync(bar) {
+    var s = bar._state;
+    bar.querySelector('.st-q').value = s.search;
+    bar.querySelector('.st-col').value = s.col;
+    [].forEach.call(bar.querySelectorAll('.st-pop input'), function (cb) { cb.checked = s.hidden.indexOf(parseInt(cb.value, 10)) < 0; });
+}
+function stFill(bar) {
+    var v = bar._vars, h = '<option value="">Standard</option>';
+    Object.keys(v.list).forEach(function (n) {
+        h += '<option value="' + n + '"' + (bar._cur === n ? ' selected' : '') + '>' + (v.def === n ? '★ ' : '') + n + '</option>';
+    });
+    bar.querySelector('.st-vsel').innerHTML = h;
+}
+
+function stBuild(wrap) {
+    if (wrap.dataset.st) return;
+    var t = wrap.querySelector('table.data-table');
+    if (!t || stRows(t).length < 5) { wrap.dataset.st = 'x'; return; }
+
+    var heads = [].map.call(t.querySelectorAll('thead th'), function (x) { return x.textContent.trim(); });
+    var bar = document.createElement('div');
+    bar.className = 'st-bar'; bar.id = 'st' + (++ST.seq);
+    bar._table = t; bar._key = stKey(t); bar._vars = stLoad(bar._key); bar._cur = '';
+    bar._state = { search: '', col: '', hidden: [] };
+    if (bar._vars.def && bar._vars.list[bar._vars.def]) { bar._cur = bar._vars.def; bar._state = stClone(bar._vars.list[bar._cur]); }
+
+    var colOpts = '<option value="">All columns</option>', pop = '';
+    heads.forEach(function (h, i) {
+        var nm = h || '(Actions)';
+        colOpts += '<option value="' + i + '">' + esc(nm) + '</option>';
+        pop += '<label><input type="checkbox" value="' + i + '" checked> ' + esc(nm) + '</label>';
+    });
+    bar.innerHTML =
+        '<div class="st-var"><select class="st-vsel" title="Variant"></select>' +
+        '<button class="st-ic st-save" title="Save variant"><i class="bx bx-save"></i></button>' +
+        '<button class="st-ic st-def" title="Set as default"><i class="bx bx-star"></i></button>' +
+        '<button class="st-ic st-del" title="Delete variant"><i class="bx bx-trash"></i></button></div>' +
+        '<div class="st-search"><i class="bx bx-search"></i><input class="st-q" type="text" placeholder="Search"></div>' +
+        '<select class="st-col" title="Filter column">' + colOpts + '</select>' +
+        '<button class="st-ic st-cols" title="Columns"><i class="bx bx-columns"></i></button>' +
+        '<button class="st-ic st-xls" title="Export to Excel"><i class="bx bx-spreadsheet"></i></button>' +
+        '<span class="st-count"></span><div class="st-pop">' + pop + '</div>';
+
+    wrap.parentNode.insertBefore(bar, wrap);
+    wrap.dataset.st = bar.id;
+
+    var q = bar.querySelector('.st-q'), colSel = bar.querySelector('.st-col'), popEl = bar.querySelector('.st-pop');
+    stFill(bar); stSync(bar); stApply(bar);
+
+    q.addEventListener('input', function () { bar._state.search = q.value.trim(); stApply(bar); });
+    colSel.addEventListener('change', function () { bar._state.col = colSel.value; stApply(bar); });
+
+    bar.querySelector('.st-vsel').addEventListener('change', function () {
+        bar._cur = this.value;
+        bar._state = bar._cur ? stClone(bar._vars.list[bar._cur]) : { search: '', col: '', hidden: [] };
+        stSync(bar); stApply(bar);
+    });
+    bar.querySelector('.st-save').addEventListener('click', function () {
+        var name = bar._cur;
+        if (!(name && confirm('Overwrite variant "' + name + '"?\n(Cancel = save as new)'))) {
+            name = stClean(prompt('Variant name:', ''));
+            if (!name) return;
+        }
+        bar._vars.list[name] = stClone(bar._state); bar._cur = name;
+        stPersist(bar); stFill(bar); showToast('Variant saved: ' + name, 'success');
+    });
+    bar.querySelector('.st-def').addEventListener('click', function () {
+        if (!bar._cur) { bar._vars.def = ''; stPersist(bar); stFill(bar); showToast('Standard is the default', 'info'); return; }
+        bar._vars.def = (bar._vars.def === bar._cur) ? '' : bar._cur;
+        stPersist(bar); stFill(bar); showToast(bar._vars.def ? 'Default variant set' : 'Default removed', 'success');
+    });
+    bar.querySelector('.st-del').addEventListener('click', function () {
+        if (!bar._cur) { showToast('Select a variant first', 'warning'); return; }
+        if (!confirm('Delete variant "' + bar._cur + '"?')) return;
+        delete bar._vars.list[bar._cur];
+        if (bar._vars.def === bar._cur) bar._vars.def = '';
+        bar._cur = ''; bar._state = { search: '', col: '', hidden: [] };
+        stPersist(bar); stFill(bar); stSync(bar); stApply(bar);
+    });
+    bar.querySelector('.st-cols').addEventListener('click', function (e) { e.stopPropagation(); popEl.classList.toggle('open'); });
+    popEl.addEventListener('click', function (e) { e.stopPropagation(); });
+    popEl.addEventListener('change', function () {
+        var hid = [];
+        [].forEach.call(popEl.querySelectorAll('input'), function (cb) { if (!cb.checked) hid.push(parseInt(cb.value, 10)); });
+        bar._state.hidden = hid; stApply(bar);
+    });
+    bar.querySelector('.st-xls').addEventListener('click', function () {
+        if (typeof XLSX === 'undefined') { showToast('Excel library not loaded', 'error'); return; }
+        var hid = bar._state.hidden, aoa = [], head = [];
+        [].forEach.call(t.querySelectorAll('thead th'), function (th, i) { if (hid.indexOf(i) < 0) head.push(th.textContent.trim()); });
+        aoa.push(head);
+        stRows(t).forEach(function (tr) {
+            if (tr.style.display === 'none') return;
+            var r = [];
+            [].forEach.call(tr.children, function (td, i) { if (hid.indexOf(i) < 0) r.push(td.textContent.trim()); });
+            aoa.push(r);
+        });
+        var ws = XLSX.utils.aoa_to_sheet(aoa), wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'Export');
+        XLSX.writeFile(wb, 'Export_' + (APP.currentSub || APP.currentSection || 'table') + '_' + today() + '.xlsx');
+        showToast('Excel downloaded!', 'success');
+    });
+}
+document.addEventListener('click', function () {
+    [].forEach.call(document.querySelectorAll('.st-pop.open'), function (p) { p.classList.remove('open'); });
+});
+(function () {
+    var ca = document.getElementById('contentArea'), pend = false;
+    if (!ca) return;
+    function run() {
+        pend = false;
+        [].forEach.call(ca.querySelectorAll('.table-wrapper'), stBuild);
+        [].forEach.call(ca.querySelectorAll('.st-bar'), function (b) {
+            var n = b.nextElementSibling;
+            if (!n || !n.classList.contains('table-wrapper') || n.dataset.st !== b.id) b.remove();
+        });
+    }
+    new MutationObserver(function () { if (!pend) { pend = true; setTimeout(run, 60); } })
+        .observe(ca, { childList: true, subtree: true });
+})();
+
+// ============================================================
+// SAP OBJECT PAGE HEADER
+// ============================================================
+function opApply(o) {
+    var el = document.getElementById('sec-content'); if (!el || !o) return;
+    var h = '<div class="op-header"><div class="op-top"><div class="op-avatar"><i class="bx ' + o.icon + '"></i></div>' +
+        '<div><div class="op-title">' + esc(o.title) + '</div><div class="op-sub">' + esc(o.sub) + '</div></div></div>' +
+        '<div class="op-facts">';
+    (o.facts || []).forEach(function (f) {
+        h += '<div class="op-fact ' + (f.c || '') + '"><small>' + esc(f.l) + '</small><b>' + esc(String(f.v)) + '</b></div>';
+    });
+    h += '</div></div>';
+    var tmp = document.createElement('div'); tmp.innerHTML = h;
+    var node = tmp.firstChild;
+    var sh = el.querySelector('.section-header');
+    if (sh) sh.parentNode.replaceChild(node, sh); else el.insertBefore(node, el.firstChild);
+    el.classList.add('op-page');
+
+    var tabs = '', n = 0;
+    [].forEach.call(el.querySelectorAll('.card'), function (c, i) {
+        var t = c.querySelector('.card-title'); if (!t) return;
+        c.id = 'op-sec-' + i;
+        tabs += '<a class="op-tab' + (n === 0 ? ' active' : '') + '" data-t="op-sec-' + i + '">' + esc(t.textContent.trim()) + '</a>';
+        n++;
+    });
+    if (n > 1) {
+        var tb = document.createElement('div'); tb.className = 'op-tabs'; tb.innerHTML = tabs;
+        node.appendChild(tb);
+        tb.addEventListener('click', function (e) {
+            var a = e.target.closest('.op-tab'); if (!a) return;
+            [].forEach.call(tb.querySelectorAll('.op-tab'), function (x) { x.classList.remove('active'); });
+            a.classList.add('active');
+            var target = document.getElementById(a.getAttribute('data-t'));
+            if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+    }
+}
+function opWrap(fnName, metaFn) {
+    var orig = window[fnName];
+    window[fnName] = function () {
+        orig.apply(this, arguments);
+        try { opApply(metaFn()); } catch (e) { console.warn('Object header error:', e); }
+    };
+}
+
+// ---- Unloading (Goods Receipt) ----
+opWrap('renderUnloadingScreen', function () {
+    if (!APP.currentUser) return null;
+    var id = APP.currentUser.id;
+    var pend = DB.filter('vehicles', function (v) { return v.assignedTo === id && (v.status === 'Assigned' || v.status === 'Unload Pending'); }).length;
+    var part = DB.filter('vehicles', function (v) { return v.assignedTo === id && v.status === 'Partial Unload'; }).length;
+    var done = DB.filter('vehicles', function (v) { return v.unloadedBy === id && (v.status === 'Posting Pending Approval' || v.status === 'Posted'); }).length;
+    return {
+        icon: 'bx-package', title: 'Goods Receipt', sub: 'My unloading tasks — ' + APP.currentUser.name,
+        facts: [
+            { l: 'Status', v: pend + part > 0 ? 'In Process' : 'Open', c: pend + part > 0 ? 'warn' : 'ok' },
+            { l: 'Pending Start', v: pend, c: pend ? 'warn' : '' },
+            { l: 'Partial (Resume)', v: part, c: part ? 'info' : '' },
+            { l: 'Submitted', v: done, c: 'ok' }
+        ]
+    };
+});
+
+// ---- Picking (Confirm Picking Task) ----
+opWrap('renderStartPicking', function () {
+    if (!APP.currentUser) return null;
+    var my = DB.filter('picking_assignments', function (a) { return a.assignedTo === APP.currentUser.id && a.status === 'Assigned' && a.type !== 'pickandload'; });
+    var need = 0, locked = 0, picked = 0;
+    my.forEach(function (a) {
+        var obd = DB.find('obd_data', a.obdId);
+        if (obd) (obd.materials || []).forEach(function (m) { need += m.qty; });
+        DB.filter('location_locks', function (l) { return l.obdId === a.obdId && l.status === 'Locked'; })
+            .forEach(function (l) { locked += l.lockedQty; picked += l.pickedQty; });
+    });
+    var pct = need > 0 ? Math.round(picked / need * 100) : 0;
+    return {
+        icon: 'bxs-box', title: 'Confirm Picking Task', sub: 'My warehouse tasks — ' + APP.currentUser.name,
+        facts: [
+            { l: 'Status', v: my.length ? 'In Process' : 'No Tasks', c: my.length ? 'warn' : 'ok' },
+            { l: 'Open Deliveries', v: my.length, c: 'info' },
+            { l: 'Required Qty', v: need },
+            { l: 'Locked Qty', v: locked, c: locked >= need && need > 0 ? 'ok' : 'warn' },
+            { l: 'Picked', v: picked + ' (' + pct + '%)', c: pct >= 100 ? 'ok' : '' }
+        ]
+    };
+});
+
+// ---- Loading (Execute Loading) ----
+opWrap('renderStartLoading', function () {
+    if (!APP.currentUser) return null;
+    var my = DB.filter('loading_assignments', function (a) {
+        if (a.status !== 'Assigned') return false;
+        if (a.assignedTo === APP.currentUser.id) return true;
+        var an = (a.assignedToName || '').toLowerCase().trim(), cn = (APP.currentUser.name || '').toLowerCase().trim();
+        return an && cn && an === cn;
+    });
+    var cnt = 0, qty = 0;
+    my.forEach(function (a) {
+        (a.obdIds || []).forEach(function (oid) {
+            var pd = DB.find('picking_done', oid); if (!pd) return;
+            cnt++; (pd.details || []).forEach(function (d) { qty += d.pickedQty; });
+        });
+    });
+    var partial = DB.filter('loaded_vehicles', function (l) { return l.loadStatus === 'Partial' && l.loadedBy === APP.currentUser.id; }).length;
+    var appr = DB.filter('loading_approvals', function (a) { return a.status === 'Pending' && a.requestedBy === APP.currentUser.id; }).length;
+    return {
+        icon: 'bxs-truck', title: 'Execute Loading', sub: 'My loading tasks — ' + APP.currentUser.name,
+        facts: [
+            { l: 'Status', v: cnt ? 'In Process' : 'No Tasks', c: cnt ? 'warn' : 'ok' },
+            { l: 'Assigned Deliveries', v: cnt, c: 'info' },
+            { l: 'Total Qty', v: qty },
+            { l: 'Partial Loads', v: partial, c: partial ? 'warn' : '' },
+            { l: 'Awaiting Approval', v: appr, c: appr ? 'bad' : '' }
+        ]
+    };
+});

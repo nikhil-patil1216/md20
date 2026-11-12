@@ -1055,3 +1055,37 @@ body{background:var(--bg-primary);color:var(--text-primary);font-size:14px;lette
 .lr-chip{display:inline-block;padding:2px 8px;margin:2px;border-radius:12px;background:var(--success-dim,rgba(16,185,129,.1));color:var(--success);font-size:10.5px}
 .lr-chip.off{background:var(--danger-dim);color:var(--danger)}
 @media(max-width:640px){.pk-line{gap:8px}.pk-rack{min-width:90px}.pk-act{width:100%}.pk-act input{flex:0 0 70px}}
+
+.ib-line{font-size:11px;color:var(--text-secondary);padding:2px 0}
+.ib-line i{color:var(--info)}
+/* ============================================================
+   SAP ALV GRID — uniform for every table (Fiori Horizon)
+   Full cell grid, light header, zebra rows, clear hover.
+   ============================================================ */
+.table-wrapper{overflow-x:auto;border:1px solid #D9D9D9;border-radius:8px;background:#fff;backdrop-filter:none}
+.data-table{width:100%;border-collapse:collapse;font-size:12.5px}
+.data-table thead{background:#F5F6F7}
+.data-table th{padding:9px 12px;text-align:left;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:#556B82;white-space:nowrap;border:1px solid #D9D9D9;border-bottom:2px solid #89919A;background:#F5F6F7;position:sticky;top:0;z-index:2}
+.data-table td{padding:8px 12px;border:1px solid #E5E5E5;color:#32363A;vertical-align:middle;background:#fff}
+.data-table tbody tr{transition:background .12s}
+.data-table tbody tr:nth-child(even){background:#FAFBFC}
+.data-table tbody tr:nth-child(even) td{background:#FAFBFC}
+.data-table tbody tr:hover td{background:#EBF5FE}
+.data-table tbody tr:last-child td{border-bottom:1px solid #E5E5E5}
+.data-table .qty-mismatch{color:#BB0000;font-weight:700}
+.data-table .qty-match{color:#107E3E;font-weight:600}
+.scan-row-green td{background:#F1FDF6!important}
+.scan-row-red td{background:#FFEBEB!important}
+.scan-row-wrong td{background:#FFF8D6!important}
+.badge{border-radius:10px}
+.badge-success{background:#F1FDF6;color:#107E3E;border:1px solid #107E3E33}
+.badge-warning{background:#FFF8D6;color:#E9730C;border:1px solid #E9730C33}
+.badge-danger{background:#FFEBEB;color:#BB0000;border:1px solid #BB000033}
+.badge-info{background:#EBF5FE;color:#0A6ED1;border:1px solid #0A6ED133}
+.badge-accent{background:#EBF5FE;color:#0A6ED1;border:1px solid #0A6ED133}
+.empty-state{color:#6A6D70}
+.section-header h2{font-size:19px;color:#32363A}
+.card-title{color:#556B82}
+input.form-input,select.form-input,textarea.form-input{border:1px solid #89919A;background:#fff;color:#32363A}
+input.form-input:focus,select.form-input:focus,textarea.form-input:focus{border-color:#0A6ED1;box-shadow:0 0 0 1px #0A6ED1;outline:none}
+.form-group label{color:#556B82}

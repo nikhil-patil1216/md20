@@ -12,7 +12,7 @@ var _isSyncing = false;
 var _pendingPushes = {};
 
 try {
-    var SUPABASE_URL = 'https://whlqsapzywnadvkhfhzp.supabase.co'; // Apna URL dalo
+    var SUPABASE_URL = 'https://whlqsapzywnadvkhfhzp.supabase.co'; // Supabase project URL
     var SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndobHFzYXB6eXduYWR2a2hmaHpwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUxNjE4ODMsImV4cCI6MjEwMDczNzg4M30.YaNFKPQ9vmhKHYa0DtaZPbbM44IqgSlibPSABId_bno';
     
     if (typeof supabase !== 'undefined' && SUPABASE_URL.indexOf('supabase.co') > -1) {
@@ -27,7 +27,47 @@ try {
 }
 
 var ALL_TABLES = ['users','location_master','material_master','rack_master','vehicles','invoices','invoice_materials','picking_reports','audit_log','notifications','difference_reports','obd_data','picking_assignments','loading_assignments','loading_data','user_sessions','grn_records','short_reports','unloading_records','loaded_vehicles','picking_done','loading_users','user_work_log','partial_unloads','location_locks','loading_approvals','short_excess_reports','location_requests'];
+// ==================== LIVE MASTER DATA (Supabase-only, no device storage) ====================
+var LIVE_TABLES = ['material_master','location_master','rack_master'];
+function isLiveTable(k){return LIVE_TABLES.indexOf(k)>-1;}
+var _livePushTs = {};
 
+// Row-level push queue — sirf NAYI/changed rows jaate hain, poori table kabhi nahi
+var _pendingRows = {};
+var _rowPushTimers = {};
+function pushRows(key, rows) {
+    if (!supabaseClient || !rows || !rows.length) return;
+    if (!_pendingRows[key]) _pendingRows[key] = [];
+    for (var i = 0; i < rows.length; i++) _pendingRows[key].push(rows[i]);
+    _localWriteTs[key] = Date.now();
+    clearTimeout(_rowPushTimers[key]);
+    _rowPushTimers[key] = setTimeout(async function() { await flushPushRows(key); }, 500);
+}
+async function flushPushRows(key) {
+    if (!supabaseClient) return;
+    var rows = _pendingRows[key];
+    if (!rows || !rows.length) { delete _pendingRows[key]; return; }
+    _pendingRows[key] = [];
+    var total = rows.length, CHUNK = 500, PARALLEL = 3;
+    try {
+        for (var i = 0; i < total; i += CHUNK * PARALLEL) {
+            var batch = [];
+            for (var p = 0; p < PARALLEL; p++) {
+                var s = i + p * CHUNK;
+                if (s >= total) break;
+                var chunk = rows.slice(s, s + CHUNK).map(function(item) {
+                    return { id: item.id || (Date.now().toString(36) + Math.random().toString(36).substr(2,6)), data: item, created_at: item.createdAt || new Date().toISOString() };
+                });
+                batch.push(supabaseClient.from(key).upsert(chunk, { onConflict: 'id' }));
+            }
+            var results = await Promise.all(batch);
+            results.forEach(function(r) { if (r && r.error) console.warn('❌ Row push error [' + key + ']:', r.error.message); });
+        }
+        console.log('✅ Row push done:', key, '(' + total + ' rows)');
+    } catch(e) {
+        console.warn('❌ Row push catch [' + key + ']:', e.message || e);
+    }
+}
 // Immediate Push with Retry
 async function pushServer(key, val) {
     if (!supabaseClient || !Array.isArray(val)) return;
@@ -77,14 +117,11 @@ async function flushPush(key) {
 async function flushAllPendingPushes() {
     if (!supabaseClient) return;
     var keys = Object.keys(_pendingPushes);
-    console.log('🔄 Flushing', keys.length, 'pending tables...');
-    
-    var promises = keys.map(function(k) {
-        clearTimeout(pushTimers[k]);
-        return flushPush(k);
-    });
-    
-    await Promise.all(promises);
+    var rkeys = Object.keys(_pendingRows);
+    console.log('🔄 Flushing', keys.length + rkeys.length, 'pending tables...');
+    var promises = keys.map(function(k) { clearTimeout(pushTimers[k]); return flushPush(k); });
+    var rpromises = rkeys.map(function(k) { clearTimeout(_rowPushTimers[k]); return flushPushRows(k); });
+    await Promise.all(promises.concat(rpromises));
     console.log('✅ All pending data flushed');
 }
 
@@ -102,39 +139,39 @@ async function deleteServerRow(key, id) {
 // Pull all data
 async function pullAll() {
     if (!supabaseClient) return false;
-    
     _isSyncing = true;
     console.log('🔄 Starting data sync from Supabase...');
-    
     try {
-        for (var i = 0; i < ALL_TABLES.length; i++) {
-            var t = ALL_TABLES[i];
-            var res = await supabaseClient.from(t).select('data');
-            
-            if (res.error) {
-                console.warn('⚠️ Table not accessible:', t, '—', res.error.message);
-                if (!MEMORY_DB[t]) {
-                    try { MEMORY_DB[t] = JSON.parse(localStorage.getItem('wms_' + t) || '[]'); }
-                    catch(e) { MEMORY_DB[t] = []; }
+        // Master data ka purana device-cache hata do — ab sirf Supabase se active hoga
+        LIVE_TABLES.forEach(function(t){ try { localStorage.removeItem('wms_' + t); } catch(e) {} });
+
+        await Promise.all(ALL_TABLES.map(async function(t) {
+            try {
+                var res = await supabaseClient.from(t).select('data');
+                if (res.error) {
+                    console.warn('⚠️ Table not accessible:', t, '—', res.error.message);
+                    if (!MEMORY_DB[t]) {
+                        if (isLiveTable(t)) MEMORY_DB[t] = [];
+                        else { try { MEMORY_DB[t] = JSON.parse(localStorage.getItem('wms_' + t) || '[]'); } catch(e) { MEMORY_DB[t] = []; } }
+                    }
+                    return;
                 }
-                continue;
-            }
-            
-            if (res.data && res.data.length > 0) {
-                var parsed = res.data.map(function(row) { return row.data; }).filter(function(d) { return d !== null; });
-                MEMORY_DB[t] = parsed;
-                try { localStorage.setItem('wms_' + t, JSON.stringify(parsed)); } catch(e) {}
-            } else {
-                if (!MEMORY_DB[t]) {
-                    try { MEMORY_DB[t] = JSON.parse(localStorage.getItem('wms_' + t) || '[]'); }
-                    catch(e) { MEMORY_DB[t] = []; }
+                if (res.data && res.data.length > 0) {
+                    var parsed = res.data.map(function(row) { return row.data; }).filter(function(d) { return d !== null; });
+                    MEMORY_DB[t] = parsed;
+                    if (isLiveTable(t)) { try { localStorage.removeItem('wms_' + t); } catch(e) {} }
+                    else { try { localStorage.setItem('wms_' + t, JSON.stringify(parsed)); } catch(e) {} }
+                } else {
+                    if (!MEMORY_DB[t]) {
+                        if (isLiveTable(t)) MEMORY_DB[t] = [];
+                        else { try { MEMORY_DB[t] = JSON.parse(localStorage.getItem('wms_' + t) || '[]'); } catch(e) { MEMORY_DB[t] = []; } }
+                    }
                 }
-            }
-        }
-        
+            } catch(e) { console.warn('Pull error [' + t + ']:', e.message || e); }
+        }));
+
         _isSyncing = false;
         console.log('✅ Data sync complete!');
-        
         if (APP.currentUser && APP.currentSection) {
             renderSection(APP.currentSection, APP.currentSub);
             if (typeof updateNotifBadge === 'function') updateNotifBadge();
@@ -147,44 +184,71 @@ async function pullAll() {
     }
 }
 
-// Realtime Subscription
-if (supabaseClient) {
-    try {
-        supabaseClient.channel('wms-live-all').on('postgres_changes', {
-            event: '*', schema: 'public', table: '*'
-        }, function(p) {
-            var tableName = p.table;
-            if (!tableName || !MEMORY_DB[tableName]) return;
-            
-            if (_localWriteTs[tableName] && (Date.now() - _localWriteTs[tableName]) < 3000) return;
-            
-            if (p.eventType === 'DELETE' && p.old && p.old.id) {
-                MEMORY_DB[tableName] = MEMORY_DB[tableName].filter(function(item) { return item.id !== p.old.id; });
-            } else if (p.new && p.new.data) {
-                var newItem = p.new.data;
-                var found = false;
-                for (var j=0; j<MEMORY_DB[tableName].length; j++) {
-                    if (MEMORY_DB[tableName][j].id === newItem.id) {
-                        MEMORY_DB[tableName][j] = newItem;
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) MEMORY_DB[tableName].push(newItem);
-            }
-            
-            try { localStorage.setItem('wms_' + tableName, JSON.stringify(MEMORY_DB[tableName])); } catch(e) {}
-            
-            if (APP.currentUser && APP.currentSection && !_isSyncing) {
-                renderSection(APP.currentSection, APP.currentSub);
-                if (tableName === 'notifications') updateNotifBadge();
-            }
-        }).subscribe();
-    } catch(e) {
-        console.warn('Realtime error:', e);
-    }
+// ==================== REALTIME ====================
+var _rtRenderTimer = null;
+function rtScheduleRender() {
+    if (_rtRenderTimer) return;                 // sab events merge — max 1 render / 800ms
+    _rtRenderTimer = setTimeout(function() {
+        _rtRenderTimer = null;
+        if (APP.currentUser && APP.currentSection && !_isSyncing) {
+            renderSection(APP.currentSection, APP.currentSub);
+            if (typeof updateNotifBadge === 'function') updateNotifBadge();
+        }
+    }, 800);
 }
-
+function rtApplyChange(tableName, p) {
+    if (!tableName) return;
+    if (!MEMORY_DB[tableName]) { pullLiveTable(tableName); return; }   // table abhi pull nahi hui — server se le aao
+    if (_localWriteTs[tableName] && (Date.now() - _localWriteTs[tableName]) < 5000) return;  // apna hi echo — ignore
+    if (p.eventType === 'DELETE' && p.old && p.old.id) {
+        MEMORY_DB[tableName] = MEMORY_DB[tableName].filter(function(item) { return item.id !== p.old.id; });
+    } else if (p.new && p.new.data) {
+        var newItem = p.new.data, found = false;
+        for (var j = 0; j < MEMORY_DB[tableName].length; j++) {
+            if (MEMORY_DB[tableName][j].id === newItem.id) { MEMORY_DB[tableName][j] = newItem; found = true; break; }
+        }
+        if (!found) MEMORY_DB[tableName].push(newItem);
+    } else return;
+    if (!isLiveTable(tableName)) { try { localStorage.setItem('wms_' + tableName, JSON.stringify(MEMORY_DB[tableName])); } catch(e) {} }
+    rtScheduleRender();
+}
+if (supabaseClient) {
+    ALL_TABLES.forEach(function(t) {
+        try {
+            supabaseClient.channel('rt-' + t)
+                .on('postgres_changes', { event: '*', schema: 'public', table: t }, function(p) { rtApplyChange(t, p); })
+                .subscribe();
+        } catch(e) { console.warn('Realtime channel error [' + t + ']:', e); }
+    });
+    // Broadcast refresh — bulk upload ke baad sab clients table dobara pull karte hain
+    try {
+        window._refreshChannel = supabaseClient.channel('wms-refresh', { config: { broadcast: { self: false } } })
+            .on('broadcast', { event: 'refresh' }, function(msg) {
+                var tbl = msg.payload && msg.payload.table;
+                if (tbl && msg.payload.by !== (APP.currentUser ? APP.currentUser.name : '')) pullLiveTable(tbl);
+            })
+            .subscribe();
+    } catch(e) { console.warn('Refresh channel error:', e); }
+}
+function broadcastRefresh(table) {
+    if (!supabaseClient || !window._refreshChannel) return;
+    try {
+        window._refreshChannel.send({ type: 'broadcast', event: 'refresh', payload: { table: table, by: APP.currentUser ? APP.currentUser.name : 'System', at: new Date().toISOString() } });
+    } catch(e) {}
+}
+async function pullLiveTable(t) {
+    if (!supabaseClient) return;
+    try {
+        var res = await supabaseClient.from(t).select('data');
+        if (!res.error && res.data) {
+            MEMORY_DB[t] = res.data.map(function(row) { return row.data; }).filter(function(d) { return d !== null; });
+            if (!isLiveTable(t)) { try { localStorage.setItem('wms_' + t, JSON.stringify(MEMORY_DB[t])); } catch(e) {} }
+            _isSyncing = false;
+            rtScheduleRender();
+            if (APP.currentUser) showToast('Live update: ' + t.replace(/_/g, ' ') + ' refreshed from server', 'info');
+        }
+    } catch(e) { console.warn('pullLiveTable error [' + t + ']:', e); }
+}
 // ==================== STATE & DATABASE (MEMORY-FIRST) ====================
 var APP = {
     currentUser: null, currentSection: 'dashboard', currentSub: null,
@@ -198,8 +262,8 @@ var DB = {
     _k: function(k){return 'wms_'+k;},
     get: function(k){
         if(!MEMORY_DB[k]) {
-            try { MEMORY_DB[k] = JSON.parse(localStorage.getItem(this._k(k))||'[]'); }
-            catch(e) { MEMORY_DB[k] = []; }
+            if (isLiveTable(k)) MEMORY_DB[k] = [];   // master data device se kabhi load nahi hota — sirf Supabase
+            else { try { MEMORY_DB[k] = JSON.parse(localStorage.getItem(this._k(k))||'[]'); } catch(e) { MEMORY_DB[k] = []; } }
         }
         return MEMORY_DB[k];
     },
@@ -211,39 +275,75 @@ var DB = {
         return MEMORY_DB[k];
     },
     set: function(k, v) {
-        MEMORY_DB[k] = v; // Memory update for instant UI
+        var old = MEMORY_DB[k];
+        MEMORY_DB[k] = v;
         _localWriteTs[k] = Date.now();
-        
-        // LocalStorage mein save karo (agar size chota hai toh)
-        try {
-            var str = JSON.stringify(v);
-            if(str.length < 4500000) localStorage.setItem(this._k(k), str);
-            else localStorage.removeItem(this._k(k)); // Free up space if too big
-        } catch(e) { console.warn('LocalStorage quota exceeded, using memory only'); }
-        
-        pushServer(k, v); // Sync to Supabase in batches
+        if (isLiveTable(k)) {
+            // LIVE table: no localStorage, no full-array push — sirf changed rows diff karke push
+            var toPush = [];
+            if (v.length <= 3000) {
+                var oldMap = {};
+                if (old && old.length) for (var i = 0; i < old.length; i++) oldMap[old[i].id] = JSON.stringify(old[i]);
+                for (var j = 0; j < v.length; j++) {
+                    var s = JSON.stringify(v[j]);
+                    if (!oldMap[v[j].id] || oldMap[v[j].id] !== s) toPush.push(v[j]);
+                }
+            } else {
+                // badi array (bulk) — timestamp diff, O(n) fast
+                for (var j2 = 0; j2 < v.length; j2++) {
+                    var ts = Date.parse(v[j2].updatedAt || v[j2].createdAt || 0) || 0;
+                    if (ts > (_livePushTs[k] || 0)) toPush.push(v[j2]);
+                }
+                _livePushTs[k] = Date.now();
+            }
+            if (toPush.length) pushRows(k, toPush);
+        } else {
+            try {
+                var str = JSON.stringify(v);
+                if (str.length < 4500000) localStorage.setItem(this._k(k), str);
+                else localStorage.removeItem(this._k(k));
+            } catch(e) { console.warn('LocalStorage quota exceeded, using memory only'); }
+            pushServer(k, v);
+        }
     },
-    add: function(k,item){
-        var d=this.get(k); item.id=item.id||this.uid(); item.createdAt=item.createdAt||new Date().toISOString();
-        d.push(item); this.set(k,d); return item;
+    add: function(k, item) {
+        var d = this.get(k);
+        item.id = item.id || this.uid();
+        item.createdAt = item.createdAt || new Date().toISOString();
+        d.push(item);
+        if (isLiveTable(k)) { _localWriteTs[k] = Date.now(); pushRows(k, [item]); }
+        else this.set(k, d);
+        return item;
     },
-    update: function(k,id,up){
-        var d=this.get(k),idx=-1;
-        for(var i=0;i<d.length;i++){if(d[i].id===id){idx=i;break;}}
-        if(idx>-1){
-            for(var key in up){d[idx][key]=up[key];} 
-            d[idx].updatedAt=new Date().toISOString(); 
-            this.set(k,d); 
+    addBulk: function(k, rows) {
+        if (!rows || !rows.length) return 0;
+        var d = this.get(k);
+        for (var i = 0; i < rows.length; i++) {
+            rows[i].id = rows[i].id || this.uid();
+            rows[i].createdAt = rows[i].createdAt || new Date().toISOString();
+            d.push(rows[i]);
+        }
+        if (isLiveTable(k)) { _localWriteTs[k] = Date.now(); pushRows(k, rows); }
+        else this.set(k, d);
+        return rows.length;
+    },
+    update: function(k, id, up) {
+        var d = this.get(k), idx = -1;
+        for (var i = 0; i < d.length; i++) { if (d[i].id === id) { idx = i; break; } }
+        if (idx > -1) {
+            for (var key in up) { d[idx][key] = up[key]; }
+            d[idx].updatedAt = new Date().toISOString();
+            if (isLiveTable(k)) { MEMORY_DB[k] = d; _localWriteTs[k] = Date.now(); pushRows(k, [d[idx]]); }
+            else this.set(k, d);
             return d[idx];
         }
         return null;
     },
-    remove: function(k,id){
-        // Delete from Supabase
+    remove: function(k, id) {
         deleteServerRow(k, id);
-        // Remove from memory and update local
-        var filtered = this.get(k).filter(function(d){return d.id!==id;});
-        this.set(k, filtered);
+        var filtered = this.get(k).filter(function(d) { return d.id !== id; });
+        if (isLiveTable(k)) { MEMORY_DB[k] = filtered; _localWriteTs[k] = Date.now(); }
+        else this.set(k, filtered);
     },
     find: function(k,id){return this.get(k).filter(function(d){return d.id===id;})[0]||null;},
     filter: function(k,fn){return this.get(k).filter(fn);},
@@ -255,7 +355,6 @@ var DB = {
     unloadNo: function(){return 'UNL-'+Date.now().toString(36).toUpperCase().substr(0,8);},
     obdNo: function(){return 'OBD-'+new Date().getFullYear()+'-'+String(this.count('obd_data')+1).padStart(4,'0');}
 };
-
 // ==================== UTILITIES ====================
 function fmtDate(d){if(!d)return'-';var dt=new Date(d);return dt.toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'});}
 function fmtDT(d){if(!d)return'-';var dt=new Date(d);return dt.toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'})+' '+dt.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'});}
@@ -359,8 +458,9 @@ function renderNotifPanel(){
         h+='<div class="notif-time" style="margin-top:4px">'+fmtDT(nt.dateTime)+'</div>';
         h+='</div>';
 
-        // Unread dot
+        // Unread dot + delete button
         if(!nt.read)h+='<div style="width:8px;height:8px;border-radius:50%;background:var(--accent);flex-shrink:0;margin-top:6px"></div>';
+        h+='<button class="btn btn-danger btn-sm" title="Delete" style="width:26px;height:26px;padding:0;min-width:26px;flex-shrink:0;margin-left:6px" onclick="event.stopPropagation();deleteNotif(\''+nt.id+'\')"><i class="bx bx-trash" style="font-size:12px"></i></button>';
         h+='</div>';
 
         // Action buttons for approval notifications
@@ -608,40 +708,42 @@ function chkAct(act){
 // ==================== SIDEBAR ====================
 function renderSidebar(){
     if(!APP.currentUser)return;
-        var mods=[
-        {id:'dashboard',icon:'bxs-home',label:'My Home',subs:[]},
-        {id:'inbound',icon:'bxs-truck',label:'Inbound Processing',subs:[
-            {id:'security-gate',label:'Gate Check-In'},
-            {id:'pending-vehicle',label:'Inbound Control Tower'},
-            {id:'unloading-screen',label:'Goods Receipt'},
-            {id:'posting-pending',label:'GR Posting Pending'},
-            {id:'inbound-record',label:'Inbound Delivery Records'},
-            {id:'unloading-stock',label:'Stock in GR Area'}
+            var mods=[
+        {id:'dashboard',icon:'bxs-home',label:'Home',subs:[]},
+        {id:'inbound',icon:'bxs-truck',label:'Goods Inward',subs:[
+            {id:'security-gate',label:'Gate Entry'},
+            {id:'pending-vehicle',label:'Waiting Vehicles'},
+            {id:'unloading-screen',label:'Unload Vehicle'},
+            {id:'posting-pending',label:'Pending Approvals'},
+            {id:'inbound-record',label:'Inward History'},
+            {id:'unloading-stock',label:'Unloaded Stock'}
         ]},
-        {id:'putaway',icon:'bxs-package',label:'Putaway',subs:[]},
-        {id:'piv',icon:'bxs-clipboard',label:'Physical Inventory',subs:[]},
-        {id:'location',icon:'bxs-map-pin',label:'Warehouse Stock',subs:[]},
-        {id:'rack',icon:'bxs-grid-alt',label:'Storage Bins',subs:[]},
-        {id:'material',icon:'bxs-label',label:'Product Master',subs:[]},
-        {id:'picking',icon:'bxs-box',label:'Outbound — Picking',subs:[
-            {id:'obd-upload',label:'Create Outbound Delivery'},
-            {id:'picking-assign',label:'Assign Warehouse Tasks'},
-            {id:'start-picking',label:'Confirm Picking'},
-            {id:'picking-done',label:'Confirmed Tasks'},
-            {id:'picking-with-loading',label:'Pick & Load'},
+        {id:'putaway',icon:'bxs-package',label:'Putaway (Store Stock)',subs:[]},
+        {id:'piv',icon:'bxs-clipboard',label:'Stock Count',subs:[]},
+        {id:'location',icon:'bxs-map-pin',label:'Stock Overview',subs:[]},
+        {id:'rack',icon:'bxs-grid-alt',label:'Bins & Racks',subs:[]},
+        {id:'material',icon:'bxs-label',label:'Products',subs:[]},
+        {id:'picking',icon:'bxs-box',label:'Order Picking',subs:[
+            {id:'obd-upload',label:'Create Delivery Order'},
+            {id:'picking-assign',label:'Assign Picking Tasks'},
+            {id:'start-picking',label:'Pick & Confirm'},
+            {id:'picking-done',label:'Completed Picks'},
+            {id:'picking-with-loading',label:'Pick and Load'},
+            {id:'crossdock-report',label:'Cross-Dock Report'},
             {id:'loc-requests',label:'Location Requests'}
         ]},
-        {id:'loading',icon:'bxs-truck',label:'Outbound — Loading',subs:[
-            {id:'loading-assign',label:'Assign Loading'},
-            {id:'start-loading',label:'Execute Loading'},
-            {id:'loading-done',label:'Goods Issue Records'},
-            {id:'qty-mismatch',label:'Quantity Differences'}
+        {id:'loading',icon:'bxs-truck',label:'Dispatch & Loading',subs:[
+            {id:'loading-assign',label:'Assign Loading Tasks'},
+            {id:'start-loading',label:'Load Vehicle'},
+            {id:'loading-done',label:'Dispatch History'},
+            {id:'loading-register',label:'Loading Register'},
+            {id:'qty-mismatch',label:'Qty Difference Report'}
         ]},
-        {id:'user-time',icon:'bx-time-five',label:'Resource Activity',subs:[]},
-        {id:'admin',icon:'bxs-user-detail',label:'User Administration',subs:[]},
-        {id:'settings',icon:'bxs-cog',label:'Configuration',subs:[]},
-        {id:'reports',icon:'bxs-bar-chart-alt-2',label:'Analytics',subs:[]},
-        {id:'audit',icon:'bxs-receipt',label:'Change Documents',subs:[]}
+        {id:'user-time',icon:'bx-time-five',label:'User Work Log',subs:[]},
+        {id:'admin',icon:'bxs-user-detail',label:'Users & Permissions',subs:[]},
+        {id:'settings',icon:'bxs-cog',label:'Settings',subs:[]},
+        {id:'reports',icon:'bxs-bar-chart-alt-2',label:'Reports',subs:[]},
+        {id:'audit',icon:'bxs-receipt',label:'Activity History',subs:[]}
     ];
     var h='';
     mods.forEach(function(mod){
@@ -689,39 +791,41 @@ function renderSidebar(){
 
 // ==================== NAVIGATION ====================
 var sectionNames={
-    dashboard:'My Home',
-    inbound:'Inbound Processing',
-    putaway:'Warehouse Task: Putaway',
-    piv:'Physical Inventory',
-    location:'Warehouse Stock (Storage Locations)',
-    rack:'Storage Bin Master',
-    material:'Product Master',
-    admin:'User Administration',
-    settings:'System Configuration',
+    dashboard:'Home',
+    inbound:'Goods Inward (Inbound)',
+    putaway:'Putaway — Store Stock in Bins',
+    piv:'Stock Count (Physical Inventory)',
+    location:'Stock Overview (Warehouse Stock)',
+    rack:'Bins & Racks (Storage Bin Master)',
+    material:'Products (Product Master)',
+    admin:'Users & Permissions',
+    settings:'Settings',
     reports:'Reports & Analytics',
-    audit:'Change Documents (Audit)',
-    picking:'Outbound Processing — Picking',
-    loading:'Outbound Processing — Loading',
-    'user-time':'Resource Activity Log'
+    audit:'Activity History (Audit Log)',
+    picking:'Order Picking (Outbound)',
+    loading:'Dispatch & Loading (Outbound)',
+    'user-time':'User Work Log'
 };
 
 var subNames={
-    'security-gate':'Create Gate Check-In',
-    'pending-vehicle':'Inbound Control Tower',
-    'unloading-screen':'Goods Receipt / Unloading',
-    'posting-pending':'Goods Receipt Posting Pending',
-    'inbound-record':'Inbound Delivery Records',
-    'unloading-stock':'Stock in GR Area',
-    'obd-upload':'Create Outbound Delivery Order',
-    'picking-assign':'Assign Warehouse Tasks',
-    'start-picking':'Confirm Picking Task',
-    'picking-done':'Confirmed Picking Tasks',
-    'picking-with-loading':'Pick & Load (Combined)',
-    'loc-requests':'Location Requests (Admin)',
+    'security-gate':'Gate Entry',
+    'pending-vehicle':'Waiting Vehicles',
+    'unloading-screen':'Unload Vehicle (Unloading)',
+    'posting-pending':'Pending Approvals (GR Posting)',
+    'inbound-record':'Inward History (Delivery Records)',
+    'unloading-stock':'Unloaded Stock (GR Area)',
+    'obd-upload':'Create Delivery Order',
+    'picking-assign':'Assign Picking Tasks',
+    'start-picking':'Pick & Confirm',
+    'picking-done':'Completed Picks',
+    'picking-with-loading':'Pick and Load',
+    'loc-requests':'Location Requests',
+    'crossdock-report':'Cross-Dock Report',
+    'loading-register':'Loading Register',
     'loading-assign':'Assign Loading Tasks',
-    'start-loading':'Execute Loading',
-    'loading-done':'Goods Issue Records',
-    'qty-mismatch':'Quantity Differences'
+    'start-loading':'Load Vehicle',
+    'loading-done':'Dispatch History (Goods Issue)',
+    'qty-mismatch':'Qty Difference Report'
 };
 
 function navTo(sec,sub){
@@ -934,29 +1038,6 @@ function renderInbound(sub){
 }
 
 // --- Security Gate ---
-function renderSecurityGate(){
-    var h='<div class="section-header"><h2><i class="bx bx-shield-quarter"></i> Security Gate Entry</h2></div>';
-    h+='<div class="card"><div class="card-title"><i class="bx bxs-truck"></i> Vehicle Reporting</div>';
-    h+='<div class="form-group" style="margin-bottom:16px"><label>Vehicle Type <span class="req">*</span></label>';
-    h+='<div style="display:flex;gap:10px;margin-top:6px">';
-    h+='<label style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:10px 18px;border:2px solid var(--accent);border-radius:var(--radius-sm);background:var(--accent-dim);flex:1;justify-content:center;font-weight:600;color:var(--accent)"><input type="radio" name="vehType" value="Unloading" checked style="accent-color:var(--accent);width:16px;height:16px"> UNLOADING</label>';
-    h+='<label style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:10px 18px;border:2px solid var(--border);border-radius:var(--radius-sm);flex:1;justify-content:center;font-weight:600;color:var(--text-secondary)"><input type="radio" name="vehType" value="Loading" style="accent-color:var(--accent2);width:16px;height:16px"> LOADING</label>';
-    h+='</div></div>';
-    h+='<div class="form-row">';
-    h+='<div class="form-group"><label>Vehicle Number <span class="req">*</span></label><input type="text" id="secVNo" class="form-input" placeholder="MH-12-AB-1234" style="text-transform:uppercase"></div>';
-    h+='<div class="form-group" id="lrGrp"><label>LR Number <span class="req">*</span></label><input type="text" id="secLR" class="form-input" placeholder="LR-2025-001" style="text-transform:uppercase"></div>';
-    h+='<div class="form-group"><label>Driver Name <span class="req">*</span></label><input type="text" id="secDriver" class="form-input" placeholder="Driver full name"></div>';
-    h+='<div class="form-group"><label>Driver Mobile <span class="req">*</span></label><input type="tel" id="secMobile" class="form-input" placeholder="10 digit" maxlength="10"></div>';
-    h+='<div class="form-group"><label>Transporter Name <span class="req">*</span></label><input type="text" id="secTransport" class="form-input" placeholder="Transport company"></div>';
-    h+='<div class="form-group"><label>Reporting Time</label><div class="form-input" style="background:var(--bg-secondary);color:var(--accent);font-weight:600">'+fmtDT(new Date())+' <small>(Auto)</small></div></div>';
-    h+='<div class="form-group"><label>Entry By</label><div class="form-input" style="background:var(--bg-secondary);color:var(--accent2);font-weight:600"><i class="bx bx-user-check"></i> '+(APP.currentUser?esc(APP.currentUser.name)+' ('+esc(APP.currentUser.role)+')':'Unknown')+'</div></div>';
-    h+='</div>';
-    h+='<div class="form-actions">';
-    if(chkAct('canSecurityEntry'))h+='<button class="btn btn-glass" onclick="submitSecGate()"><i class="bx bx-check-circle"></i> Submit Vehicle</button>';
-    else h+='<button class="btn btn-glass" disabled><i class="bx bx-block"></i> Access Denied</button>';
-    h+='</div></div>';
-    setHtml(h);
-}
 document.addEventListener('change',function(e){
     if(e.target.name==='vehType'){
         var lg=document.getElementById('lrGrp');if(lg)lg.style.display=e.target.value==='Unloading'?'':'none';
@@ -967,30 +1048,6 @@ document.addEventListener('change',function(e){
         });
     }
 });
-function submitSecGate(){
-    var vt=document.querySelector('input[name="vehType"]:checked');
-    var vno=document.getElementById('secVNo').value.trim().toUpperCase();
-    var lr=document.getElementById('secLR').value.trim().toUpperCase();
-    var dr=document.getElementById('secDriver').value.trim();
-    var mb=document.getElementById('secMobile').value.trim();
-    var tp=document.getElementById('secTransport').value.trim();
-    if(!vno||!dr||!mb||!tp){showToast('All fields are required','error');return;}
-    if(!/^\d{10}$/.test(mb)){showToast('Invalid 10-digit mobile','error');return;}
-    var type=vt?vt.value:'Unloading';
-    if(type==='Unloading'&&!lr){showToast('LR Number required for unloading','error');return;}
-    if(type==='Unloading'){
-        var lrE=DB.filter('vehicles',function(v){return v.lrNo&&v.lrNo.toUpperCase()===lr;});
-        if(lrE.length>0){showToast('LR Number already exists!','error');return;}
-    }
-    var status=type==='Unloading'?'Unload Pending':'Loading Pending';
-    DB.add('vehicles',{vehicleNo:vno,lrNo:lr||'',driverName:dr,driverMobile:mb,transportName:tp,vehicleType:type,status:status,reportedAt:new Date().toISOString(),entryBy:APP.currentUser?APP.currentUser.id:'',entryByName:APP.currentUser?APP.currentUser.name:''});
-    addNotif('New '+type+' Vehicle '+vno+' reported at gate by '+(APP.currentUser?APP.currentUser.name:'Unknown'),'warning');
-    logAction('Security Gate','ENTRY',type+' Vehicle '+vno+' LR:'+(lr||'N/A')+' By:'+(APP.currentUser?APP.currentUser.name:'Unknown'));
-    showToast('Vehicle submitted successfully!','success');
-    document.getElementById('secVNo').value='';document.getElementById('secLR').value='';
-    document.getElementById('secDriver').value='';document.getElementById('secMobile').value='';document.getElementById('secTransport').value='';
-}
-
 // --- Pending Vehicle ---
 function renderPendingVehicle(){
     var allV=DB.get('vehicles');
@@ -1011,7 +1068,10 @@ function renderPendingVehicle(){
         var matCount=0;invs.forEach(function(inv){matCount+=DB.filter('invoice_materials',function(m){return m.invoiceId===inv.id;}).length;});
         h+='<tr><td><strong>'+esc(v.vehicleNo)+'</strong></td><td>'+esc(v.lrNo||'-')+'</td><td>'+esc(v.transportName||'-')+'</td><td><span class="badge badge-info">'+invs.length+'</span></td><td><span class="badge badge-accent">'+matCount+'</span></td><td style="font-size:11px;color:var(--text-secondary)">'+esc(v.entryByName||'-')+'</td><td><div class="table-actions">';
         if(chkAct('canUploadInvoice'))h+='<button class="btn btn-glass btn-sm" onclick="showUploadInvoice(\''+v.id+'\')"><i class="bx bx-upload"></i> Invoice</button>';
+        if(chkAct('canUploadInvoice'))h+='<button class="btn btn-glass btn-sm" onclick="showVehicleExcelUpload(\''+v.id+'\')"><i class="bx bx-spreadsheet"></i> Excel</button>';
+        h+='<button class="btn btn-glass btn-sm" onclick="viewVehicleInvoices(\''+v.id+'\')"><i class="bx bx-show"></i> View</button>';
         if(chkAct('canAssignVehicle'))h+='<button class="btn btn-glass btn-sm" onclick="showAssignUnloading(\''+v.id+'\')"><i class="bx bx-user-plus"></i> Assign</button>';
+        h+='<button class="btn btn-danger btn-sm" title="Delete" onclick="deleteVehicle(\''+v.id+'\')"><i class="bx bx-trash"></i></button>';
         h+='</div></td></tr>';
     });
     h+='</tbody></table></div></div>';
@@ -1020,6 +1080,7 @@ function renderPendingVehicle(){
     else assigned.forEach(function(v){
         var invs=DB.filter('invoices',function(i){return i.vehicleId===v.id;});
         h+='<tr><td><strong>'+esc(v.vehicleNo)+'</strong></td><td>'+esc(v.lrNo||'-')+'</td><td><span class="badge badge-accent" style="font-family:var(--font-display)">'+esc(v.assignedToName||v.assignedTo||'-')+'</span></td><td><span class="badge badge-info">'+invs.length+'</span></td><td style="font-size:11px;color:var(--text-secondary)">'+esc(v.entryByName||'-')+'</td><td><div class="table-actions">';
+        h+='<button class="btn btn-glass btn-sm" onclick="viewVehicleInvoices(\''+v.id+'\')"><i class="bx bx-show"></i> View</button>';
         if(chkAct('canAssignVehicle'))h+='<button class="btn btn-danger btn-sm" onclick="unassignVehicle(\''+v.id+'\')"><i class="bx bx-user-minus"></i> Unassign</button>';
         h+='</div></td></tr>';
     });
@@ -1185,7 +1246,7 @@ function showAssignUnloading(vehId){
     var h='<div style="background:var(--accent-dim);padding:12px;border-radius:var(--radius-sm);margin-bottom:14px"><strong style="color:var(--accent)">'+esc(v.vehicleNo)+'</strong> — '+esc(v.lrNo||'')+' | Invoices: '+invs.length+'</div>';
     h+='<div class="form-group"><label>Select User <span class="req">*</span></label><select id="assignUserSelect" class="form-input" onchange="document.getElementById(\'assignUserIdInput\').value=this.value">'+uOpts+'</select></div>';
     h+='<div class="form-group"><label>Ya User ID Type Karein <span class="req">*</span></label><input type="text" id="assignUserIdInput" class="form-input" placeholder="User ID..." style="font-family:var(--font-display);font-size:13px" onkeydown="if(event.key===\'Enter\'){event.preventDefault();doAssignUnloading(\''+vehId+'\');}"></div>';
-    h+='<div style="background:var(--bg-secondary);padding:10px;border-radius:var(--radius-sm);font-size:11px;color:var(--text-muted);border:1px dashed var(--border)"><i class="bx bx-info-circle" style="color:var(--warning)"></i> Dropdown se select karein ya User ID type karein</div>';
+    h+='<div style="background:var(--bg-secondary);padding:10px;border-radius:var(--radius-sm);font-size:11px;color:var(--text-muted);border:1px dashed var(--border)"><i class="bx bx-info-circle" style="color:var(--warning)"></i> Select a user from the dropdown or type a User ID</div>';
     showModal('Assign Unloading — '+v.vehicleNo,h,'md',
         '<button class="btn btn-glass" onclick="closeModal()">Cancel</button>'+
         '<button class="btn btn-glass" onclick="doAssignUnloading(\''+vehId+'\')"><i class="bx bx-check"></i> Assign</button>');
@@ -1193,7 +1254,7 @@ function showAssignUnloading(vehId){
 }
 function doAssignUnloading(vehId){
     var userId=document.getElementById('assignUserIdInput').value.trim();
-    if(!userId){showToast('User ID select karein ya type karein','error');return;}
+    if(!userId){showToast('Please select or type a User ID','error');return;}
     var userObj=DB.find('users',userId);
     var userName=userObj?userObj.name:userId;
     DB.update('vehicles',vehId,{assignedTo:userId,assignedToName:userName,status:'Assigned'});
@@ -1215,7 +1276,7 @@ function renderUnloadingScreen(){
     var myId=APP.currentUser.id;
     var pendingVehs=DB.filter('vehicles',function(v){return v.assignedTo===myId&&(v.status==='Assigned'||v.status==='Unload Pending');});
     var partialVehs=DB.filter('vehicles',function(v){return v.assignedTo===myId&&v.status==='Partial Unload';});
-    var h='<div class="section-header"><h2><i class="bx bx-package"></i> My Unloading</h2>';
+    var h='<div class="section-header"><h2><i class="bx bx-package"></i> My Goods Receipt</h2>';
     h+='<div style="font-size:12px;color:var(--text-muted)">Pending: '+pendingVehs.length+' | Partial: '+partialVehs.length+'</div></div>';
     if(pendingVehs.length>0){
         h+='<div class="card" style="margin-bottom:16px"><div class="card-title"><i class="bx bx-time-five" style="color:var(--warning)"></i> Pending Start ('+pendingVehs.length+')</div>';
@@ -1261,9 +1322,10 @@ function renderUnloadingScreen(){
 // --- Start Unload (Screenshot Format — Manual + Scan + Editable History) ---
 function startUnload(vehId,existingData){
     var v=DB.find('vehicles',vehId);if(!v)return;
+    if(!v.unloadStartedAt)DB.update('vehicles',vehId,{unloadStartedAt:new Date().toISOString()});
     var invs=DB.filter('invoices',function(i){return i.vehicleId===vehId;});
 
-    // === SILENT BACKGROUND LOOKUP — Operator ko KUCH nahi dikhega ===
+    // === SILENT BACKGROUND LOOKUP — nothing is shown to the operator ===
     var materialEntries=[],eanIndex={},matIndex={};
     invs.forEach(function(inv){
         DB.filter('invoice_materials',function(m){return m.invoiceId===inv.id;}).forEach(function(m){
@@ -1284,7 +1346,7 @@ function startUnload(vehId,existingData){
         });
     });
 
-    // Resume se restore
+    // Restore from resume
     var scanHistory=[];
     if(existingData&&existingData.scanHistory){
         scanHistory=existingData.scanHistory||[];
@@ -1297,78 +1359,57 @@ function startUnload(vehId,existingData){
 
     window._unloadData={vehId:vehId,vehicleNo:v.vehicleNo,lrNo:v.lrNo,materialEntries:materialEntries,eanIndex:eanIndex,matIndex:matIndex,scanHistory:scanHistory,currentMatchIdx:null,editingIdx:-1};
 
-    // === BUILD UI ===
+    // === BUILD UI (SAP Fiori style) ===
     var h='';
 
-    // Top bar
-    h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;flex-wrap:wrap;gap:8px">';
-    h+='<div><strong style="color:var(--accent);font-size:20px;font-family:var(--font-display);letter-spacing:1.5px">'+esc(v.vehicleNo)+'</strong>';
-    h+=' <span style="color:var(--text-muted);font-size:12px;margin-left:6px">(LR: '+esc(v.lrNo||'-')+')</span></div>';
-    h+='<div style="font-size:11px;color:var(--text-muted)">Scans: <strong id="ulScanCount" style="color:var(--accent);font-size:14px">'+scanHistory.length+'</strong></div>';
+    // Object header strip
+    h+='<div style="background:#fff;border:1px solid #D9D9D9;border-radius:8px;margin-bottom:12px;padding:12px 16px;display:flex;align-items:center;gap:14px;flex-wrap:wrap">';
+    h+='<div style="width:44px;height:44px;border-radius:10px;background:#EBF5FE;color:#0A6ED1;display:flex;align-items:center;justify-content:center;font-size:24px"><i class="bx bx-truck"></i></div>';
+    h+='<div style="flex:1;min-width:200px"><div style="font-size:18px;font-weight:700;color:#32363A">'+esc(v.vehicleNo)+' <span style="font-weight:400;font-size:12px;color:#6A6D70">· LR '+esc(v.lrNo||'-')+'</span></div>';
+    h+='<div style="font-size:12px;color:#6A6D70;margin-top:2px">Goods Receipt — Unloading · Plant MD20</div></div>';
+    h+='<div style="text-align:right"><div style="font-size:11px;color:#6A6D70;text-transform:uppercase;letter-spacing:.5px">Scan Entries</div><div id="ulScanCount" style="font-size:22px;font-weight:800;color:#0A6ED1;line-height:1">'+scanHistory.length+'</div></div>';
     h+='</div>';
 
-    // SCAN EAN / ENTER EAN
-    h+='<div style="margin-bottom:6px">';
-    h+='<label style="font-size:10px;font-weight:800;color:var(--text-muted);text-transform:uppercase;letter-spacing:1.5px;display:block;margin-bottom:6px"><i class="bx bx-barcode" style="margin-right:4px"></i>SCAN EAN / ENTER EAN</label>';
-    h+='<div class="search-box" style="max-width:100%;border-width:2px"><i class="bx bx-barcode"></i>';
-    h+='<input type="text" id="ulScanEan" placeholder="Scan ya type karein..." style="font-family:var(--font-display);font-size:16px;letter-spacing:1.5px;padding:14px 14px 14px 42px"></div>';
+    // SCAN ENTRY panel
+    h+='<div class="card" style="margin-bottom:12px">';
+    h+='<div class="card-title"><i class="bx bx-barcode"></i> Scan / Manual Entry</div>';
+    h+='<div class="form-row" style="grid-template-columns:1.3fr 1fr .45fr;align-items:end;margin-bottom:10px">';
+    h+='<div class="form-group"><label>EAN / Barcode</label>';
+    h+='<input type="text" id="ulScanEan" class="form-input" placeholder="Scan or type EAN code..." style="font-family:var(--font-display);font-size:15px;letter-spacing:1px;padding:10px 12px"></div>';
+    h+='<div class="form-group"><label>Material Code</label>';
+    h+='<input type="text" id="ulScanMat" class="form-input" placeholder="Enter material code..." style="text-transform:uppercase;padding:10px 12px"></div>';
+    h+='<div class="form-group"><label>Qty</label>';
+    h+='<input type="number" id="ulScanQty" class="form-input" value="1" min="1" style="text-align:center;font-weight:800;font-size:16px;padding:10px"></div>';
     h+='</div>';
-
-    // OR
-    h+='<div style="display:flex;align-items:center;gap:12px;margin:16px 0">';
-    h+='<div style="flex:1;height:1px;background:var(--border)"></div>';
-    h+='<span style="color:var(--text-muted);font-size:11px;font-weight:800;letter-spacing:3px">OR</span>';
-    h+='<div style="flex:1;height:1px;background:var(--border)"></div>';
-    h+='</div>';
-
-    // ENTER MATERIAL CODE
-    h+='<div style="margin-bottom:20px">';
-    h+='<label style="font-size:10px;font-weight:800;color:var(--text-muted);text-transform:uppercase;letter-spacing:1.5px;display:block;margin-bottom:6px"><i class="bx bx-cube" style="margin-right:4px"></i>ENTER MATERIAL CODE</label>';
-    h+='<div class="search-box" style="max-width:100%;border-width:2px"><i class="bx bx-cube"></i>';
-    h+='<input type="text" id="ulScanMat" placeholder="Material code type karein..." style="font-size:14px;text-transform:uppercase;padding:14px 14px 14px 42px"></div>';
-    h+='</div>';
-
-    // MATERIAL DETAILS (AUTO FILL) — INPUTS jo auto-fill bhi honge aur manual bhi
-    h+='<div style="background:var(--bg-secondary);border-radius:var(--radius);padding:16px;margin-bottom:16px;border:2px solid var(--border);transition:border-color .3s" id="ulAutoBox">';
-    h+='<div style="font-size:9px;font-weight:800;color:var(--text-muted);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:10px"><i class="bx bx-info-circle" style="margin-right:3px"></i>MATERIAL DETAILS (AUTO FILL)</div>';
-    h+='<div class="form-row" style="margin-bottom:10px">';
-    h+='<div class="form-group" style="margin-bottom:0"><label style="font-size:9px;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px">Material</label>';
-    h+='<input type="text" id="ulAutoMat" class="form-input" placeholder="—" style="background:var(--bg-card);color:var(--text-muted);font-size:14px;font-weight:700;padding:10px 12px;transition:all .3s"></div>';
-    h+='<div class="form-group" style="flex:2;margin-bottom:0"><label style="font-size:9px;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px">Material Description</label>';
-    h+='<input type="text" id="ulAutoDesc" class="form-input" placeholder="—" style="background:var(--bg-card);color:var(--text-muted);font-size:13px;padding:10px 12px;transition:all .3s"></div>';
-    h+='</div>';
-    h+='<div class="form-row" style="margin-bottom:0">';
-    h+='<div class="form-group" style="margin-bottom:0;max-width:140px"><label style="font-size:9px;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px">UOM</label>';
-    h+='<input type="text" id="ulAutoUom" class="form-input" placeholder="—" style="background:var(--bg-card);color:var(--text-muted);font-size:14px;font-weight:600;padding:10px 12px;transition:all .3s"></div>';
-    h+='<div class="form-group" style="margin-bottom:0"><label style="font-size:9px;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px">Remaining Qty</label>';
-    h+='<div class="form-input" id="ulAutoRem" style="background:var(--bg-card);color:var(--text-muted);font-size:18px;font-weight:900;padding:10px 12px;font-family:var(--font-display);transition:all .3s">—</div></div>';
+    h+='<div class="form-actions" style="margin-top:0">';
+    h+='<button class="btn btn-primary" id="ulBtnSubmit"><i class="bx bx-check-circle"></i> Submit Entry</button>';
+    h+='<button class="btn btn-glass" id="ulBtnScanner"><i class="bx bx-qr"></i> Open Scanner</button>';
     h+='</div></div>';
 
-    // SCAN QTY / MANUAL QTY
-    h+='<div style="margin-bottom:14px">';
-    h+='<label style="font-size:10px;font-weight:800;color:var(--text-muted);text-transform:uppercase;letter-spacing:1.5px;display:block;margin-bottom:6px"><i class="bx bx-list-ol" style="margin-right:4px"></i>SCAN QTY / MANUAL QTY</label>';
-    h+='<input type="number" id="ulScanQty" class="form-input" value="1" min="1" style="text-align:center;font-size:22px;font-weight:900;font-family:var(--font-display);letter-spacing:2px;padding:14px;max-width:200px">';
-    h+='</div>';
+    // MATERIAL DETAILS — proper row/column table
+    h+='<div class="card" style="margin-bottom:12px">';
+    h+='<div class="card-title"><i class="bx bx-info-circle"></i> Material Details (Auto-filled)</div>';
+    h+='<div class="table-wrapper" style="border-radius:0"><table class="data-table"><thead><tr><th style="width:28%">Material</th><th>Description</th><th style="width:10%">UOM</th><th style="width:18%">Remaining Qty</th></tr></thead><tbody>';
+    h+='<tr id="ulAutoBox" style="border:2px solid var(--border);transition:border-color .3s">';
+    h+='<td style="padding:0"><input type="text" id="ulAutoMat" class="form-input" placeholder="—" style="border:none;background:transparent;color:var(--text-muted);font-weight:700;padding:9px 12px;border-radius:0;font-size:13px"></td>';
+    h+='<td style="padding:0"><input type="text" id="ulAutoDesc" class="form-input" placeholder="—" style="border:none;background:transparent;color:var(--text-muted);padding:9px 12px;border-radius:0;font-size:13px"></td>';
+    h+='<td style="padding:0"><input type="text" id="ulAutoUom" class="form-input" placeholder="—" style="border:none;background:transparent;color:var(--text-muted);font-weight:600;padding:9px 12px;border-radius:0;font-size:13px"></td>';
+    h+='<td style="padding:0"><div id="ulAutoRem" class="form-input" style="border:none;background:transparent;color:var(--text-muted);font-size:16px;font-weight:800;padding:9px 12px;border-radius:0;font-family:var(--font-display)">—</div></td>';
+    h+='</tr></tbody></table></div></div>';
 
-    // SUBMIT
-    h+='<button class="btn btn-primary" id="ulBtnSubmit" style="width:100%;padding:16px;font-size:16px;font-weight:800;letter-spacing:1px;margin-bottom:10px"><i class="bx bx-check-circle"></i> SUBMIT</button>';
-
-    // Scanner
-    h+='<button class="btn btn-glass" id="ulBtnScanner" style="width:100%;padding:12px;font-size:13px;margin-bottom:22px"><i class="bx bx-qr"></i> Open Scanner</button>';
-
-    // Recent Scan History
-    h+='<div style="border-top:2px solid var(--border);padding-top:14px">';
-    h+='<div style="font-size:11px;font-weight:800;color:var(--text-muted);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:10px"><i class="bx bx-history" style="margin-right:4px"></i>RECENT SCAN HISTORY</div>';
-    h+='<div id="ulScanHistory" style="max-height:320px;overflow-y:auto"></div>';
+    // SCAN HISTORY — proper row/column table
+    h+='<div class="card">';
+    h+='<div class="card-title"><i class="bx bx-history"></i> Scan History (latest first)</div>';
+    h+='<div id="ulScanHistory"></div>';
     h+='</div>';
 
     // Footer
     var footer='';
-    footer+='<button class="btn btn-warning" id="ulBtnSave"><i class="bx bx-save"></i> SAVE & BACK</button>';
-    footer+='<button class="btn btn-glass" onclick="closeModal()">CANCEL</button>';
-    footer+='<button class="btn btn-glass" id="ulBtnFinish" style="border-color:var(--success);color:var(--success)"><i class="bx bx-check-double"></i> FINISH UNLOADING</button>';
+    footer+='<button class="btn btn-glass" id="ulBtnSave"><i class="bx bx-save"></i> Save & Back</button>';
+    footer+='<button class="btn btn-glass" onclick="closeModal()">Cancel</button>';
+    footer+='<button class="btn btn-primary" id="ulBtnFinish"><i class="bx bx-check-double"></i> Finish Unloading</button>';
 
-    showModal('Unloading — '+v.vehicleNo,h,'xl',footer);
+    showModal('Goods Receipt — '+v.vehicleNo,h,'xl',footer);
     renderScanHistory();
 
     // === EVENT LISTENERS ===
@@ -1398,7 +1439,7 @@ function doLookupScan(type){
     var val='';
     if(type==='ean') val=(document.getElementById('ulScanEan').value||'').trim().toUpperCase();
     else val=(document.getElementById('ulScanMat').value||'').trim().toUpperCase();
-    if(!val){showToast('EAN ya Material Code dalein','error');return;}
+    if(!val){showToast('Enter an EAN or Material Code','error');return;}
 
     var matchIdx=ud.eanIndex[val];
     if(matchIdx===undefined) matchIdx=ud.matIndex[val];
@@ -1483,52 +1524,41 @@ function renderScanHistory(){
     var container=document.getElementById('ulScanHistory');if(!container)return;
 
     if(!ud.scanHistory.length){
-        container.innerHTML='<div style="text-align:center;color:var(--text-muted);padding:30px 12px;font-size:12px"><i class="bx bx-inbox" style="font-size:30px;display:block;margin-bottom:8px;opacity:.4"></i>No scans yet<br><span style="font-size:10px">EAN scan karein ya manually dalein</span></div>';
+        container.innerHTML='<div class="empty-state" style="padding:28px 16px"><i class="bx bx-inbox"></i><p style="font-size:13px">No scan entries yet</p><p style="font-size:11px;margin-top:2px">Scan an EAN code or enter it manually</p></div>';
         return;
     }
 
-    var h='';
+    var h='<div class="table-wrapper" style="border-radius:0"><table class="data-table"><thead><tr><th style="width:34px">#</th><th>EAN</th><th>Material</th><th>Description</th><th style="width:56px">Qty</th><th style="width:54px">UOM</th><th style="width:86px">Status</th><th style="width:118px">Time</th><th style="width:86px">Actions</th></tr></thead><tbody>';
     for(var i=ud.scanHistory.length-1;i>=0;i--){
         var s=ud.scanHistory[i];
         if(ud.editingIdx===i){
-            // === EDIT MODE ===
-            h+='<div style="padding:12px;background:var(--bg-secondary);border:2px solid var(--accent);border-radius:var(--radius);margin-bottom:6px">';
-            h+='<div style="font-size:8px;font-weight:800;color:var(--accent);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px"><i class="bx bx-pencil"></i> Edit Entry</div>';
-            h+='<div class="form-row" style="margin-bottom:8px">';
-            h+='<div class="form-group" style="margin-bottom:0"><label style="font-size:8px;color:var(--text-muted)">Material</label><input type="text" class="form-input" id="edM_'+i+'" value="'+esc(s.material)+'" style="font-size:12px;padding:6px 8px"></div>';
-            h+='<div class="form-group" style="flex:2;margin-bottom:0"><label style="font-size:8px;color:var(--text-muted)">Description</label><input type="text" class="form-input" id="edD_'+i+'" value="'+esc(s.description)+'" style="font-size:12px;padding:6px 8px"></div>';
-            h+='</div>';
-            h+='<div class="form-row" style="margin-bottom:10px">';
-            h+='<div class="form-group" style="margin-bottom:0;max-width:100px"><label style="font-size:8px;color:var(--text-muted)">Qty</label><input type="number" class="form-input" id="edQ_'+i+'" value="'+s.qty+'" min="1" style="font-size:16px;font-weight:800;text-align:center;padding:6px 8px;font-family:var(--font-display)"></div>';
-            h+='<div class="form-group" style="margin-bottom:0;max-width:80px"><label style="font-size:8px;color:var(--text-muted)">UOM</label><input type="text" class="form-input" id="edU_'+i+'" value="'+esc(s.uom)+'" style="font-size:12px;padding:6px 8px;text-transform:uppercase"></div>';
-            h+='</div>';
-            h+='<div style="display:flex;gap:6px;justify-content:flex-end">';
-            h+='<button class="btn btn-glass btn-sm" id="edC_'+i+'"><i class="bx bx-x"></i> Cancel</button>';
-            h+='<button class="btn btn-primary btn-sm" id="edS_'+i+'"><i class="bx bx-check"></i> Save</button>';
-            h+='</div></div>';
+            // === EDIT MODE — inline row edit (SAP ALV style) ===
+            h+='<tr style="background:rgba(var(--warning-rgb),.07)">';
+            h+='<td>'+(i+1)+'</td>';
+            h+='<td style="padding:3px"><input class="form-input" id="edE_'+i+'" value="'+esc(s.ean||'')+'" style="padding:4px 8px;font-size:11px;font-family:var(--font-display)"></td>';
+            h+='<td style="padding:3px"><input class="form-input" id="edM_'+i+'" value="'+esc(s.material)+'" style="padding:4px 8px;font-size:11px"></td>';
+            h+='<td style="padding:3px"><input class="form-input" id="edD_'+i+'" value="'+esc(s.description||'')+'" style="padding:4px 8px;font-size:11px"></td>';
+            h+='<td style="padding:3px"><input type="number" class="form-input" id="edQ_'+i+'" value="'+s.qty+'" min="1" style="padding:4px 8px;font-size:11px;text-align:center;font-weight:700;width:54px"></td>';
+            h+='<td style="padding:3px"><input class="form-input" id="edU_'+i+'" value="'+esc(s.uom)+'" style="padding:4px 8px;font-size:11px;text-align:center;width:52px"></td>';
+            h+='<td colspan="2"><span class="badge badge-warning">Editing</span></td>';
+            h+='<td style="padding:3px"><div class="table-actions"><button class="btn btn-glass btn-sm" id="edC_'+i+'" title="Cancel"><i class="bx bx-x"></i></button><button class="btn btn-primary btn-sm" id="edS_'+i+'" title="Save"><i class="bx bx-check"></i></button></div></td>';
+            h+='</tr>';
         }else{
-            // === NORMAL MODE ===
-            var bc=s.matched?'var(--accent)':'var(--danger)';
-            var bg=s.matched?'var(--accent-dim)':'rgba(255,107,107,.06)';
-            var ic=s.matched?'var(--accent)':'var(--danger)';
-            var ix=s.matched?'bx-check':'bx-x';
-
-            h+='<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:'+bg+';border:1px solid '+bc+';border-radius:var(--radius);margin-bottom:6px">';
-            h+='<div style="width:34px;height:34px;border-radius:50%;background:'+bg+';display:flex;align-items:center;justify-content:center;flex-shrink:0;border:2px solid '+ic+'"><i class="bx '+ix+'" style="color:'+ic+';font-size:16px"></i></div>';
-            h+='<div style="flex:1;min-width:0">';
-            h+='<div style="font-weight:700;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text-primary)">'+esc(s.material)+'</div>';
-            if(s.description)h+='<div style="font-size:10px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px">'+esc(s.description)+'</div>';
-            h+='<div style="font-size:9px;color:var(--text-muted);margin-top:2px">'+esc(s.ean||'Manual')+' &bull; '+fmtDT(s.ts)+'</div>';
-            h+='</div>';
-            h+='<div style="text-align:right;flex-shrink:0;display:flex;align-items:center;gap:8px">';
-            h+='<div><div style="font-weight:900;color:var(--accent);font-size:20px;font-family:var(--font-display);line-height:1">-'+s.qty+'</div>';
-            h+='<div style="font-size:9px;color:var(--text-muted)">'+esc(s.uom)+'</div></div>';
-            h+='<div style="display:flex;flex-direction:column;gap:3px">';
-            h+='<button class="btn btn-glass btn-sm" id="ebE_'+i+'" style="width:28px;height:28px;padding:0;min-width:28px"><i class="bx bx-pencil" style="font-size:12px"></i></button>';
-            h+='<button class="btn btn-danger btn-sm" id="ebD_'+i+'" style="width:28px;height:28px;padding:0;min-width:28px"><i class="bx bx-trash" style="font-size:12px"></i></button>';
-            h+='</div></div></div>';
+            // === NORMAL MODE — table row ===
+            h+='<tr class="'+(s.matched?'scan-row-green':'scan-row-red')+'">';
+            h+='<td>'+(i+1)+'</td>';
+            h+='<td style="font-family:var(--font-display);font-size:10px">'+esc(s.ean||'Manual')+'</td>';
+            h+='<td style="font-weight:600;font-size:12px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(s.material)+'</td>';
+            h+='<td style="font-size:11px;color:var(--text-muted);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(s.description||'-')+'</td>';
+            h+='<td><b style="font-family:var(--font-display);font-size:14px;color:'+(s.matched?'var(--success)':'var(--danger)')+'">'+s.qty+'</b></td>';
+            h+='<td>'+esc(s.uom)+'</td>';
+            h+='<td>'+(s.matched?'<span class="badge badge-success">Matched</span>':'<span class="badge badge-danger">No Match</span>')+'</td>';
+            h+='<td style="font-size:10px;color:var(--text-muted)">'+fmtDT(s.ts)+'</td>';
+            h+='<td><div class="table-actions"><button class="btn btn-glass btn-sm" id="ebE_'+i+'" title="Edit"><i class="bx bx-pencil"></i></button><button class="btn btn-danger btn-sm" id="ebD_'+i+'" title="Delete"><i class="bx bx-trash"></i></button></div></td>';
+            h+='</tr>';
         }
     }
+    h+='</tbody></table></div>';
     container.innerHTML=h;
 
     // Listeners
@@ -1538,7 +1568,7 @@ function renderScanHistory(){
         el=document.getElementById('ebD_'+i);if(el)el.addEventListener('click',function(){deleteScanEntry(i);});
         el=document.getElementById('edS_'+i);if(el)el.addEventListener('click',function(){saveEditScan(i);});
         el=document.getElementById('edC_'+i);if(el)el.addEventListener('click',function(){ud.editingIdx=-1;renderScanHistory();});
-        ['edM_'+i,'edD_'+i,'edQ_'+i,'edU_'+i].forEach(function(fid){
+        ['edM_'+i,'edD_'+i,'edQ_'+i,'edU_'+i,'edE_'+i].forEach(function(fid){
             var fe=document.getElementById(fid);if(fe)fe.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();saveEditScan(i);}});
         });
     });
@@ -1561,6 +1591,8 @@ function saveEditScan(idx){
     var ud=window._unloadData;if(!ud)return;
     var s=ud.scanHistory[idx];if(!s)return;
     var newM=(document.getElementById('edM_'+idx).value||'').trim();
+    var newEan=(document.getElementById('edE_'+idx)||{value:''}).value||'';
+    newEan=newEan.trim().toUpperCase();
     var newD=(document.getElementById('edD_'+idx).value||'').trim();
     var newQ=parseInt(document.getElementById('edQ_'+idx).value)||0;
     var newU=(document.getElementById('edU_'+idx).value||'').trim()||'PCS';
@@ -1569,7 +1601,7 @@ function saveEditScan(idx){
     if(s.matched&&s.entryIdx!==null&&s.entryIdx!==undefined&&ud.materialEntries[s.entryIdx]){
         ud.materialEntries[s.entryIdx].sessionScanned=Math.max(0,ud.materialEntries[s.entryIdx].sessionScanned-s.qty+newQ);
     }
-    s.material=newM;s.description=newD;s.qty=newQ;s.uom=newU;
+    s.material=newM;s.ean=newEan||s.ean;s.description=newD;s.qty=newQ;s.uom=newU;
     ud.editingIdx=-1;renderScanHistory();showToast('Entry updated','success');
 }
 
@@ -1583,7 +1615,7 @@ function resumePartialUnload(vehId){
 // --- Save Partial ---
 function savePartialUnload(){
     var ud=window._unloadData;if(!ud)return;
-    if(!ud.scanHistory.length){showToast('Kam se kam ek scan karein','error');return;}
+    if(!ud.scanHistory.length){showToast('At least one scan entry is required','error');return;}
     ud.editingIdx=-1;
     var existing=DB.filter('partial_unloads',function(p){return p.vehicleId===ud.vehId;});
     if(existing.length>0) DB.update('partial_unloads',existing[0].id,{scanHistory:ud.scanHistory,savedAt:new Date().toISOString(),savedBy:APP.currentUser?APP.currentUser.name:'Unknown'});
@@ -1595,7 +1627,7 @@ function savePartialUnload(){
 
 // --- Discard Partial ---
 function discardPartialUnload(vehId){
-    if(!confirm('Partial data delete ho jayega. Sure?'))return;
+    if(!confirm('Partial data will be deleted. Are you sure?'))return;
     DB.filter('partial_unloads',function(p){return p.vehicleId===vehId;}).forEach(function(p){DB.remove('partial_unloads',p.id);});
     DB.update('vehicles',vehId,{status:'Assigned'});showToast('Discarded','warning');renderUnloadingScreen();
 }
@@ -1603,9 +1635,10 @@ function discardPartialUnload(vehId){
 // --- Finish Unloading ---
 function finishUnloading(){
     var ud=window._unloadData;if(!ud)return;
-    if(!ud.scanHistory.length){showToast('Kam se kam ek scan karein','error');return;}
+    if(!ud.scanHistory.length){showToast('At least one scan entry is required','error');return;}
     ud.editingIdx=-1;
     var unloadNo=DB.unloadNo();
+    var invIdsAll=DB.filter('invoices',function(i){return i.vehicleId===ud.vehId;}).map(function(i){return i.id;});
     var materials=[],shortItems=[],excessItems=[],wrongItems=[];
     ud.materialEntries.forEach(function(entry){
         var scanned=entry.sessionScanned,expected=entry.totalQty;
@@ -1618,21 +1651,23 @@ function finishUnloading(){
     var partials=DB.filter('partial_unloads',function(p){return p.vehicleId===ud.vehId;});
     var wasPartial=partials.length>0,partialSessions=wasPartial?partials.length:0;
 
-    DB.add('unloading_records',{unloadNo:unloadNo,vehicleId:ud.vehId,vehicleNo:ud.vehicleNo,lrNo:ud.lrNo,unloadedBy:APP.currentUser.id,unloadedByName:APP.currentUser.name,unloadedAt:new Date().toISOString(),materials:materials,status:'Posting Pending Approval',wasPartial:wasPartial,partialSessions:partialSessions});
+    DB.add('unloading_records',{startedAt:((DB.find('vehicles',ud.vehId)||{}).unloadStartedAt||''),invoiceNos:invIdsAll.map(function(id){return (DB.find('invoices',id)||{}).invoiceNo;}),wrongItems:wrongItems,unloadNo:unloadNo,vehicleId:ud.vehId,vehicleNo:ud.vehicleNo,lrNo:ud.lrNo,unloadedBy:APP.currentUser.id,unloadedByName:APP.currentUser.name,unloadedAt:new Date().toISOString(),materials:materials,status:'Posting Pending Approval',wasPartial:wasPartial,partialSessions:partialSessions});
     DB.update('vehicles',ud.vehId,{status:'Posting Pending Approval',unloadNo:unloadNo,unloadedBy:APP.currentUser.id,unloadedByName:APP.currentUser.name,unloadedAt:new Date().toISOString()});
 
     ud.materialEntries.forEach(function(entry){
         if(entry.sessionScanned<=0)return;
-        var remaining=entry.sessionScanned;
-        var invIds=DB.filter('invoices',function(i){return i.vehicleId===ud.vehId;}).map(function(i){return i.id;});
-        DB.filter('invoice_materials',function(m){return m.ean&&m.ean.toUpperCase()===entry.ean&&invIds.indexOf(m.invoiceId)>-1;}).forEach(function(im){
+        var remaining=entry.sessionScanned,lastIm=null;
+        DB.filter('invoice_materials',function(m){return m.ean&&m.ean.toUpperCase()===entry.ean&&invIdsAll.indexOf(m.invoiceId)>-1;}).forEach(function(im){
+            lastIm=im;
             if(remaining<=0)return;
-            var canUnload=im.qty-(im.unloadedQty||0);
-            var toUnload=Math.min(remaining,canUnload);
-            DB.update('invoice_materials',im.id,{unloadedQty:(im.unloadedQty||0)+toUnload});
-            remaining-=toUnload;
+            var toUnload=Math.min(remaining,im.qty-(im.unloadedQty||0));
+            if(toUnload>0){DB.update('invoice_materials',im.id,{unloadedQty:(im.unloadedQty||0)+toUnload});remaining-=toUnload;}
         });
+        if(remaining>0&&lastIm){var cur=DB.find('invoice_materials',lastIm.id);DB.update('invoice_materials',lastIm.id,{unloadedQty:(cur.unloadedQty||0)+remaining,excessQty:(cur.excessQty||0)+remaining});}
     });
+    var wrongAgg={};
+    wrongItems.forEach(function(w){var k=w.ean||w.material;if(!wrongAgg[k])wrongAgg[k]={ean:w.ean,material:w.material,qty:0};wrongAgg[k].qty+=w.scannedQty;});
+    for(var wk in wrongAgg){var w=wrongAgg[wk];if(invIdsAll[0]&&w.qty>0)DB.add('invoice_materials',{invoiceId:invIdsAll[0],material:w.material||w.ean,description:'Not in invoice (excess)',ean:w.ean,qty:0,unloadedQty:w.qty,excessQty:w.qty,extra:true});}
 
     partials.forEach(function(p){DB.remove('partial_unloads',p.id);});
 
@@ -1648,8 +1683,8 @@ function finishUnloading(){
     addNotif('Unloading '+unloadNo+' submitted for '+ud.vehicleNo,'warning');
     logAction('Unloading','SUBMIT',unloadNo+' for '+ud.vehicleNo);
     showToast('Unloading submitted!','success');closeModal();
-    if(reportId)setTimeout(function(){showSEReport(reportId);},400);
-    else renderUnloadingScreen();
+    renderUnloadingScreen();
+    setTimeout(function(){showUnloadReport(unloadNo);},400);
 }
 
 function generateSERNo(){return 'SER-'+new Date().getFullYear()+'-'+String(DB.get('short_excess_reports').length+1).padStart(4,'0');}
@@ -1717,7 +1752,7 @@ function downloadSERPDF(reportId){
 // --- Posting Pending ---
 function renderPostingPending(){
     var pending=DB.filter('vehicles',function(v){return v.status==='Posting Pending Approval';});
-    var h='<div class="section-header"><h2><i class="bx bx-error-circle"></i> Posting Pending Approval ('+pending.length+')</h2></div>';
+    var h='<div class="section-header"><h2><i class="bx bx-error-circle"></i> GR Posting Pending ('+pending.length+')</h2></div>';
     if(!pending.length){h+='<div class="card"><div class="empty-state"><i class="bx bx-check-circle"></i><p>All clear!</p></div></div>';setHtml(h);return;}
     pending.forEach(function(v){
         var rec=DB.filter('unloading_records',function(r){return r.vehicleId===v.id&&r.status==='Posting Pending Approval';})[0];
@@ -1770,13 +1805,13 @@ function viewUnloadingDetail(vehId){
     if(serReports.length){h+='<div style="margin-top:12px"><strong style="color:var(--warning)">Reports:</strong></div>';serReports.forEach(function(s){h+='<div class="inv-list-item" onclick="showSEReport(\''+s.id+'\')"><div class="ili-left"><span class="ili-invno">'+esc(s.reportNo)+'</span><span class="ili-info">Expected: '+s.totalExpected+' | Scanned: '+s.totalScanned+'</span></div><span class="badge badge-danger">View/PDF</span></div>';});}
     var grns=DB.filter('grn_records',function(g){return g.vehicleId===vehId;});
     if(grns.length){h+='<div style="margin-top:12px"><strong style="color:var(--accent)">GRNs:</strong></div>';grns.forEach(function(g){h+='<div class="inv-list-item"><div class="ili-left"><span class="ili-invno">'+esc(g.grnNo)+'</span><span class="ili-info">'+esc(g.invoiceNo)+'</span></div></div>';});}
-    showModal('Unloading Detail — '+v.vehicleNo,h,'lg','<button class="btn btn-glass" onclick="closeModal()">Close</button>');
+    showModal('Unloading Detail — '+v.vehicleNo,h,'lg','<button class="btn btn-glass" onclick="closeModal()">Close</button><button class="btn btn-info" onclick="showUnloadReport(\''+rec.unloadNo+'\')"><i class="bx bx-file"></i> Unloading Report</button>');
 }
 
 // --- Inbound Record ---
 function renderInboundRecord(){
     var vehs=DB.get('vehicles').filter(function(v){return v.vehicleType==='Unloading';}).reverse();
-    var h='<div class="section-header"><h2><i class="bx bx-list-ul"></i> Inbound Record ('+vehs.length+')</h2><button class="btn btn-glass" onclick="exportInboundExcel()"><i class="bx bx-download"></i> Excel</button></div>';
+    var h='<div class="section-header"><h2><i class="bx bx-list-ul"></i> Inbound Delivery Records ('+vehs.length+')</h2><button class="btn btn-glass" onclick="exportInboundExcel()"><i class="bx bx-download"></i> Excel</button></div>';
     h+='<div class="card" style="margin-bottom:12px"><div class="card-title"><i class="bx bx-search"></i> Search GRN No</div>';
     h+='<div class="search-box" style="max-width:500px"><i class="bx bx-barcode"></i><input type="text" id="grnSearchInput" placeholder="GRN-INV001..." oninput="searchGRNForMaterial()" style="font-family:var(--font-display);letter-spacing:1px"></div><div id="grnSearchResult"></div></div>';
     h+='<div class="search-box"><i class="bx bx-search"></i><input type="text" id="inboundRecSearch" placeholder="Search vehicle, LR..." oninput="filterInboundRec()"></div>';
@@ -1787,7 +1822,7 @@ function searchGRNForMaterial(){
     var q=document.getElementById('grnSearchInput').value.trim().toUpperCase();
     var c=document.getElementById('grnSearchResult');if(!q){c.innerHTML='';return;}
     var grns=DB.filter('grn_records',function(g){return (g.grnNo||'').toUpperCase().indexOf(q)>-1;});
-    if(!grns.length){c.innerHTML='<div style="color:var(--text-muted);padding:12px;font-size:12px">GRN nahi mila</div>';return;}
+    if(!grns.length){c.innerHTML='<div style="color:var(--text-muted);padding:12px;font-size:12px">No GRN found</div>';return;}
     var h='';
     grns.forEach(function(g){
         var mats=DB.filter('invoice_materials',function(m){return m.invoiceId===g.invoiceId;});
@@ -1828,8 +1863,8 @@ function exportInboundExcel(){
 
 // --- Unloading Stock ---
 function renderUnloadingStock(){
-    var grns=DB.get('grn_records').reverse();
-    var h='<div class="section-header"><h2><i class="bx bx-box"></i> Unloading Stock</h2></div>';
+    var grns=DB.get('grn_records').slice().reverse();
+    var h='<div class="section-header"><h2><i class="bx bx-box"></i> Stock in GR Area</h2></div>';
     h+='<div class="search-box"><i class="bx bx-search"></i><input type="text" id="stockSearch" placeholder="Search GRN or Invoice..." oninput="filterStock()"></div>';
     h+='<div id="stockList">'+buildStockList(grns)+'</div>';
     setHtml(h);
@@ -1840,7 +1875,7 @@ function buildStockList(grns){
 }
 function filterStock(){
     var q=document.getElementById('stockSearch').value.trim().toLowerCase();
-    var grns=DB.get('grn_records').reverse();
+    var grns=DB.get('grn_records').slice().reverse();
     if(q)grns=grns.filter(function(g){return(g.grnNo||'').toLowerCase().indexOf(q)>-1||(g.invoiceNo||'').toLowerCase().indexOf(q)>-1;});
     document.getElementById('stockList').innerHTML=buildStockList(grns);
 }
@@ -1864,7 +1899,7 @@ function renderPutaway(){
     var pendingMats=getPendingPutawayMaterials();
     h+='<div class="card"><div class="card-title"><i class="bx bx-time" style="color:var(--warning)"></i> Pending Putaway ('+pendingMats.length+')</div>';
     if(!pendingMats.length){
-        h+='<div style="text-align:center;color:var(--text-muted);padding:16px;font-size:12px"><i class="bx bx-check-circle" style="font-size:20px;display:block;margin-bottom:6px;color:var(--success)"></i>Sab putaway complete! Koi pending nahi.</div>';
+        h+='<div style="text-align:center;color:var(--text-muted);padding:16px;font-size:12px"><i class="bx bx-check-circle" style="font-size:20px;display:block;margin-bottom:6px;color:var(--success)"></i>All putaway tasks are complete. Nothing pending.</div>';
     } else {
         h+='<div class="table-wrapper" style="max-height:300px;overflow-y:auto"><table class="data-table"><thead><tr><th>GRN</th><th>Invoice</th><th>Material</th><th>EAN</th><th>Total</th><th>Done</th><th>Pending</th><th>Action</th></tr></thead><tbody>';
         pendingMats.forEach(function(p){
@@ -1919,7 +1954,7 @@ function getPendingPutawayMaterials(){
     var grns=DB.get('grn_records');
     var pending=[];
     grns.forEach(function(g){
-        var mats=DB.filter('invoice_materials',function(m){return m.invoiceId===g.invoiceId;});
+        var mats=putawayMats(g.invoiceId);
         mats.forEach(function(m){
             var doneQty=m.putawayedQty||0;
             if(doneQty<m.qty){
@@ -1939,11 +1974,11 @@ function startPutawayFromStock(grnId){
 // --- Putaway Modal (Rack Scan + Manual Qty + Partial Support) ---
 function doPutaway(grnId){
     var g=DB.find('grn_records',grnId);if(!g)return;
-    var mats=DB.filter('invoice_materials',function(m){return m.invoiceId===g.invoiceId;});
+    var mats=putawayMats(g.invoiceId);
 
-    // Sirf wahi materials dikhao jinka putaway baaki hai
+    // Show only materials whose putaway is pending
     var pendingMats=mats.filter(function(m){return (m.putawayedQty||0)<m.qty;});
-    if(!pendingMats.length){showToast('Sab materials ka putaway ho chuka hai!','success');return;}
+    if(!pendingMats.length){showToast('All materials have been put away already!','success');return;}
 
     var rackList=DB.get('rack_master');
     var rOpts='<option value="">-- Scan ya Select --</option>';
@@ -1953,7 +1988,7 @@ function doPutaway(grnId){
     pendingMats.forEach(function(m){totalRemaining+=m.qty-(m.putawayedQty||0);});
 
     var h='<div style="margin-bottom:10px"><strong>GRN:</strong> <span style="color:var(--accent);font-family:var(--font-display)">'+esc(g.grnNo)+'</span> | <strong>Invoice:</strong> '+esc(g.invoiceNo)+' | <strong>Vehicle:</strong> '+esc(g.vehicleNo)+'</div>';
-    h+='<div style="background:var(--accent-dim);padding:10px;border-radius:var(--radius-sm);margin-bottom:14px;font-size:12px;color:var(--accent);display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px"><span><i class="bx bx-info-circle"></i> Pending: <strong>'+totalRemaining+'</strong> qty in <strong>'+pendingMats.length+'</strong> materials</span><span style="font-size:11px;color:var(--text-muted)">Partial putaway allowed — remaining next time dikhega</span></div>';
+    h+='<div style="background:var(--accent-dim);padding:10px;border-radius:var(--radius-sm);margin-bottom:14px;font-size:12px;color:var(--accent);display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px"><span><i class="bx bx-info-circle"></i> Pending: <strong>'+totalRemaining+'</strong> qty in <strong>'+pendingMats.length+'</strong> materials</span><span style="font-size:11px;color:var(--text-muted)">Partial putaway allowed — the remaining quantity will be shown next time</span></div>';
 
     h+='<div id="putawayGRNMatList">';
     pendingMats.forEach(function(m,idx){
@@ -2019,7 +2054,7 @@ function openScannerForPutawayRackModal(idx){
 // --- Save Putaway from GRN (Partial Allowed) ---
 function savePutawayFromGRN(grnId){
     var g=DB.find('grn_records',grnId);if(!g)return;
-    var mats=DB.filter('invoice_materials',function(m){return m.invoiceId===g.invoiceId;});
+    var mats=putawayMats(g.invoiceId);
     var pendingMats=mats.filter(function(m){return (m.putawayedQty||0)<m.qty;});
     var count=0, totalSaved=0;
 
@@ -2038,7 +2073,7 @@ function savePutawayFromGRN(grnId){
 
         if(!rack||qty<=0)return;
 
-        // Qty validate — remaining se zyada nahi ho sakta
+        // Validate qty — cannot exceed the remaining quantity
         if(qty>remaining){
             showToast(m.material+': Max '+remaining+' qty allowed','error');
             return;
@@ -2049,7 +2084,7 @@ function savePutawayFromGRN(grnId){
         var desc=matMaster.length>0?(matMaster[0].description||matMaster[0].material):m.material;
 
         // Location master mein save
-        DB.add('location_master',{date:today(),rack:rack,ean:m.ean,material:m.material,description:desc,quantity:qty,packing:packing,box:box,action:'PUTAWAY',user:APP.currentUser.name,dateTime:new Date().toISOString(),grnNo:g.grnNo,invoiceNo:g.invoiceNo,invoiceId:g.invoiceId});
+        addPutawayStock({date:today(),rack:rack,ean:m.ean,material:m.material,description:desc,quantity:qty,packing:packing,box:box,action:'PUTAWAY',user:APP.currentUser.name,dateTime:new Date().toISOString(),grnNo:g.grnNo,invoiceNo:g.invoiceNo,invoiceId:g.invoiceId});
 
         // Invoice materials mein putawayedQty update
         var newPutawayed=(m.putawayedQty||0)+qty;
@@ -2058,7 +2093,7 @@ function savePutawayFromGRN(grnId){
         count++;
         totalSaved+=qty;
 
-        // Agar pura ho gaya to row hide karo visual feedback
+        // Hide the row when complete for visual feedback
         var row=document.getElementById('paGRow_'+idx);
         if(row&&newPutawayed>=m.qty){
             row.style.opacity='0.4';
@@ -2069,22 +2104,22 @@ function savePutawayFromGRN(grnId){
         }
     });
 
-    if(!count){showToast('Kam se kam ek material ka rack aur qty dalein','error');return;}
+    if(!count){showToast('Enter bin and quantity for at least one material','error');return;}
 
-    // Check kya sab ho gaya
+    // Check if everything is complete
     var stillPending=getPendingPutawayMaterials().filter(function(p){return p.grnId===grnId;});
 
     if(stillPending.length>0){
         var remTotal=0;stillPending.forEach(function(p){remTotal+=p.totalQty-p.doneQty;});
         showToast(count+' items saved! '+remTotal+' qty pending — baad mein kar sakte ho','warning');
     } else {
-        showToast(count+' items putaway complete! Sab ho gaya','success');
+        showToast(count+' items putaway complete — all done!','success');
     }
 
     logAction('Putaway','GRN_SAVE',count+' items ('+totalSaved+' qty) putaway for '+g.grnNo);
     addNotif(count+' items putaway for '+g.grnNo+' ('+totalSaved+' qty) by '+APP.currentUser.name,'success');
 
-    // Agar sab ho gaya to modal band karo
+    // Close the modal when everything is complete
     if(stillPending.length===0){
         setTimeout(function(){closeModal();renderPutaway();},800);
     }
@@ -2107,7 +2142,7 @@ function openScannerForPutawayRack(){
 function lookupPutawayEan(){
     var input=document.getElementById('putawayEanScan');
     var val=input.value.trim().toUpperCase();
-    if(!val){showToast('EAN scan ya type karein','error');return;}
+    if(!val){showToast('Scan or type an EAN code','error');return;}
     var mats=DB.get('material_master');
     var found=null;
     mats.forEach(function(m){if(!found&&m.ean&&m.ean.toUpperCase()===val)found=m;});
@@ -2118,13 +2153,13 @@ function lookupPutawayEan(){
         document.getElementById('paMaterial').value=found.material||'';
         document.getElementById('paDescription').value=found.description||found.material||'';
         document.getElementById('paEan').value=found.ean||val;
-        msgDiv.innerHTML='<div style="background:var(--accent-dim);padding:10px;border-radius:var(--radius-sm);margin-bottom:8px;font-size:12px;display:flex;align-items:center;gap:8px"><i class="bx bx-check-circle" style="color:var(--accent);font-size:18px"></i><span style="color:var(--accent)">Material Master se mil gaya — <strong>'+esc(found.material)+'</strong></span></div>';
+        msgDiv.innerHTML='<div style="background:var(--accent-dim);padding:10px;border-radius:var(--radius-sm);margin-bottom:8px;font-size:12px;display:flex;align-items:center;gap:8px"><i class="bx bx-check-circle" style="color:var(--accent);font-size:18px"></i><span style="color:var(--accent)">Found in Product Master — <strong>'+esc(found.material)+'</strong></span></div>';
         document.getElementById('paRackScan').focus();
     } else {
         document.getElementById('paMaterial').value='';
         document.getElementById('paDescription').value='';
         document.getElementById('paEan').value=val;
-        msgDiv.innerHTML='<div style="background:rgba(255,107,107,0.1);padding:10px;border-radius:var(--radius-sm);margin-bottom:8px;font-size:12px;display:flex;align-items:center;gap:8px;border:1px solid rgba(255,107,107,0.3)"><i class="bx bx-error-circle" style="color:var(--danger);font-size:18px"></i><span style="color:var(--danger)">EAN <strong>'+esc(val)+'</strong> Material Master mein nahi mila. Manual enter karein.</span></div>';
+        msgDiv.innerHTML='<div style="background:rgba(255,107,107,0.1);padding:10px;border-radius:var(--radius-sm);margin-bottom:8px;font-size:12px;display:flex;align-items:center;gap:8px;border:1px solid rgba(255,107,107,0.3)"><i class="bx bx-error-circle" style="color:var(--danger);font-size:18px"></i><span style="color:var(--danger)">EAN <strong>'+esc(val)+'</strong> was not found in the Product Master. Please enter it manually.</span></div>';
         document.getElementById('paMaterial').focus();
     }
 }
@@ -2149,13 +2184,13 @@ function addToPutawayList(){
     var qty=parseInt(document.getElementById('paQty').value)||0;
     var packing=document.getElementById('paPacking').value.trim();
     var boxNo=document.getElementById('paBoxNo').value.trim().toUpperCase();
-    if(!material){showToast('Material name zaruri hai','error');document.getElementById('paMaterial').focus();return;}
-    if(!ean){showToast('EAN zaruri hai','error');return;}
-    if(!rack){showToast('Rack scan ya select karein','error');document.getElementById('paRackScan').focus();return;}
-    if(qty<=0){showToast('Quantity 1 se zyada honi chahiye','error');document.getElementById('paQty').focus();return;}
+    if(!material){showToast('Material name is required','error');document.getElementById('paMaterial').focus();return;}
+    if(!ean){showToast('EAN is required','error');return;}
+    if(!rack){showToast('Scan or select a bin','error');document.getElementById('paRackScan').focus();return;}
+    if(qty<=0){showToast('Quantity must be at least 1','error');document.getElementById('paQty').focus();return;}
     window._putawayItems.push({material:material,description:description,ean:ean,rack:rack,qty:qty,packing:packing,boxNo:boxNo,time:new Date().toISOString()});
     renderPutawayList();
-    showToast('List mein add ho gaya!','success');
+    showToast('Added to the list!','success');
     document.getElementById('putawayEanScan').value='';document.getElementById('paMaterial').value='';document.getElementById('paDescription').value='';document.getElementById('paEan').value='';document.getElementById('paRackScan').value='';document.getElementById('paRackSelect').selectedIndex=0;document.getElementById('paQty').value='1';document.getElementById('paPacking').value='';document.getElementById('paBoxNo').value='';document.getElementById('putawayMatInfo').style.display='none';document.getElementById('putawayEanScan').focus();
 }
 function renderPutawayList(){
@@ -2172,13 +2207,13 @@ function renderPutawayList(){
     container.innerHTML=h;
 }
 function removePutawayItem(idx){var r=window._putawayItems.splice(idx,1);renderPutawayList();showToast('Removed','warning');}
-function clearPutawayList(){if(!confirm('Sab items delete karein?'))return;window._putawayItems=[];renderPutawayList();showToast('List clear','warning');}
+function clearPutawayList(){if(!confirm('Delete all items from the list?'))return;window._putawayItems=[];renderPutawayList();showToast('List clear','warning');}
 function savePutawayScanList(){
     var items=window._putawayItems||[];
-    if(!items.length){showToast('List mein koi item nahi','error');return;}
+    if(!items.length){showToast('There are no items in the list','error');return;}
     var count=0;
     items.forEach(function(item){
-        DB.add('location_master',{date:today(),rack:item.rack,ean:item.ean,material:item.material,description:item.description||item.material,quantity:item.qty,packing:item.packing,box:item.boxNo,action:'PUTAWAY',user:APP.currentUser.name,dateTime:new Date().toISOString(),grnNo:'EAN-SCAN',invoiceNo:'EAN-SCAN',invoiceId:''});
+        addPutawayStock({date:today(),rack:item.rack,ean:item.ean,material:item.material,description:item.description||item.material,quantity:item.qty,packing:item.packing,box:item.boxNo,action:'PUTAWAY',user:APP.currentUser.name,dateTime:new Date().toISOString(),grnNo:'EAN-SCAN',invoiceNo:'EAN-SCAN',invoiceId:''});
         count++;
     });
     addNotif(count+' items putaway via EAN scan by '+APP.currentUser.name,'success');
@@ -2194,7 +2229,7 @@ function filterPutawayInv(){
     if(q)grns=grns.filter(function(g){return (g.invoiceNo||'').toUpperCase().indexOf(q)>-1||(g.grnNo||'').toUpperCase().indexOf(q)>-1;});
     var h='';
     grns.slice(0,20).forEach(function(g){
-        var mats=DB.filter('invoice_materials',function(m){return m.invoiceId===g.invoiceId;});
+        var mats=putawayMats(g.invoiceId);
         var totalQty=0,doneQty=0;mats.forEach(function(m){totalQty+=m.qty;doneQty+=(m.putawayedQty||0);});
         var pendingQty=totalQty-doneQty;
         var statusBadge=pendingQty>0?'<span class="badge badge-warning">'+pendingQty+' pending</span>':'<span class="badge badge-success">Done</span>';
@@ -2205,10 +2240,102 @@ function filterPutawayInv(){
 }
 
 // ==================== PIV ====================
+// ---------- PIV CYCLE ENGINE (1 rack = 1.5 days | 60 racks = 90 days) ----------
+function getPivCycles(){return DB.get('piv_cycles');}
+function getCurrentPivCycle(){
+    var cs=getPivCycles();
+    for(var i=cs.length-1;i>=0;i--){if(!cs[i].completedAt)return cs[i];}
+    return null;
+}
+function pivRackList(cyc){
+    var racks=DB.get('rack_master').map(function(r){return r.rack;}).sort();
+    var n=Math.min(racks.length,cyc?cyc.totalRacks:60);
+    return racks.slice(0,n);
+}
+function pivWindow(cyc,idx){
+    var ms=Math.round((cyc.daysPerRack||1.5)*86400000);
+    var start=new Date(cyc.startDate+'T'+(cyc.startTime||'09:00')+':00').getTime();
+    return {start:start+idx*ms,end:start+(idx+1)*ms};
+}
+function pivCycleEnd(cyc){
+    var ms=Math.round((cyc.daysPerRack||1.5)*86400000);
+    var start=new Date(cyc.startDate+'T'+(cyc.startTime||'09:00')+':00').getTime();
+    return start+cyc.totalRacks*ms;
+}
+function pivRackStatus(cyc,rack,idx){
+    var cycleStart=new Date(cyc.startDate+'T00:00:00').getTime();
+    var recs=DB.get('location_master').filter(function(l){
+        if(l.action!=='PIV'||(l.rack||'')!==rack)return false;
+        if(l.cycleNo)return l.cycleNo===cyc.cycleNo;
+        var t=new Date(l.dateTime||l.createdAt||0).getTime();
+        return t>=cycleStart;
+    });
+    if(recs.length){
+        recs.sort(function(a,b){return new Date(b.dateTime||0)-new Date(a.dateTime||0);});
+        return {status:'COUNTED',rec:recs[0]};
+    }
+    var w=pivWindow(cyc,idx),now=Date.now();
+    if(now>w.end)return{status:'OVERDUE',rec:null};
+    if(now>=w.start)return{status:'DUE NOW',rec:null};
+    return{status:'UPCOMING',rec:null};
+}
+function renderPivCyclePanel(cyc){
+    var racks=pivRackList(cyc);
+    APP._pivCyc=cyc;
+    var counted=0,dueNow=0,overdue=0,upcoming=0;
+    racks.forEach(function(r,i){var s=pivRackStatus(cyc,r,i);if(s.status==='COUNTED')counted++;else if(s.status==='DUE NOW')dueNow++;else if(s.status==='OVERDUE')overdue++;else upcoming++;});
+    var pct=racks.length?Math.round(counted/racks.length*100):0;
+    var sDt=new Date(cyc.startDate+'T'+(cyc.startTime||'09:00')+':00');
+    var eDt=new Date(pivCycleEnd(cyc));
+    var daysLeft=Math.max(0,Math.ceil((eDt-Date.now())/86400000));
+    var cycDays=Math.round((cyc.daysPerRack||1.5)*(cyc.totalRacks||racks.length));
+    var h='<div class="card" style="margin-bottom:16px">';
+    h+='<div class="card-title"><i class="bx bx-calendar-check" style="color:var(--accent)"></i> Count Cycle #'+cyc.cycleNo+' — Running <span style="font-size:10px;color:var(--text-muted);font-weight:normal">(1 rack = '+cyc.daysPerRack+' days • '+cyc.totalRacks+' racks = '+cycDays+' days)</span></div>';
+    h+='<div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">Cycle: <strong style="color:var(--text-primary)">'+fmtDT(sDt)+'</strong> → <strong style="color:var(--text-primary)">'+fmtDT(eDt)+'</strong> • <strong style="color:var(--warning)">'+daysLeft+' days left</strong></div>';
+    h+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px"><div style="flex:1;height:14px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:99px;overflow:hidden"><div style="height:100%;width:'+pct+'%;background:linear-gradient(90deg,var(--accent),var(--accent2))"></div></div><strong style="color:var(--accent);font-size:13px">'+pct+'%</strong></div>';
+    h+='<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">';
+    h+='<div style="flex:1;min-width:90px;padding:10px;background:rgba(0,255,136,0.06);border:1px solid var(--success);border-radius:var(--radius-sm);text-align:center"><div style="font-size:18px;font-weight:800;color:var(--success)">'+counted+' / '+racks.length+'</div><div style="font-size:9px;color:var(--text-muted);letter-spacing:1px">COUNTED</div></div>';
+    h+='<div style="flex:1;min-width:90px;padding:10px;background:#FFF8D6;border:1px solid #E9730C;border-radius:var(--radius-sm);text-align:center"><div style="font-size:18px;font-weight:800;color:#E9730C">'+dueNow+'</div><div style="font-size:9px;color:var(--text-muted);letter-spacing:1px">DUE NOW</div></div>';
+    h+='<div style="flex:1;min-width:90px;padding:10px;background:#FFEBEB;border:1px solid #BB0000;border-radius:var(--radius-sm);text-align:center"><div style="font-size:18px;font-weight:800;color:#BB0000">'+overdue+'</div><div style="font-size:9px;color:var(--text-muted);letter-spacing:1px">OVERDUE</div></div>';
+    h+='<div style="flex:1;min-width:90px;padding:10px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);text-align:center"><div style="font-size:18px;font-weight:700;color:var(--text-muted)">'+upcoming+'</div><div style="font-size:9px;color:var(--text-muted);letter-spacing:1px">UPCOMING</div></div>';
+    h+='</div>';
+    h+='<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap"><span style="font-size:11px;color:var(--text-muted);font-weight:600;letter-spacing:1px">SCHEDULE</span><select class="form-input" id="pivCycleFilter" onchange="filterPivCycleTable()" style="width:auto;min-width:120px;font-size:12px"><option value="ALL">All Racks</option><option value="DUE">Due Now</option><option value="OVERDUE">Overdue</option><option value="COUNTED">Counted</option><option value="UPCOMING">Upcoming</option></select></div>';
+    h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>Rack</th><th>Count Window Starts</th><th>Complete By (Fixed Time)</th><th>Status</th><th>Last Counted</th><th>Last Qty</th><th></th></tr></thead><tbody id="pivCycleBody">'+buildPivCycleRows(cyc,'ALL')+'</tbody></table></div>';
+    h+='</div>';
+    return h;
+}
+function buildPivCycleRows(cyc,filter){
+    var racks=pivRackList(cyc);var h='';
+    racks.forEach(function(r,i){
+        var w=pivWindow(cyc,i),s=pivRackStatus(cyc,r,i);
+        if(filter==='DUE'&&s.status!=='DUE NOW')return;
+        if(filter==='OVERDUE'&&s.status!=='OVERDUE')return;
+        if(filter==='COUNTED'&&s.status!=='COUNTED')return;
+        if(filter==='UPCOMING'&&s.status!=='UPCOMING')return;
+        var badge=s.status==='COUNTED'?'<span class="badge badge-success">COUNTED</span>':(s.status==='DUE NOW'?'<span class="badge badge-warning">DUE NOW</span>':(s.status==='OVERDUE'?'<span class="badge" style="background:rgba(255,107,107,0.15);color:var(--danger)">OVERDUE</span>':'<span class="badge" style="background:var(--bg-secondary);color:var(--text-muted)">UPCOMING</span>'));
+        h+='<tr><td>'+(i+1)+'</td><td><span class="badge badge-accent">'+esc(r)+'</span></td><td style="font-size:11px">'+fmtDT(w.start)+'</td><td style="font-size:11px">'+fmtDT(w.end)+'</td><td>'+badge+'</td><td style="font-size:11px;color:var(--text-secondary)">'+(s.rec?esc(s.rec.date||'-'):'—')+'</td><td>'+(s.rec?'<strong style="color:var(--accent)">'+s.rec.quantity+'</strong>':'—')+'</td><td><button class="btn btn-glass btn-sm" onclick="showAddPIVForRack(\''+esc(r)+'\')"><i class="bx bx-crosshair"></i> '+(s.status==='COUNTED'?'Recount':'Count Now')+'</button></td></tr>';
+    });
+    if(!h)h='<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:20px">No racks in this view</td></tr>';
+    return h;
+}
+function filterPivCycleTable(){
+    var cyc=APP._pivCyc;if(!cyc)return;
+    var f=document.getElementById('pivCycleFilter')?document.getElementById('pivCycleFilter').value:'ALL';
+    var tb=document.getElementById('pivCycleBody');if(tb)tb.innerHTML=buildPivCycleRows(cyc,f);
+}
+function showAddPIVForRack(rack){showAddPIV(rack);}
 function renderPIV(){
     var locs=DB.get('location_master').filter(function(l){return l.action==='PIV';}).reverse();
-    var h='<div class="section-header"><h2><i class="bx bx-clipboard"></i> PIV (Physical Inventory Verification)</h2>';
-    h+='<button class="btn btn-glass" onclick="showAddPIV()"><i class="bx bx-plus"></i> Add PIV</button></div>';
+    var cyc=getCurrentPivCycle();
+    var h='<div class="section-header"><h2><i class="bx bx-clipboard"></i> Stock Count — PIV (Physical Inventory Verification)</h2>';
+    h+='<div style="display:flex;gap:6px;flex-wrap:wrap">';
+    if(!cyc)h+='<button class="btn btn-glass" onclick="showPivCycleSetup()"><i class="bx bx-play"></i> Start Count Cycle</button>';
+    else{
+        h+='<button class="btn btn-glass" onclick="showPivCycleSetup(true)"><i class="bx bx-calendar-edit"></i> Cycle Settings</button>';
+        h+='<button class="btn btn-danger" onclick="closePivCycle()" title="Mark this cycle as complete"><i class="bx bx-check-double"></i> Close Cycle</button>';
+    }
+    h+='<button class="btn btn-glass" onclick="showAddPIV()"><i class="bx bx-plus"></i> Add Count</button>';
+    h+='</div></div>';
 
     // Quick stats
     var todayPIV=locs.filter(function(l){return l.date===today();});
@@ -2219,7 +2346,12 @@ function renderPIV(){
     h+='<div style="flex:1;min-width:140px;padding:14px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);text-align:center"><div style="font-size:24px;font-weight:800;color:var(--text-primary)">'+locs.length+'</div><div style="font-size:10px;color:var(--text-muted);letter-spacing:1px">TOTAL ENTRIES</div></div>';
     h+='</div>';
 
-    // Search
+    // Cycle Planner
+    if(cyc)h+=renderPivCyclePanel(cyc);
+    else h+='<div class="card" style="margin-bottom:16px"><div class="empty-state"><i class="bx bx-calendar-exclamation" style="color:var(--warning)"></i><p><strong>No count cycle running.</strong><br>Start a cycle to schedule rack counting — 1 rack = 1.5 days, 60 racks = 90 days.<br>Each rack gets a fixed count window and must be completed on time.</p><button class="btn btn-glass" onclick="showPivCycleSetup()"><i class="bx bx-play"></i> Start Count Cycle</button></div></div>';
+
+    // Records
+    h+='<div class="card-title"><i class="bx bx-list-ul"></i> PIV Count Records ('+locs.length+') <span style="font-size:10px;color:var(--text-muted);font-weight:normal">— re-counting the same material at the same rack replaces the old entry (stock is never inflated)</span></div>';
     h+='<div class="search-box" style="margin-bottom:12px"><i class="bx bx-search"></i><input type="text" id="pivSearchInput" placeholder="Search rack, material, EAN..." oninput="filterPIVTable()"></div>';
     h+='<div id="pivTableWrap">';
     h+=buildPIVTable(locs);
@@ -2228,11 +2360,11 @@ function renderPIV(){
 }
 
 function buildPIVTable(locs){
-    var h='<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>Date</th><th>Time</th><th>Rack</th><th>Material</th><th>Description</th><th>EAN</th><th>Qty</th><th>Packing</th><th>Box</th><th>Done By</th></tr></thead><tbody>';
-    if(!locs.length)h+='<tr><td colspan="11" style="text-align:center;color:var(--text-muted);padding:24px"><i class="bx bx-inbox" style="font-size:20px;display:block;margin-bottom:6px"></i>No PIV records</td></tr>';
+    var h='<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>Date</th><th>Time</th><th>Cycle</th><th>Rack</th><th>Material</th><th>Description</th><th>EAN</th><th>Qty</th><th>Packing</th><th>Box</th><th>Done By</th><th></th></tr></thead><tbody>';
+    if(!locs.length)h+='<tr><td colspan="13" style="text-align:center;color:var(--text-muted);padding:24px"><i class="bx bx-inbox" style="font-size:20px;display:block;margin-bottom:6px"></i>No PIV records</td></tr>';
     else locs.forEach(function(l,i){
         var timeStr=l.dateTime?new Date(l.dateTime).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}):'-';
-        h+='<tr><td>'+(i+1)+'</td><td style="font-size:11px">'+esc(l.date)+'</td><td style="font-size:11px;color:var(--text-muted)">'+timeStr+'</td><td><span class="badge badge-accent">'+esc(l.rack)+'</span></td><td><strong>'+esc(l.material)+'</strong></td><td style="font-size:11px;color:var(--text-secondary);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(l.description||'-')+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(l.ean||'-')+'</td><td><strong style="color:var(--accent)">'+l.quantity+'</strong></td><td>'+esc(l.packing||'-')+'</td><td>'+esc(l.box||'-')+'</td><td style="font-size:11px;color:var(--text-secondary)">'+esc(l.user||'-')+'</td></tr>';
+        h+='<tr><td>'+(i+1)+'</td><td style="font-size:11px">'+esc(l.date)+'</td><td style="font-size:11px;color:var(--text-muted)">'+timeStr+'</td><td>'+(l.cycleNo?'<span class="badge badge-info">C'+l.cycleNo+'</span>':'<span style="font-size:10px;color:var(--text-muted)">—</span>')+'</td><td><span class="badge badge-accent">'+esc(l.rack)+'</span></td><td><strong>'+esc(l.material)+'</strong></td><td style="font-size:11px;color:var(--text-secondary);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(l.description||'-')+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(l.ean||'-')+'</td><td><strong style="color:var(--accent)">'+l.quantity+'</strong></td><td>'+esc(l.packing||'-')+'</td><td>'+esc(l.box||'-')+'</td><td style="font-size:11px;color:var(--text-secondary)">'+esc(l.user||'-')+'</td><td><button class="btn btn-danger btn-sm" onclick="deletePivRow(\''+l.id+'\')" title="Delete this PIV record"><i class="bx bx-trash"></i></button></td></tr>';
     });
     h+='</tbody></table></div>';
     return h;
@@ -2250,16 +2382,16 @@ function filterPIVTable(){
 }
 
 // --- Add PIV Modal ---
-function showAddPIV(){
+function showAddPIV(prefRack){
     var racks=DB.get('rack_master');
-    var rOpts='<option value="">-- Scan ya Select --</option>';
+    var rOpts='<option value="">-- Scan or Select --</option>';
     racks.forEach(function(r){rOpts+='<option value="'+esc(r.rack)+'">'+esc(r.rack)+'</option>';});
 
     var h='';
 
     // EAN Scan
     h+='<div class="form-group"><label>EAN Number <span class="req">*</span></label>';
-    h+='<div style="display:flex;gap:6px"><div class="search-box" style="flex:1;max-width:100%"><i class="bx bx-barcode"></i><input type="text" id="pivEanScan" placeholder="Scan ya type EAN Number..." onkeydown="if(event.key===\'Enter\'){event.preventDefault();lookupPIVEan();}" style="font-family:var(--font-display);font-size:14px;letter-spacing:1px"></div>';
+    h+='<div style="display:flex;gap:6px"><div class="search-box" style="flex:1;max-width:100%"><i class="bx bx-barcode"></i><input type="text" id="pivEanScan" placeholder="Scan or type EAN number..." onkeydown="if(event.key===\'Enter\'){event.preventDefault();lookupPIVEan();}" style="font-family:var(--font-display);font-size:14px;letter-spacing:1px"></div>';
     h+='<button class="btn btn-glass btn-sm" onclick="openScannerForPIVEan()" title="Camera Scan"><i class="bx bx-qr"></i></button>';
     h+='<button class="btn btn-glass btn-sm" onclick="lookupPIVEan()" title="Search"><i class="bx bx-search"></i></button></div></div>';
 
@@ -2267,17 +2399,19 @@ function showAddPIV(){
     h+='<div id="pivMatInfo" style="display:none">';
     h+='<div id="pivLookupMsg"></div>';
     h+='<div class="form-row" style="margin-top:8px">';
-    h+='<div class="form-group" style="flex:2"><label>Material <span class="req">*</span></label><input type="text" id="pivMaterial" class="form-input" placeholder="Auto-fill ya manual type karein"></div>';
-    h+='<div class="form-group" style="flex:2"><label>Material Description</label><input type="text" id="pivDescription" class="form-input" placeholder="Auto-fill ya manual type karein"></div>';
+    h+='<div class="form-group" style="flex:2"><label>Material <span class="req">*</span></label><input type="text" id="pivMaterial" class="form-input" placeholder="Auto-fill or type manually"></div>';
+    h+='<div class="form-group" style="flex:2"><label>Material Description</label><input type="text" id="pivDescription" class="form-input" placeholder="Auto-fill or type manually"></div>';
     h+='</div>';
     h+='<div class="form-row"><div class="form-group"><label>EAN (Saved)</label><input type="text" id="pivEanSaved" class="form-input" readonly style="background:var(--bg-secondary);font-family:var(--font-display);font-size:11px;color:var(--text-muted)"></div></div>';
     h+='</div>';
 
     // Rack Scan
-    h+='<div style="margin-top:14px" id="pivRackSection" '+(document.getElementById('pivEanScan')&&document.getElementById('pivEanScan').value?'':'')+'><div class="form-group"><label>Rack <span class="req">*</span></label>';
-    h+='<div style="display:flex;gap:6px"><div class="search-box" style="flex:1;max-width:100%"><i class="bx bx-diamond"></i><input type="text" id="pivRackScan" placeholder="Scan ya type Rack..." style="text-transform:uppercase" onkeydown="if(event.key===\'Enter\'){event.preventDefault();document.getElementById(\'pivQty\').focus();}"></div>';
+    h+='<div style="margin-top:14px" id="pivRackSection"><div class="form-group"><label>Rack <span class="req">*</span></label>';
+    h+='<div style="display:flex;gap:6px"><div class="search-box" style="flex:1;max-width:100%"><i class="bx bx-diamond"></i><input type="text" id="pivRackScan" placeholder="Scan or type rack..." style="text-transform:uppercase" oninput="showPivRackCycleInfo()" onkeydown="if(event.key===\'Enter\'){event.preventDefault();document.getElementById(\'pivQty\').focus();}"></div>';
     h+='<button class="btn btn-glass btn-sm" onclick="openScannerForPIVRack()" title="Scan Rack"><i class="bx bx-qr"></i></button></div>';
-    h+='<select class="form-input" id="pivRackSelect" onchange="if(this.value){document.getElementById(\'pivRackScan\').value=this.value;document.getElementById(\'pivQty\').focus();}" style="margin-top:6px;font-size:12px">'+rOpts+'</select></div></div>';
+    h+='<select class="form-input" id="pivRackSelect" onchange="if(this.value){document.getElementById(\'pivRackScan\').value=this.value;showPivRackCycleInfo();document.getElementById(\'pivQty\').focus();}" style="margin-top:6px;font-size:12px">'+rOpts+'</select>';
+    h+='<div id="pivCycleHint" style="margin-top:8px"></div>';
+    h+='</div></div>';
 
     // Qty + Packing + Box
     h+='<div class="form-row" style="margin-top:12px">';
@@ -2292,12 +2426,97 @@ function showAddPIV(){
     h+='<div class="form-group"><label>Date & Time</label><div class="form-input" style="background:var(--bg-secondary);color:var(--accent);font-weight:600;font-size:12px"><i class="bx bx-time-five"></i> '+fmtDT(new Date())+' <small>(Auto)</small></div></div>';
     h+='</div>';
 
-    showModal('Add PIV Entry',h,'lg',
+    showModal('Add PIV Count',h,'lg',
         '<button class="btn btn-glass" onclick="closeModal()">Cancel</button>'+
-        '<button class="btn btn-glass" onclick="savePIV()"><i class="bx bx-check"></i> Save PIV</button>');
+        '<button class="btn btn-glass" onclick="savePIV()"><i class="bx bx-check"></i> Save Count</button>');
 
-    // Focus on EAN
-    setTimeout(function(){document.getElementById('pivEanScan').focus();},300);
+    // Focus on EAN, or prefill rack (Count Now button)
+    setTimeout(function(){
+        if(prefRack){
+            var rs=document.getElementById('pivRackScan');
+            if(rs){rs.value=String(prefRack).toUpperCase();showPivRackCycleInfo();document.getElementById('pivQty').focus();}
+        }else{document.getElementById('pivEanScan').focus();}
+    },300);
+}
+// --- Cycle hint inside Add PIV modal ---
+function showPivRackCycleInfo(){
+    var rack=(document.getElementById('pivRackScan').value||'').trim().toUpperCase();
+    var div=document.getElementById('pivCycleHint');
+    if(!div)return;
+    var cyc=getCurrentPivCycle();
+    if(!rack||!cyc){div.innerHTML='';return;}
+    var racks=pivRackList(cyc);
+    var idx=racks.indexOf(rack);
+    if(idx<0){
+        div.innerHTML='<div style="background:var(--bg-secondary);border:1px solid var(--border);padding:8px 10px;border-radius:var(--radius-sm);font-size:11px;color:var(--text-muted)"><i class="bx bx-info-circle"></i> No cycle slot assigned to this rack — the entry will still be saved as a normal PIV count.</div>';
+        return;
+    }
+    var w=pivWindow(cyc,idx),s=pivRackStatus(cyc,rack,idx);
+    var color=s.status==='COUNTED'?'var(--success)':(s.status==='DUE NOW'?'#E9730C':(s.status==='OVERDUE'?'var(--danger)':'var(--text-muted)'));
+    div.innerHTML='<div style="background:var(--accent-dim);border:1px solid var(--accent);padding:8px 10px;border-radius:var(--radius-sm);font-size:11px;color:var(--accent)"><i class="bx bx-calendar-check"></i> <strong>Cycle #'+cyc.cycleNo+'</strong> — Slot '+(idx+1)+'/'+racks.length+' • Window: <strong>'+fmtDT(w.start)+'</strong> → Complete By: <strong>'+fmtDT(w.end)+'</strong> • Status: <strong style="color:'+color+'">'+s.status+'</strong>'+(s.rec?' • Last count qty: '+s.rec.quantity:'')+'</div>';
+}
+
+// --- Cycle Setup / Edit Modal ---
+function showPivCycleSetup(editMode){
+    var cyc=editMode?getCurrentPivCycle():null;
+    var rackCount=DB.get('rack_master').length;
+    var defTotal=rackCount>0?rackCount:60;
+    var h='';
+    h+='<div style="background:var(--accent-dim);border:1px solid var(--accent);border-radius:var(--radius-sm);padding:10px 12px;margin-bottom:12px;font-size:12px;color:var(--accent)"><i class="bx bx-info-circle"></i> Bin Master has <strong>'+rackCount+'</strong> racks. At 1.5 days per rack, a <strong>60-rack cycle runs 90 days</strong> (36-hour fixed window per rack).</div>';
+    h+='<div class="form-row">';
+    h+='<div class="form-group"><label>Cycle Start Date <span class="req">*</span></label><input type="date" id="pcStart" class="form-input" value="'+(cyc?cyc.startDate:today())+'"></div>';
+    h+='<div class="form-group"><label>Daily Start Time <span class="req">*</span></label><input type="time" id="pcTime" class="form-input" value="'+(cyc?(cyc.startTime||'09:00'):'09:00')+'"></div>';
+    h+='</div>';
+    h+='<div class="form-row">';
+    h+='<div class="form-group"><label>Days per Rack</label><input type="number" id="pcDays" class="form-input" step="0.5" min="0.5" value="'+(cyc?cyc.daysPerRack:1.5)+'"></div>';
+    h+='<div class="form-group"><label>Total Racks in Cycle</label><input type="number" id="pcTotal" class="form-input" min="1" value="'+(cyc?cyc.totalRacks:defTotal)+'"></div>';
+    h+='</div>';
+    if(cyc)h+='<div style="background:#FFF8D6;border:1px solid #E9730C;padding:8px 12px;border-radius:var(--radius-sm);font-size:11px;color:#E9730C;margin-top:6px"><i class="bx bx-error-circle"></i> This cycle is running — changing these values re-calculates the fixed count window of every rack.</div>';
+    showModal((cyc?'Edit Count Cycle':'Start Count Cycle'),h,'sm',
+        '<button class="btn btn-glass" onclick="closeModal()">Cancel</button>'+
+        '<button class="btn btn-glass" onclick="createPivCycle('+(cyc?'true':'false')+')"><i class="bx bx-check"></i> '+(cyc?'Update Cycle':'Start Cycle')+'</button>');
+}
+function createPivCycle(editMode){
+    var sd=document.getElementById('pcStart').value;
+    var st=document.getElementById('pcTime').value||'09:00';
+    var dp=parseFloat(document.getElementById('pcDays').value)||1.5;
+    var tr=parseInt(document.getElementById('pcTotal').value)||0;
+    if(!sd){showToast('Please select a cycle start date','error');return;}
+    if(dp<=0){showToast('Days per rack must be greater than 0','error');return;}
+    if(tr<1){showToast('Total racks must be at least 1','error');return;}
+    if(editMode){
+        var cyc=getCurrentPivCycle();if(!cyc)return;
+        DB.update('piv_cycles',cyc.id,{startDate:sd,startTime:st,daysPerRack:dp,totalRacks:tr});
+        logAction('PIV','CYCLE_UPDATE','Cycle #'+cyc.cycleNo+' updated — '+tr+' racks × '+dp+' days, from '+sd+' '+st);
+        showToast('Cycle updated — every rack slot re-scheduled','success');
+    }else{
+        var no=getPivCycles().length+1;
+        var c=DB.add('piv_cycles',{cycleNo:no,startDate:sd,startTime:st,daysPerRack:dp,totalRacks:tr});
+        var end=pivCycleEnd(c);
+        logAction('PIV','CYCLE_START','Cycle #'+no+' — '+tr+' racks × '+dp+' days (total '+Math.round(tr*dp)+' days), starts '+sd+' '+st+', ends '+fmtDT(end));
+        addNotif('PIV Count Cycle #'+no+' started — '+tr+' racks × '+dp+' days. Complete by '+fmtDT(end),'info');
+        showToast('Count Cycle #'+no+' started — '+tr+' racks, '+Math.round(tr*dp)+' days','success');
+    }
+    closeModal();renderPIV();
+}
+function closePivCycle(){
+    var cyc=getCurrentPivCycle();if(!cyc)return;
+    var racks=pivRackList(cyc);
+    var counted=racks.filter(function(r,i){return pivRackStatus(cyc,r,i).status==='COUNTED';}).length;
+    if(counted<racks.length&&!confirm(counted+' of '+racks.length+' racks counted. Close this cycle anyway?'))return;
+    if(!confirm('Close Count Cycle #'+cyc.cycleNo+'? The next count will start a new cycle.'))return;
+    DB.update('piv_cycles',cyc.id,{completedAt:new Date().toISOString()});
+    logAction('PIV','CYCLE_CLOSE','Cycle #'+cyc.cycleNo+' closed — '+counted+'/'+racks.length+' racks counted');
+    showToast('Cycle #'+cyc.cycleNo+' closed','success');
+    renderPIV();
+}
+function deletePivRow(id){
+    if(!confirm('Delete this PIV record? This cannot be undone.'))return;
+    var rec=DB.find('location_master',id);
+    DB.remove('location_master',id);
+    logAction('PIV','DELETE',(rec?(rec.material+' @ '+(rec.rack||'')+' (qty '+(rec.quantity||0)+')'):'Record')+' — manual delete');
+    showToast('PIV record deleted','success');
+    renderPIV();
 }
 
 // --- Scanner Callbacks ---
@@ -2312,9 +2531,9 @@ function openScannerForPIVEan(){
 function openScannerForPIVRack(){
     APP.scanCallback=function(code){
         document.getElementById('pivRackScan').value=code.toUpperCase();
-        // Sync dropdown
         var sel=document.getElementById('pivRackSelect');
         if(sel){for(var i=0;i<sel.options.length;i++){if(sel.options[i].value.toUpperCase()===code.toUpperCase()){sel.selectedIndex=i;break;}}}
+        showPivRackCycleInfo();
         document.getElementById('pivQty').focus();
     };
     document.getElementById('scannerModal').style.display='flex';
@@ -2324,7 +2543,7 @@ function openScannerForPIVRack(){
 // --- EAN Lookup from Material Master ---
 function lookupPIVEan(){
     var val=document.getElementById('pivEanScan').value.trim().toUpperCase();
-    if(!val){showToast('EAN scan ya type karein','error');return;}
+    if(!val){showToast('Please scan or type an EAN number','error');return;}
 
     var mats=DB.get('material_master');
     var found=null;
@@ -2340,18 +2559,21 @@ function lookupPIVEan(){
         document.getElementById('pivMaterial').value=found.material||'';
         document.getElementById('pivDescription').value=found.description||found.material||'';
         document.getElementById('pivEanSaved').value=found.ean||val;
-        msgDiv.innerHTML='<div style="background:var(--accent-dim);padding:10px;border-radius:var(--radius-sm);margin-bottom:8px;font-size:12px;display:flex;align-items:center;gap:8px"><i class="bx bx-check-circle" style="color:var(--accent);font-size:18px"></i><span style="color:var(--accent)">Material Master se mil gaya — <strong>'+esc(found.material)+'</strong>. Edit kar sakte ho.</span></div>';
+        msgDiv.innerHTML='<div style="background:var(--accent-dim);padding:10px;border-radius:var(--radius-sm);margin-bottom:8px;font-size:12px;display:flex;align-items:center;gap:8px"><i class="bx bx-check-circle" style="color:var(--accent);font-size:18px"></i><span style="color:var(--accent)">Material found in master — <strong>'+esc(found.material)+'</strong>. You can edit it.</span></div>';
         document.getElementById('pivRackScan').focus();
     } else {
         document.getElementById('pivMaterial').value='';
         document.getElementById('pivDescription').value='';
         document.getElementById('pivEanSaved').value=val;
-        msgDiv.innerHTML='<div style="background:rgba(255,107,107,0.1);padding:10px;border-radius:var(--radius-sm);margin-bottom:8px;font-size:12px;display:flex;align-items:center;gap:8px;border:1px solid rgba(255,107,107,0.3)"><i class="bx bx-error-circle" style="color:var(--danger);font-size:18px"></i><span style="color:var(--danger)">EAN <strong>'+esc(val)+'</strong> Material Master mein nahi mila. Manual enter karein.</span></div>';
+        msgDiv.innerHTML='<div style="background:rgba(255,107,107,0.1);padding:10px;border-radius:var(--radius-sm);margin-bottom:8px;font-size:12px;display:flex;align-items:center;gap:8px;border:1px solid rgba(255,107,107,0.3)"><i class="bx bx-error-circle" style="color:var(--danger);font-size:18px"></i><span style="color:var(--danger)">EAN <strong>'+esc(val)+'</strong> not found in Material Master. Please enter manually.</span></div>';
         document.getElementById('pivMaterial').focus();
     }
 }
 
 // --- Save PIV ---
+// --- Save PIV (Re-count Rule) ---
+// 1. Same material + same rack + same qty   → record stays as-is (no change)
+// 2. Same material + same rack + new qty    → OLD entry DELETED, new entry ADDED (stock never increases)
 function savePIV(){
     var ean=document.getElementById('pivEanSaved')?document.getElementById('pivEanSaved').value.trim():document.getElementById('pivEanScan').value.trim().toUpperCase();
     var material=document.getElementById('pivMaterial').value.trim();
@@ -2361,12 +2583,13 @@ function savePIV(){
     var packing=document.getElementById('pivPack').value.trim();
     var box=document.getElementById('pivBox').value.trim().toUpperCase();
 
-    if(!ean){showToast('EAN scan ya type karein','error');document.getElementById('pivEanScan').focus();return;}
-    if(!material){showToast('Material name zaruri hai','error');document.getElementById('pivMaterial').focus();return;}
-    if(!rack){showToast('Rack scan ya select karein','error');document.getElementById('pivRackScan').focus();return;}
-    if(qty<=0){showToast('Quantity 1 se zyada honi chahiye','error');document.getElementById('pivQty').focus();return;}
+    if(!ean){showToast('Please scan or type an EAN number','error');document.getElementById('pivEanScan').focus();return;}
+    if(!material){showToast('Material name is required','error');document.getElementById('pivMaterial').focus();return;}
+    if(!rack){showToast('Please scan or select a rack','error');document.getElementById('pivRackScan').focus();return;}
+    if(qty<=0){showToast('Quantity must be at least 1','error');document.getElementById('pivQty').focus();return;}
 
-    DB.add('location_master',{
+    var cyc=getCurrentPivCycle();
+    var rec={
         date:today(),
         rack:rack,
         ean:ean,
@@ -2378,20 +2601,49 @@ function savePIV(){
         action:'PIV',
         user:APP.currentUser?APP.currentUser.name:'Unknown',
         userId:APP.currentUser?APP.currentUser.id:'',
-        dateTime:new Date().toISOString()
-    });
+        dateTime:new Date().toISOString(),
+        cycleNo:cyc?cyc.cycleNo:null
+    };
 
-    logAction('PIV','ADD',material+' qty:'+qty+' at '+rack+' EAN:'+ean);
-    showToast('PIV entry saved!','success');
+    // --- Find the most recent PIV entry for the SAME material + SAME rack (location) ---
+    var prev=DB.get('location_master').filter(function(l){
+        return l.action==='PIV' && l.rack===rack && (l.material||'').toUpperCase()===material.toUpperCase();
+    }).sort(function(a,b){return new Date(b.dateTime||b.createdAt||0)-new Date(a.dateTime||a.createdAt||0);})[0]||null;
+
+    if(prev && prev.quantity===qty){
+        // RULE 1: same material, same location, same qty → no change, record stays as-is
+        logAction('PIV','NO-CHANGE',material+' @ '+rack+' — same qty '+qty+' counted again; record unchanged');
+        showToast('Same material, same location, same quantity — record already exists. No change made.','info');
+        closeModal();
+        renderPIV();
+        return;
+    }
+
+    if(prev){
+        // RULE 2: re-count (5 days later or any time) → old entry deleted, new entry added
+        // Works for any qty difference (10, 1, 500...) — stock is never inflated
+        DB.remove('location_master',prev.id);
+        DB.add('location_master',rec);
+        logAction('PIV','RECOUNT',material+' @ '+rack+' — old entry (qty '+prev.quantity+') deleted, new count (qty '+qty+') saved. Stock not increased.');
+        showToast('PIV updated — old entry deleted, new count saved (qty '+prev.quantity+' → '+qty+'). Stock not increased.','success');
+        closeModal();
+        renderPIV();
+        return;
+    }
+
+    // First count for this material at this rack → normal add
+    DB.add('location_master',rec);
+    logAction('PIV','ADD',material+' qty:'+qty+' at '+rack+' EAN:'+ean+(cyc?' (Cycle #'+cyc.cycleNo+')':''));
+    showToast('PIV entry saved!'+(cyc?' — Cycle #'+cyc.cycleNo+' slot updated.':''),'success');
     closeModal();
     renderPIV();
 }
 
 // ==================== LOCATION MASTER ====================
 function renderLocationMaster(){
-    var locs=DB.get('location_master').reverse();
+    var locs=DB.get('location_master').filter(function(l){return l.quantity>0;}).reverse();
     var pg=paginate(locs,APP.locPage,APP.locPerPage||50);
-    var h='<div class="section-header"><h2><i class="bx bx-map-pin"></i> Location Master ('+locs.length+')</h2>';
+    var h='<div class="section-header"><h2><i class="bx bx-map-pin"></i> Warehouse Stock ('+locs.length+')</h2>';
     h+='<div style="display:flex;gap:6px;flex-wrap:wrap">';
     h+='<button class="btn btn-glass" onclick="showLocBulkUpload()"><i class="bx bx-upload"></i> Bulk Upload</button>';
     h+='<button class="btn btn-glass" onclick="downloadLocTemplate()"><i class="bx bx-file"></i> Template</button>';
@@ -2439,15 +2691,19 @@ function goLocPage(p){APP.locPage=p;renderLocationMaster();}
 function searchLoc(){
     var q=document.getElementById('locSearch').value.trim().toLowerCase();
     var actF=document.getElementById('locActionFilter').value;
-    var locs=DB.get('location_master').reverse();
+    var locs=DB.get('location_master').filter(function(l){return l.quantity>0;}).reverse();
     if(q)locs=locs.filter(function(l){return(l.rack||'').toLowerCase().indexOf(q)>-1||(l.material||'').toLowerCase().indexOf(q)>-1||(l.ean||'').toLowerCase().indexOf(q)>-1||(l.description||'').toLowerCase().indexOf(q)>-1||(l.user||'').toLowerCase().indexOf(q)>-1;});
     if(actF)locs=locs.filter(function(l){return l.action===actF;});
-    document.getElementById('locTable').innerHTML=buildLocTable(locs);
+    var total=locs.length;
+    var shown=locs.slice(0,100);   // 25k rows par bhi smooth
+    var h=buildLocTable(shown);
+    if(total>shown.length)h+='<div style="text-align:center;padding:10px;font-size:11px;color:var(--text-muted)">Showing first '+shown.length.toLocaleString()+' of '+total.toLocaleString()+' matches — type more letters to narrow down</div>';
+    document.getElementById('locTable').innerHTML=h;
 }
 
 // --- Delete Single Row ---
 function deleteLocRow(id){
-    if(!confirm('Yeh row delete karein?'))return;
+    if(!confirm('Delete this row?'))return;
     DB.remove('location_master',id);
     showToast('Row deleted','warning');
     renderLocationMaster();
@@ -2467,12 +2723,12 @@ function downloadLocTemplate(){
     var wb=XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb,ws,'Template');
     XLSX.writeFile(wb,'Location_Master_Template.xlsx');
-    showToast('Template downloaded! Is format mein data bharein','success');
+    showToast('Template downloaded! Fill in data using this format','success');
 }
 
 // --- Bulk Upload ---
 function showLocBulkUpload(){
-    var h='<div style="background:var(--accent-dim);padding:12px;border-radius:var(--radius-sm);margin-bottom:14px;font-size:12px;color:var(--accent);border:1px solid var(--accent)"><i class="bx bx-info-circle" style="font-size:16px"></i> <strong>25000+ rows</strong> support hai. Upload mein thoda time lagega — please wait.</div>';
+    var h='<div style="background:var(--accent-dim);padding:12px;border-radius:var(--radius-sm);margin-bottom:14px;font-size:12px;color:var(--accent);border:1px solid var(--accent)"><i class="bx bx-info-circle" style="font-size:16px"></i> <strong>25,000+ rows</strong> are supported. The upload may take a while — please wait.</div>';
     h+='<div class="form-group"><label>Upload Excel File <span class="req">*</span></label>';
     h+='<label class="btn btn-glass btn-sm" style="cursor:pointer;display:inline-flex;align-items:center;gap:6px"><i class="bx bx-upload"></i> Choose File (.xlsx / .xls / .csv)<input type="file" id="locBulkFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="document.getElementById(\'locBulkFName\').innerText=this.files[0].name+\' (\'+(this.files[0].size/1024).toFixed(1)+\' KB)\'"></label>';
     h+='<div id="locBulkFName" style="font-size:11px;color:var(--text-muted);margin-top:6px">No file chosen</div></div>';
@@ -2493,11 +2749,11 @@ function showLocBulkUpload(){
 
 function processLocBulkUpload(){
     var fi=document.getElementById('locBulkFile');
-    if(!fi||!fi.files[0]){showToast('File select karein','error');return;}
+    if(!fi||!fi.files[0]){showToast('Please select a file','error');return;}
 
     var progDiv=document.getElementById('locBulkProgress');
     progDiv.style.display='';
-    progDiv.innerHTML='<div style="background:var(--bg-secondary);padding:10px;border-radius:var(--radius-sm);text-align:center;color:var(--accent)"><i class="bx bx-loader-circle bx-spin" style="font-size:20px;display:block;margin-bottom:6px"></i>Processing... please wait</div>';
+    progDiv.innerHTML='<div style="background:var(--bg-secondary);padding:10px;border-radius:var(--radius-sm);text-align:center;color:var(--accent)"><i class="bx bx-loader-circle bx-spin" style="font-size:20px;display:block;margin-bottom:6px"></i>Reading file... please wait</div>';
 
     setTimeout(function(){
         try{
@@ -2509,13 +2765,13 @@ function processLocBulkUpload(){
                     var ws=wb.Sheets[wb.SheetNames[0]];
                     var data=XLSX.utils.sheet_to_json(ws,{header:1,raw:false});
 
-                    if(!data||data.length<2){showToast('File empty hai','error');progDiv.innerHTML='';return;}
+                    if(!data||data.length<2){showToast('File is empty','error');progDiv.innerHTML='';return;}
 
                     var headerRow=data[0].map(function(h){return String(h||'').trim().toLowerCase();});
                     var colMap={date:-1,rack:-1,material:-1,ean:-1,qty:-1,action:-1,packing:-1,box:-1};
                     var keys=['date','rack','material','ean','qty','action','packing','box'];
                     var aliases={date:['date','dt'],rack:['rack','location'],material:['material','item'],ean:['ean','barcode'],qty:['qty','quantity'],action:['action','type'],packing:['packing','pack'],box:['box','boxno']};
-                    
+
                     keys.forEach(function(k){
                         aliases[k].forEach(function(a){
                             for(var ci=0;ci<headerRow.length;ci++){
@@ -2525,7 +2781,7 @@ function processLocBulkUpload(){
                     });
 
                     if(colMap.rack===-1||colMap.material===-1||colMap.qty===-1){
-                        showToast('Missing columns: Rack, Material ya Qty','error');progDiv.innerHTML='';return;
+                        showToast('Missing required columns: Rack, Material, Qty','error');progDiv.innerHTML='';return;
                     }
 
                     function parseDate(val){
@@ -2540,9 +2796,9 @@ function processLocBulkUpload(){
                         return today();
                     }
 
-                    // Pehle se existing data lo
-                    var existingData = DB.get('location_master');
-                    var added=0,skipped=0,errorRows=[];
+                    // ---- Validate + build rows (memory only — no DB writes here) ----
+                    var valid=[];
+                    var skipped=0;
                     var userName=APP.currentUser?APP.currentUser.name:'Bulk Upload';
                     var userId=APP.currentUser?APP.currentUser.id:'';
 
@@ -2559,10 +2815,9 @@ function processLocBulkUpload(){
                         var box=colMap.box>=0?String(r[colMap.box]||'').trim().toUpperCase():'';
                         var date=colMap.date>=0?parseDate(r[colMap.date]):today();
 
-                        if(!rack||!material||qty<=0){skipped++;errorRows.push(k+1);continue;}
+                        if(!rack||!material||qty<=0){skipped++;continue;}
 
-                        existingData.push({
-                            id: DB.uid(),
+                        valid.push({
                             date:date,
                             rack:rack,
                             ean:ean,
@@ -2576,26 +2831,56 @@ function processLocBulkUpload(){
                             userId:userId,
                             dateTime:new Date().toISOString()
                         });
-                        added++;
                     }
 
-                    // Ek hi baar DB.set call karo (No UI Hang)
-                    DB.set('location_master', existingData);
+                    if(!valid.length){
+                        progDiv.innerHTML='<div style="background:rgba(255,107,107,0.1);padding:12px;border-radius:var(--radius-sm);color:var(--danger);font-size:12px"><i class="bx bx-error"></i> No valid rows found ('+skipped+' skipped)</div>';
+                        return;
+                    }
 
-                    var t1=performance.now();
-                    var timeSec=((t1-t0)/1000).toFixed(1);
+                    // ---- Chunked insert: 2500 rows per batch, UI freeze zero ----
+                    var CHUNK=2500, done=0, total=valid.length;
+                    var t1;
 
-                    var resHtml='<div style="background:var(--bg-secondary);padding:14px;border-radius:var(--radius-sm);border:1px solid var(--border)">';
-                    resHtml+='<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px">';
-                    resHtml+='<div style="text-align:center;flex:1;min-width:80px"><div style="font-size:24px;font-weight:800;color:var(--success)">'+added+'</div><div style="font-size:9px;color:var(--text-muted)">ADDED</div></div>';
-                    if(skipped>0)resHtml+='<div style="text-align:center;flex:1;min-width:80px"><div style="font-size:24px;font-weight:800;color:var(--danger)">'+skipped+'</div><div style="font-size:9px;color:var(--text-muted)">SKIPPED</div></div>';
-                    resHtml+='<div style="text-align:center;flex:1;min-width:80px"><div style="font-size:24px;font-weight:800;color:var(--accent)">'+timeSec+'s</div><div style="font-size:9px;color:var(--text-muted)">TIME</div></div>';
-                    resHtml+='</div>';
-                    resHtml+='</div>';
-                    progDiv.innerHTML=resHtml;
+                    function renderProg(){
+                        var pct=Math.round((done/total)*100);
+                        var ph='<div style="padding:12px;background:var(--bg-secondary);border-radius:var(--radius-sm);border:1px solid var(--border)">';
+                        ph+='<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:6px"><span><i class="bx bx-loader-alt bx-spin"></i> Uploading...</span><span style="color:var(--text-muted)">'+done.toLocaleString()+' / '+total.toLocaleString()+'</span></div>';
+                        ph+='<div style="height:6px;background:var(--bg-primary);border-radius:4px;overflow:hidden"><div style="height:100%;width:'+pct+'%;background:linear-gradient(90deg,var(--accent),#2ed573)"></div></div>';
+                        ph+='</div>';
+                        progDiv.innerHTML=ph;
+                    }
+                    renderProg();
 
-                    logAction('Location Master','BULK_UPLOAD',added+' rows added in '+timeSec+'s');
-                    showToast(added+' rows uploaded! ('+timeSec+'s)','success');
+                    function chunkInsert(){
+                        var end=Math.min(done+CHUNK,total);
+                        DB.addBulk('location_master',valid.slice(done,end));  // 1 memory write + row-level server push
+                        done=end;
+                        renderProg();
+                        if(done<total){ setTimeout(chunkInsert,0); }
+                        else { finishLoc(); }
+                    }
+
+                    async function finishLoc(){
+                        if(_rowPushTimers['location_master'])clearTimeout(_rowPushTimers['location_master']);
+                        await flushPushRows('location_master');
+                        broadcastRefresh('location_master');     // sab users live refresh
+                        t1=performance.now();
+                        var timeSec=((t1-t0)/1000).toFixed(1);
+                        var resHtml='<div style="background:var(--bg-secondary);padding:14px;border-radius:var(--radius-sm);border:1px solid var(--border)">';
+                        resHtml+='<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px">';
+                        resHtml+='<div style="text-align:center;flex:1;min-width:80px"><div style="font-size:24px;font-weight:800;color:var(--success)">'+done+'</div><div style="font-size:9px;color:var(--text-muted)">ADDED</div></div>';
+                        if(skipped>0)resHtml+='<div style="text-align:center;flex:1;min-width:80px"><div style="font-size:24px;font-weight:800;color:var(--danger)">'+skipped+'</div><div style="font-size:9px;color:var(--text-muted)">SKIPPED</div></div>';
+                        resHtml+='<div style="text-align:center;flex:1;min-width:80px"><div style="font-size:24px;font-weight:800;color:var(--accent)">'+timeSec+'s</div><div style="font-size:9px;color:var(--text-muted)">TIME</div></div>';
+                        resHtml+='</div>';
+                        resHtml+='<div style="font-size:11px;color:var(--text-muted)"><i class="bx bx-check-circle" style="color:var(--success)"></i> Upload complete — synced to Supabase, visible to all users live.</div>';
+                        resHtml+='</div>';
+                        progDiv.innerHTML=resHtml;
+                        logAction('Location Master','BULK_UPLOAD',done+' rows added in '+timeSec+'s');
+                        showToast(done.toLocaleString()+' rows uploaded! ('+timeSec+'s)','success');
+                    }
+
+                    chunkInsert();
 
                 }catch(err){
                     progDiv.innerHTML='<div style="background:rgba(255,107,107,0.1);padding:12px;border-radius:var(--radius-sm);color:var(--danger);font-size:12px"><i class="bx bx-error"></i> Error: '+esc(err.message)+'</div>';
@@ -2747,7 +3032,7 @@ function renderRackMaster(){
     var bins=DB.get('rack_master');
     var locs=DB.get('location_master');
 
-    var h='<div class="section-header"><h2><i class="bx bx-grid-alt"></i> Bin Master ('+bins.length+')</h2>';
+    var h='<div class="section-header"><h2><i class="bx bx-grid-alt"></i> Storage Bins ('+bins.length+')</h2>';
     h+='<div style="display:flex;gap:6px;flex-wrap:wrap">';
     h+='<button class="btn btn-glass" onclick="showAddRack()"><i class="bx bx-plus"></i> Add Bin</button>';
     h+='<button class="btn btn-glass" onclick="showBulkBinUpload()"><i class="bx bx-upload"></i> Bulk Upload</button>';
@@ -2755,13 +3040,7 @@ function renderRackMaster(){
     h+='</div></div>';
 
     // Quick Stats
-    var occMap={};var totalMats=0;
-    locs.forEach(function(l){
-        if(l.quantity>0){
-            if(!occMap[l.rack])occMap[l.rack]={mats:0,qty:0};
-            occMap[l.rack].mats++;occMap[l.rack].qty+=l.quantity;totalMats++;
-        }
-    });
+    var occMap=buildOccMap();var totalMats=0;for(var _k in occMap)totalMats+=occMap[_k].mats;
     var occupiedCount=Object.keys(occMap).length;
     var emptyCount=bins.length-occupiedCount;
 
@@ -2782,7 +3061,7 @@ function renderRackMaster(){
     h+='<div class="card"><div class="card-title"><i class="bx bx-grid"></i> Bin Visualization <span style="font-size:10px;color:var(--text-muted);font-weight:normal">(Click to see materials)</span></div>';
     h+='<div id="binGridWrap"><div class="rack-grid">';
     bins.forEach(function(b){
-        var occ=occMap[b.rack];
+        var occ=occMap[rkey(b.rack)];
         h+='<div class="rack-cell '+(occ?'occupied':'empty')+'" onclick="showBinMaterials(\''+esc(b.rack).replace(/'/g,"\\'")+'\')" title="'+esc(b.rack)+(occ?' — '+occ.mats+' materials, '+occ.qty+' qty':' — Empty')+'"><div style="font-size:13px;font-weight:700">'+esc(b.rack.replace('RACK-','').replace('BIN-',''))+'</div>';
         if(occ)h+='<div style="font-size:8px;color:var(--success);margin-top:2px">'+occ.mats+' items</div>';
         h+='</div>';
@@ -2806,7 +3085,7 @@ function buildBinTable(allBins,pageBins,occMap){
     else {
         var startIdx=((APP.binPage||1)-1)*(APP.binPerPage||100);
         pageBins.forEach(function(b,i){
-            var occ=occMap[b.rack];
+            var occ=occMap[rkey(b.rack)];
             h+='<tr style="cursor:pointer" onclick="showBinMaterials(\''+esc(b.rack).replace(/'/g,"\\'")+'\')"><td>'+(startIdx+i+1)+'</td><td><strong>'+esc(b.rack)+'</strong></td><td><span class="badge '+(occ?'badge-success':'badge-danger')+'">'+(occ?'Occupied':'Empty')+'</span></td><td>'+(occ?occ.mats:0)+'</td><td>'+(occ?occ.qty:0)+'</td><td><div class="table-actions"><button class="btn btn-glass btn-sm" onclick="event.stopPropagation();showBinMaterials(\''+esc(b.rack).replace(/'/g,"\\'")+'\')"><i class="bx bx-eye"></i> View</button><button class="btn btn-danger btn-sm" onclick="event.stopPropagation();deleteRack(\''+b.id+'\')"><i class="bx bx-trash"></i></button></div></td></tr>';
         });
     }
@@ -2821,17 +3100,14 @@ function filterBinGrid(){
     var statusF=document.getElementById('binStatusFilter').value;
     var bins=DB.get('rack_master');
     var locs=DB.get('location_master');
-    var occMap={};
-    locs.forEach(function(l){
-        if(l.quantity>0){if(!occMap[l.rack])occMap[l.rack]={mats:0,qty:0};occMap[l.rack].mats++;occMap[l.rack].qty+=l.quantity;}
-    });
+    var occMap=buildOccMap();
     if(q)bins=bins.filter(function(b){return(b.rack||'').toLowerCase().indexOf(q)>-1;});
-    if(statusF==='occupied')bins=bins.filter(function(b){return occMap[b.rack];});
-    else if(statusF==='empty')bins=bins.filter(function(b){return !occMap[b.rack];});
+    if(statusF==='occupied')bins=bins.filter(function(b){return occMap[rkey(b.rack)];});
+    else if(statusF==='empty')bins=bins.filter(function(b){return !occMap[rkey(b.rack)];});
 
     var h='<div class="rack-grid">';
     bins.forEach(function(b){
-        var occ=occMap[b.rack];
+        var occ=occMap[rkey(b.rack)];
         h+='<div class="rack-cell '+(occ?'occupied':'empty')+'" onclick="showBinMaterials(\''+esc(b.rack).replace(/'/g,"\\'")+'\')" title="'+esc(b.rack)+(occ?' — '+occ.mats+' materials, '+occ.qty+' qty':' — Empty')+'"><div style="font-size:13px;font-weight:700">'+esc(b.rack.replace('RACK-','').replace('BIN-',''))+'</div>';
         if(occ)h+='<div style="font-size:8px;color:var(--success);margin-top:2px">'+occ.mats+' items</div>';
         h+='</div>';
@@ -2847,24 +3123,6 @@ function filterBinGrid(){
 }
 
 // --- Click Bin → Show Materials ---
-function showBinMaterials(binName){
-    var locs=DB.filter('location_master',function(l){return l.rack===binName;});
-    var totalQty=0;locs.forEach(function(l){totalQty+=l.quantity;});
-    var h='<div style="text-align:center;margin-bottom:14px"><div style="font-size:22px;font-weight:800;color:var(--accent);font-family:var(--font-display);letter-spacing:2px">'+esc(binName)+'</div><div style="font-size:11px;color:var(--text-muted)">'+locs.length+' materials | '+totalQty+' total qty</div></div>';
-    if(!locs.length){
-        h+='<div style="text-align:center;color:var(--text-muted);padding:30px"><i class="bx bx-box" style="font-size:32px;display:block;margin-bottom:10px"></i>This bin is empty</div>';
-    } else {
-        h+='<div class="table-wrapper" style="max-height:400px;overflow-y:auto"><table class="data-table"><thead><tr><th>#</th><th>Date</th><th>Material</th><th>Description</th><th>EAN</th><th>Qty</th><th>Action</th><th>Packing</th><th>Box</th><th>User</th></tr></thead><tbody>';
-        locs.forEach(function(l,i){
-            var actCls=l.action==='PUTAWAY'?'badge-accent':(l.action==='PIV'?'badge-info':(l.action==='EAN-SCAN'?'badge-success':'badge-warning'));
-            h+='<tr><td>'+(i+1)+'</td><td style="font-size:11px">'+esc(l.date)+'</td><td><strong>'+esc(l.material)+'</strong></td><td style="font-size:10px;color:var(--text-secondary);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(l.description||'-')+'</td><td style="font-family:var(--font-display);font-size:9px">'+esc(l.ean||'-')+'</td><td><strong style="color:var(--accent)">'+l.quantity+'</strong></td><td><span class="badge '+actCls+'">'+esc(l.action)+'</span></td><td>'+esc(l.packing||'-')+'</td><td>'+esc(l.box||'-')+'</td><td style="font-size:10px">'+esc(l.user||'-')+'</td></tr>';
-        });
-        h+='</tbody></table></div>';
-    }
-    h+='<div class="form-actions" style="margin-top:14px"><button class="btn btn-glass" onclick="closeModal()">Close</button></div>';
-    showModal('Bin Details — '+binName,h,'xl','');
-}
-
 // --- Add Single Bin ---
 function showAddRack(){
     showModal('Add Bin','<div class="form-group"><label>Bin Name <span class="req">*</span></label><input type="text" id="newRack" class="form-input" placeholder="BIN-001 ya RACK-001" style="text-transform:uppercase"></div>','sm',
@@ -2888,12 +3146,12 @@ function downloadBinTemplate(){
     ws['!cols']=[{wch:16}];
     var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Template');
     XLSX.writeFile(wb,'Bin_Master_Template.xlsx');
-    showToast('Template downloaded! Sirf BIN column mein data bharein','success');
+    showToast('Template downloaded! Enter data only in the BIN column','success');
 }
 
 // --- Bulk Upload ---
 function showBulkBinUpload(){
-    var h='<div style="background:var(--accent-dim);padding:12px;border-radius:var(--radius-sm);margin-bottom:14px;font-size:12px;color:var(--accent);border:1px solid var(--accent)"><i class="bx bx-info-circle" style="font-size:16px"></i> <strong>15000+ bins</strong> ek saath upload kar sakte hain. Hang nahi hoga.</div>';
+    var h='<div style="background:var(--accent-dim);padding:12px;border-radius:var(--radius-sm);margin-bottom:14px;font-size:12px;color:var(--accent);border:1px solid var(--accent)"><i class="bx bx-info-circle" style="font-size:16px"></i> <strong>15,000+ bins</strong> can be uploaded at once. The page will not freeze.</div>';
     h+='<div class="form-group"><label>Upload Excel/CSV <span class="req">*</span></label>';
     h+='<label class="btn btn-glass btn-sm" style="cursor:pointer;display:inline-flex;align-items:center;gap:6px"><i class="bx bx-upload"></i> Choose File<input type="file" id="binBulkFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="document.getElementById(\'binBulkFName\').innerText=this.files[0].name+\' (\'+(this.files[0].size/1024).toFixed(1)+\' KB)\'"></label>';
     h+='<div id="binBulkFName" style="font-size:11px;color:var(--text-muted);margin-top:6px">No file chosen</div></div>';
@@ -2910,7 +3168,7 @@ function showBulkBinUpload(){
 
 function processBulkBinUpload(){
     var fi=document.getElementById('binBulkFile');
-    if(!fi||!fi.files[0]){showToast('File select karein','error');return;}
+    if(!fi||!fi.files[0]){showToast('Please select a file','error');return;}
 
     var progDiv=document.getElementById('binBulkProgress');
     progDiv.style.display='';
@@ -2926,7 +3184,7 @@ function processBulkBinUpload(){
                     var ws=wb.Sheets[wb.SheetNames[0]];
                     var data=XLSX.utils.sheet_to_json(ws,{header:1,raw:false});
 
-                    if(!data||data.length<1){showToast('File empty hai','error');progDiv.innerHTML='';return;}
+                    if(!data||data.length<1){showToast('The selected file is empty','error');progDiv.innerHTML='';return;}
 
                     // Existing bins set for fast lookup
                     var existingBins={};
@@ -2949,16 +3207,18 @@ function processBulkBinUpload(){
                     var added=0,duplicate=0,skipped=0;
                     var userName=APP.currentUser?APP.currentUser.name:'Bulk Upload';
 
+                    var newBins=[];
                     for(var k=startRow;k<data.length;k++){
                         var r=data[k];
                         if(!r)continue;
                         var binName=String(r[colIdx]||'').trim().toUpperCase();
                         if(!binName){skipped++;continue;}
                         if(existingBins[binName]){duplicate++;continue;}
-                        DB.add('rack_master',{rack:binName});
+                        newBins.push({rack:binName});
                         existingBins[binName]=true; // Add to set so no dupes in same upload
                         added++;
                     }
+                    DB.addBulk('rack_master',newBins);   // 1 memory write + row-level server push — no freeze
 
                     var t1=performance.now();
                     var timeSec=((t1-t0)/1000).toFixed(1);
@@ -2992,7 +3252,7 @@ function processBulkBinUpload(){
 // ==================== MATERIAL MASTER ====================
 function renderMaterialMaster(){
     var mats=DB.get('material_master');var pg=paginate(mats,APP.matPage,APP.matPerPage);
-    var h='<div class="section-header"><h2><i class="bx bx-label"></i> Material Master ('+mats.length+')</h2><div style="display:flex;gap:6px"><button class="btn btn-glass" onclick="exportTableExcel(\'material_master\',\'Material_Master\')"><i class="bx bx-download"></i> Excel</button><button class="btn btn-glass" onclick="showBulkUploadMaterial()"><i class="bx bx-upload"></i> Bulk Upload</button><button class="btn btn-glass" onclick="showAddMaterial()"><i class="bx bx-plus"></i> Add</button></div></div>';
+    var h='<div class="section-header"><h2><i class="bx bx-label"></i> Product Master ('+mats.length+')</h2><div style="display:flex;gap:6px"><button class="btn btn-glass" onclick="exportTableExcel(\'material_master\',\'Material_Master\')"><i class="bx bx-download"></i> Excel</button><button class="btn btn-glass" onclick="showBulkUploadMaterial()"><i class="bx bx-upload"></i> Bulk Upload</button><button class="btn btn-glass" onclick="showAddMaterial()"><i class="bx bx-plus"></i> Add</button></div></div>';
     h+='<div class="search-box"><i class="bx bx-search"></i><input type="text" id="matSearch" placeholder="Search material, EAN..." oninput="searchMat()"></div>';
     h+='<div id="matTable">'+buildMatTable(pg.items)+'</div>';
     h+=renderPag(APP.matPage,pg.pages,'goMatPage');
@@ -3004,7 +3264,7 @@ function showBulkUploadMaterial(){
     var h='<div style="margin-bottom:16px;padding:12px 16px;background:var(--bg-secondary);border-radius:8px;border:1px solid var(--border-color)">';
     h+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><i class="bx bx-info-circle" style="color:var(--accent);font-size:18px"></i><strong>Instructions</strong></div>';
     h+='<ul style="margin:0;padding-left:20px;color:var(--text-muted);font-size:13px;line-height:1.8">';
-    h+='<li>CSV file upload karein (max 1,00,000 rows supported)</li>';
+    h+='<li>Upload a CSV file (max 100,000 rows supported)</li>';
     h+='<li>Required columns: <code style="background:var(--bg-primary);padding:2px 6px;border-radius:4px">Material, EAN</code></li>';
     h+='<li>Optional columns: <code style="background:var(--bg-primary);padding:2px 6px;border-radius:4px">Description, Division, Brand</code></li>';
     h+='<li>Duplicate EAN skip ho jayenge</li>';
@@ -3211,25 +3471,24 @@ function parseCSVLine(line){
     return result;
 }
 
-// Chunked bulk upload with progress - prevents UI freeze on 70K rows
+// Chunked bulk upload with progress — 60,000+ rows, zero UI freeze
 function executeBulkUpload(){
     var rows=window._bulkRows;
     if(!rows||!rows.length)return;
-    
+
     var progressDiv=document.getElementById('bulkProgress');
     progressDiv.style.display='block';
-    
+
     var total=rows.length;
-    var chunkSize=500; // 500 rows per batch to keep UI responsive
+    var CHUNK=2000;                    // memory insert batch — 1 write per 2000 rows (pehle per-row tha = hang)
     var inserted=0;
     var startTime=Date.now();
-    
-    function renderProgress(){
+
+    function renderProgress(syncing){
         var pct=Math.round((inserted/total)*100);
         var elapsed=((Date.now()-startTime)/1000).toFixed(1);
         var rate=inserted>0?Math.round(inserted/elapsed):0;
         var remaining=rate>0?Math.round((total-inserted)/rate):'...';
-        
         var ph='<div style="padding:16px;background:var(--bg-secondary);border-radius:12px;border:1px solid var(--border-color)">';
         ph+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
         ph+='<span style="font-size:13px;font-weight:600"><i class="bx bx-loader-alt bx-spin"></i> Uploading...</span>';
@@ -3239,41 +3498,41 @@ function executeBulkUpload(){
         ph+='<div style="height:100%;width:'+pct+'%;background:linear-gradient(90deg,var(--accent),#2ed573);border-radius:4px;transition:width .1s"></div>';
         ph+='</div>';
         ph+='<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted)">';
-        ph+='<span>'+pct+'% complete</span>';
+        ph+='<span>'+pct+'% complete'+(syncing?' • syncing to Supabase':'')+'</span>';
         ph+='<span>'+rate.toLocaleString()+' rows/sec | ~'+remaining+'s remaining</span>';
         ph+='</div>';
         ph+='</div>';
         progressDiv.innerHTML=ph;
     }
-    
-    renderProgress();
-    
+
+    renderProgress(false);
+
     function processChunk(){
-        var end=Math.min(inserted+chunkSize,total);
-        for(var i=inserted;i<end;i++){
-            DB.add('material_master',rows[i]);
-        }
+        var end=Math.min(inserted+CHUNK,total);
+        DB.addBulk('material_master',rows.slice(inserted,end));   // fast path: no stringify per row, no localStorage
         inserted=end;
-        renderProgress();
-        
-        if(inserted<total){
-            setTimeout(processChunk,0); // yield to UI
-        }else{
-            // Done
-            var elapsed=((Date.now()-startTime)/1000).toFixed(1);
-            var ph='<div style="padding:20px;background:#2ed57311;border:1px solid #2ed573;border-radius:12px;text-align:center">';
-            ph+='<i class="bx bx-check-circle" style="font-size:48px;color:#2ed573;display:block;margin-bottom:8px"></i>';
-            ph+='<div style="font-size:20px;font-weight:700;color:#2ed573;margin-bottom:4px">Upload Complete!</div>';
-            ph+='<div style="color:var(--text-muted);font-size:13px">'+total.toLocaleString()+' materials inserted in '+elapsed+'s</div>';
-            ph+='<button class="btn btn-glass" style="margin-top:12px" onclick="closeModal();renderMaterialMaster()"><i class="bx bx-check"></i> Done</button>';
-            ph+='</div>';
-            progressDiv.innerHTML=ph;
-            
-            logAction('Material','BULK_UPLOAD',total+' materials uploaded');
-            showToast(total.toLocaleString()+' materials uploaded!','success');
-        }
+        renderProgress(true);
+        if(inserted<total){ setTimeout(processChunk,0); }         // UI ko breathe karne do
+        else { finish(); }
     }
-    
+
+    async function finish(){
+        // Saari rows server par commit (row-level, chunked, 3 parallel)
+        if(_rowPushTimers['material_master'])clearTimeout(_rowPushTimers['material_master']);
+        await flushPushRows('material_master');
+        broadcastRefresh('material_master');                     // sab users ko signal — table dobara pull karo
+        var elapsed=((Date.now()-startTime)/1000).toFixed(1);
+        var ph='<div style="padding:20px;background:#2ed57311;border:1px solid #2ed573;border-radius:12px;text-align:center">';
+        ph+='<i class="bx bx-check-circle" style="font-size:48px;color:#2ed573;display:block;margin-bottom:8px"></i>';
+        ph+='<div style="font-size:20px;font-weight:700;color:#2ed573;margin-bottom:4px">Upload Complete!</div>';
+        ph+='<div style="color:var(--text-muted);font-size:13px">'+total.toLocaleString()+' materials inserted in '+elapsed+'s • synced to Supabase • visible to all users</div>';
+        ph+='<button class="btn btn-glass" style="margin-top:12px" onclick="closeModal();renderMaterialMaster()"><i class="bx bx-check"></i> Done</button>';
+        ph+='</div>';
+        progressDiv.innerHTML=ph;
+        logAction('Material','BULK_UPLOAD',total+' materials uploaded');
+        showToast(total.toLocaleString()+' materials uploaded!','success');
+    }
+
     processChunk();
 }
 
@@ -3289,7 +3548,11 @@ function searchMat(){
     var q=document.getElementById('matSearch').value.trim().toLowerCase();
     var mats=DB.get('material_master');
     if(q)mats=mats.filter(function(m){return(m.material||'').toLowerCase().indexOf(q)>-1||(m.ean||'').toLowerCase().indexOf(q)>-1;});
-    document.getElementById('matTable').innerHTML=buildMatTable(mats);
+    var total=mats.length;
+    var shown=mats.slice(0,100);   // 60k rows par bhi typing smooth
+    var h=buildMatTable(shown);
+    if(total>shown.length)h+='<div style="text-align:center;padding:10px;font-size:11px;color:var(--text-muted)">Showing first '+shown.length.toLocaleString()+' of '+total.toLocaleString()+' matches — type more letters to narrow down</div>';
+    document.getElementById('matTable').innerHTML=h;
 }
 function showAddMaterial(){
     var h='<div class="form-row"><div class="form-group"><label>Material Name <span class="req">*</span></label><input type="text" id="matName" class="form-input"></div><div class="form-group"><label>EAN <span class="req">*</span></label><input type="text" id="matEan" class="form-input"></div></div>';
@@ -3327,6 +3590,7 @@ function renderPicking(sub){
         case 'picking-done':renderPickingDone();break;
         case 'picking-with-loading':renderPickingWithLoading();break;
         case 'loc-requests':renderLocRequests();break;
+        case 'crossdock-report':renderCrossdockReport();break;
         default:renderOBDUpload();
     }
 }
@@ -3509,7 +3773,7 @@ function stealLocksForUrgent(obd){
             need-=take;total+=take;affected[d.obdNo]=(affected[d.obdNo]||0)+take;
         });
     });
-    for(var no in affected)addNotif('Urgent '+obd.obdNo+' ne '+no+' se '+affected[no]+' qty lock le liya. '+no+' ko Re-check Locks chahiye.','warning');
+    for(var no in affected)addNotif('Urgent '+obd.obdNo+' ne '+no+' se '+affected[no]+' qty lock le liya. '+no+' — lock re-check required.','warning');
     return total;
 }
 
@@ -3535,41 +3799,22 @@ function stockBadge(info){
 // ---------- Create Outbound Delivery (OBD upload + stock view) ----------
 function renderOBDUpload(){
     var obds=DB.get('obd_data').slice().reverse(),ctx=makeAvailCtx();
-    var h='<div class="section-header"><h2><i class="bx bx-upload"></i> OBD Upload</h2></div>';
+    var h='<div class="section-header"><h2><i class="bx bx-upload"></i> Create Outbound Delivery</h2></div>';
     h+='<div class="card"><div class="card-title"><i class="bx bx-file"></i> Upload OBD (Bulk Excel)</div>';
     h+='<label class="btn btn-glass" style="cursor:pointer;margin-bottom:12px"><i class="bx bx-upload"></i> Choose OBD File<input type="file" id="obdFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="document.getElementById(\'obdFName\').innerText=this.files[0].name"></label>';
     h+='<div id="obdFName" style="font-size:11px;color:var(--text-muted);margin-bottom:8px">No file chosen</div>';
     h+='<button class="btn btn-glass" onclick="processOBDUpload()"><i class="bx bx-check-double"></i> Upload OBDs</button>';
     h+='<div style="background:var(--bg-secondary);padding:10px;border-radius:var(--radius-sm);font-size:11px;color:var(--text-muted);border:1px dashed var(--warning);margin-top:10px"><strong style="color:var(--warning)">Excel Format:</strong><br>OBD No | Material | EAN | Qty | Customer</div>';
     h+='</div>';
-    h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-list-ul"></i> Uploaded OBDs ('+obds.length+') <span style="font-size:10px;color:var(--text-muted);font-weight:normal">— OBD par click karo: material-wise stock dikhega</span></div><div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Customer</th><th>Materials</th><th>Total Qty</th><th>Warehouse Stock</th><th>Status</th></tr></thead><tbody>';
-    if(!obds.length)h+='<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:20px">No OBDs</td></tr>';
+    h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-list-ul"></i> Uploaded OBDs ('+obds.length+') <span style="font-size:10px;color:var(--text-muted);font-weight:normal">— click an OBD row to view material-wise stock</span></div><div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Customer</th><th>Materials</th><th>Total Qty</th><th>Warehouse Stock</th><th>Status</th><th>Actions</th></tr></thead><tbody>';
+    if(!obds.length)h+='<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:20px">No OBDs</td></tr>';
     else obds.forEach(function(o){
         var totalQty=sumBy(o.materials||[],function(m){return m.qty;});
         var sb=(o.status==='Pending')?stockBadge(obdStockInfo(o,ctx)):'<span style="color:var(--text-muted)">—</span>';
-        h+='<tr style="cursor:pointer" onclick="showOBDStockDetail(\''+o.id+'\')"><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(o.obdNo)+(o.priority==='Urgent'?' <span class="badge badge-danger">URGENT</span>':'')+'</td><td>'+esc(o.customer||'-')+'</td><td><span class="badge badge-info">'+(o.materials||[]).length+'</span></td><td><strong>'+totalQty+'</strong></td><td>'+sb+'</td><td><span class="badge '+(o.status==='Picking Done'?'badge-success':(o.status==='Assigned'?'badge-warning':'badge-accent'))+'">'+esc(o.status||'Pending')+'</span></td></tr>';
+        h+='<tr style="cursor:pointer" onclick="showOBDStockDetail(\''+o.id+'\')"><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(o.obdNo)+(o.priority==='Urgent'?' <span class="badge badge-danger">URGENT</span>':'')+'</td><td>'+esc(o.customer||'-')+'</td><td><span class="badge badge-info">'+(o.materials||[]).length+'</span></td><td><strong>'+totalQty+'</strong></td><td>'+sb+'</td><td><span class="badge '+(o.status==='Picking Done'?'badge-success':(o.status==='Assigned'?'badge-warning':'badge-accent'))+'">'+esc(o.status||'Pending')+'</span></td><td><div class="table-actions"><button class="btn btn-danger btn-sm" title="Delete" onclick="event.stopPropagation();deleteOBD(\''+o.id+'\')"><i class="bx bx-trash"></i></button></div></td></tr>';
     });
     h+='</tbody></table></div></div>';
     setHtml(h);
-}
-function showOBDStockDetail(obdId){
-    var obd=DB.find('obd_data',obdId);if(!obd)return;
-    var info=obdStockInfo(obd);
-    var h='<div style="margin-bottom:12px;display:flex;gap:10px;flex-wrap:wrap;align-items:center"><strong style="color:var(--accent);font-family:var(--font-display)">'+esc(obd.obdNo)+'</strong><span>'+esc(obd.customer||'')+'</span>'+stockBadge(info)+'<span class="badge badge-accent">'+esc(obd.status||'Pending')+'</span></div>';
-    h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>EAN</th><th>OBD Qty</th><th>Total Stock</th><th>Locked (other OBD)</th><th>Free</th><th>Status</th></tr></thead><tbody>';
-    info.rows.forEach(function(r){
-        h+='<tr class="'+(r.status==='OK'?'scan-row-green':'scan-row-red')+'"><td>'+esc(r.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(r.ean)+'</td><td><strong>'+r.required+'</strong></td><td>'+r.stock+'</td><td>'+r.lockedOthers+'</td><td><strong>'+r.free+'</strong></td><td>'+(r.status==='OK'?'<span class="badge badge-success">OK</span>':(r.status==='Partial'?'<span class="badge badge-warning">Short '+(r.required-r.free)+'</span>':'<span class="badge badge-danger">No Stock</span>'))+'</td></tr>';
-        if(r.locs.length){
-            h+='<tr><td colspan="7" style="font-size:11px;color:var(--text-muted);padding:4px 12px 10px">';
-            r.locs.forEach(function(a){
-                var lb=a.lockedBy.map(function(x){return x.obdNo+':'+x.qty;}).join(', ');
-                h+='<span class="lr-chip'+(a.available>0?'':' off')+'"><i class="bx bx-map-pin"></i> '+esc(a.rack)+' · stock '+a.stock+(a.locked?' · locked '+a.locked+' ('+esc(lb)+')':'')+' · <b>free '+a.available+'</b></span> ';
-            });
-            h+='</td></tr>';
-        }
-    });
-    h+='</tbody></table></div>';
-    showModal('OBD Stock — '+esc(obd.obdNo),h,'xl','<button class="btn btn-glass" onclick="closeModal()">Close</button>');
 }
 function processOBDUpload(){
     var fi=document.getElementById('obdFile');if(!fi||!fi.files[0]){showToast('Select file','error');return;}
@@ -3609,7 +3854,7 @@ function renderPickingAssign(){
     var assigned=DB.filter('picking_assignments',function(a){return a.status==='Assigned'&&a.type!=='pickandload';});
     assigned.sort(function(a,b){return ((b.priority==='Urgent')-(a.priority==='Urgent'))||((a.seq||999)-(b.seq||999))||String(a.assignedAt).localeCompare(String(b.assignedAt));});
     var users=DB.get('users')||[];
-    var h='<div class="section-header"><h2><i class="bx bx-user-plus"></i> Picking Assign</h2>';
+    var h='<div class="section-header"><h2><i class="bx bx-user-plus"></i> Assign Warehouse Tasks</h2>';
     if(assigned.length)h+='<button class="btn btn-glass" onclick="topUpAll()"><i class="bx bx-refresh"></i> Re-check Locks (all)</button>';
     h+='</div>';
     h+='<div class="card"><div class="card-title"><i class="bx bx-list-ul"></i> Unassigned OBDs ('+obds.length+')</div>';
@@ -3621,7 +3866,7 @@ function renderPickingAssign(){
         else users.forEach(function(u){h+='<option value="'+esc(u.id)+'">'+esc(u.name||u.username)+(u.role?' ('+esc(u.role)+')':'')+'</option>';});
         h+='</select></div>';
         h+='<div id="manualUserWrap" style="display:none;margin-bottom:12px"><div class="form-group"><label>Enter User Name</label><input type="text" id="pickAssignUserManual" class="form-input" style="max-width:300px" placeholder="Type user name..."></div></div>';
-        h+='<div class="pq-toolbar"><label><input type="checkbox" onchange="pqToggleAll(this.checked)"> Select all</label><span class="pq-hint">▲▼ se sequence badlo — upar wali OBD ko pehle best/nearby locations milenge. ★ = Urgent (sabse pehle).</span></div>';
+        h+='<div class="pq-toolbar"><label><input type="checkbox" onchange="pqToggleAll(this.checked)"> Select all</label><span class="pq-hint">▲▼ to change sequence — the OBD on top gets the best / nearest locations first. ★ = Urgent (top priority).</span></div>';
         h+='<div id="pqList" class="pq-list">';
         var ctx=makeAvailCtx();
         obds.forEach(function(o,i){
@@ -3630,7 +3875,7 @@ function renderPickingAssign(){
             h+='<input type="checkbox" class="obd-chk" value="'+o.id+'" data-no="'+esc(o.obdNo)+'">';
             h+='<span class="pq-seq">'+(i+1)+'</span>';
             h+='<div class="pq-main"><strong>'+esc(o.obdNo)+'</strong><small>'+(o.materials||[]).length+' mats · '+tq+' qty'+(o.customer?' · '+esc(o.customer):'')+'</small></div>';
-            h+=stockBadge(obdStockInfo(o,ctx));
+            h+=stockBadge(obdStockInfo(o,ctx))+inboundBadge(o);
             h+='<button type="button" class="pq-btn pq-star" title="Urgent" onclick="pqToggleUrgent(this)">★</button>';
             h+='<button type="button" class="pq-btn" onclick="pqMove(this,-1)">▲</button><button type="button" class="pq-btn" onclick="pqMove(this,1)">▼</button>';
             h+='<button type="button" class="pq-btn" title="Stock detail" onclick="showOBDStockDetail(\''+o.id+'\')"><i class="bx bx-show"></i></button>';
@@ -3718,7 +3963,7 @@ function topUpAssign(assignId){
     var a=DB.find('picking_assignments',assignId);if(!a)return;
     var r=lockLocationsForOBD(a.obdId,a.obdNo);
     var short=sumBy(r.details,function(d){return d.short;});
-    showToast(short?'Abhi bhi '+short+' qty short':'Fully locked ho gaya!',short?'warning':'success');
+    showToast(short?'Still remaining: '+short+' qty short':'Fully locked!',short?'warning':'success');
     renderPickingAssign();
 }
 function topUpAll(){
@@ -3731,7 +3976,7 @@ function topUpAll(){
         var after=sumBy(DB.filter('location_locks',function(l){return l.obdId===a.obdId&&isActiveLock(l);}),function(l){return l.lockedQty;});
         fixed+=after-before;
     });
-    showToast(fixed+' qty naya lock hua','success');renderPickingAssign();
+    showToast(fixed+' qty newly locked','success');renderPickingAssign();
 }
 function makeUrgentAssign(assignId){
     var a=DB.find('picking_assignments',assignId);if(!a)return;
@@ -3760,7 +4005,7 @@ function renderStartPicking(){
     if(!APP.currentUser)return;
     var my=DB.filter('picking_assignments',function(a){return a.assignedTo===APP.currentUser.id&&a.status==='Assigned'&&a.type!=='pickandload';});
     my.sort(function(a,b){return ((b.priority==='Urgent')-(a.priority==='Urgent'))||((a.seq||999)-(b.seq||999));});
-    var h='<div class="section-header"><h2><i class="bx bx-box"></i> My Picking</h2></div>';
+    var h='<div class="section-header"><h2><i class="bx bx-box"></i> My Picking Tasks</h2></div>';
     if(!my.length){
         h+='<div class="card"><div class="empty-state"><i class="bx bx-inbox"></i><p>No OBDs assigned to you</p></div></div>';
         setHtml(h);return;
@@ -3791,6 +4036,8 @@ function renderStartPicking(){
 function openPickingOBD(obdId){
     var obd=DB.find('obd_data',obdId);if(!obd)return;
     mergeDuplicateLocks(obdId);
+    var _tr=validateOBDLocks(obdId);if(_tr>0){showToast(_tr+' qty of stock was not available at the location — a new location was assigned','warning');}
+    mergeDuplicateLocks(obdId);
     var mats=groupMats(obd);
     window._pickData={obdId:obdId,obdNo:obd.obdNo,materials:mats};
     var locks=DB.filter('location_locks',function(l){return l.obdId===obdId&&isActiveLock(l);});
@@ -3799,9 +4046,9 @@ function openPickingOBD(obdId){
     var h='<div class="pk-head"><div><strong style="color:var(--accent);font-family:var(--font-display)">'+esc(obd.obdNo)+'</strong>'+(obd.priority==='Urgent'?' <span class="badge badge-danger">URGENT</span>':'')+'<div style="font-size:11px;color:var(--text-muted)">'+esc(obd.customer||'')+'</div></div>';
     h+='<div class="pk-prog"><div class="pk-bar big"><div style="width:'+pct+'%"></div></div><span>'+picked+' / '+need+' picked ('+pct+'%)</span></div></div>';
 
-    var openLocks=routeSort(locks.filter(function(l){return l.status==='Locked';}),function(l){return l.rack;});
-    h+='<div class="card-title" style="margin-top:12px"><i class="bx bx-walk"></i> Pick Route (is order me chalo)</div>';
-    if(!openLocks.length)h+='<div style="color:var(--text-muted);padding:10px;font-size:12px">Koi locked location nahi hai.</div>';
+    var _lk=locks.filter(function(l){return l.status==='Locked';});var openLocks=_lk.filter(function(l){return l.source==='GR';}).concat(routeSort(_lk.filter(function(l){return l.source!=='GR';}),function(l){return l.rack;}));
+    h+='<div class="card-title" style="margin-top:12px"><i class="bx bx-walk"></i> Pick Route (walk in this order)</div>';
+    if(!openLocks.length)h+='<div style="color:var(--text-muted);padding:10px;font-size:12px">There are no locked locations.</div>';
     openLocks.forEach(function(l,i){
         var rem=l.lockedQty-l.pickedQty,done=rem<=0;
         var m=mats.filter(function(x){return x.ean===l.ean;})[0]||{qty:0};
@@ -3810,11 +4057,11 @@ function openPickingOBD(obdId){
         h+='<div class="pk-line'+(done?' done':'')+'"><div class="pk-seq">'+(i+1)+'</div>';
         h+='<div class="pk-rack"><i class="bx bx-map-pin"></i> '+esc(l.rack)+'</div>';
         h+='<div class="pk-mat"><b>'+esc(l.material)+'</b><small>'+esc(l.ean)+(l.viaRequest?' · admin assigned':'')+'</small></div>';
-        if(done)h+='<div class="pk-act"><span class="badge badge-success"><i class="bx bx-check-circle"></i> Picked '+l.pickedQty+'</span></div>';
+        if(done)h+='<div class="pk-act"><span class="badge badge-success"><i class="bx bx-check-circle"></i> Picked '+l.pickedQty+'</span>'+(l.source==='GR'?' <span class="badge badge-info">Unloading</span> <button class="btn btn-danger btn-sm" onclick="removeGRPick(\''+l.id+'\')"><i class="bx bx-undo"></i></button>':'')+'</div>';
         else if(max<=0)h+='<div class="pk-act"><span class="badge badge-info">Material complete</span></div>';
         else{
             h+='<div class="pk-qty">Pick <b>'+max+'</b>'+(l.pickedQty?'<small>('+l.pickedQty+' done)</small>':'')+'</div>';
-            h+='<div class="pk-act"><input type="number" id="pq_'+l.id+'" value="'+max+'" min="1" max="'+max+'"><button class="btn btn-glass btn-sm" onclick="doPickFromLock(\''+l.id+'\')"><i class="bx bx-check"></i> Pick</button><button class="btn btn-warning btn-sm" title="Material nahi mila" onclick="openNotFound(\''+l.id+'\')"><i class="bx bx-error"></i> Not Found</button></div>';
+            h+='<div class="pk-act"><input type="number" id="pq_'+l.id+'" value="'+max+'" min="1" max="'+max+'"><button class="btn btn-glass btn-sm" onclick="doPickFromLock(\''+l.id+'\')"><i class="bx bx-check"></i> Pick</button><button class="btn btn-warning btn-sm" title="Material not found" onclick="openNotFound(\''+l.id+'\')"><i class="bx bx-error"></i> Not Found</button></div>';
         }
         h+='</div>';
     });
@@ -3831,8 +4078,9 @@ function openPickingOBD(obdId){
         var tl=sumBy(ml,function(l){return l.lockedQty;}),tp=sumBy(ml,function(l){return l.pickedQty;});
         var pend=DB.filter('location_requests',function(r){return r.obdId===obdId&&r.ean===m.ean&&r.status==='Pending';}).length;
         var st=tp>=m.qty?'<span class="badge badge-success">Done</span>':(tp>0?'<span class="badge badge-warning">Partial</span>':(tl===0?'<span class="badge badge-danger">No stock locked</span>':'<span class="badge badge-accent">Ready</span>'));
-        var act='';
+        var act='';var _ib=inboundForEan(m.ean);
         if(tl<m.qty&&tp<m.qty)act=pend?'<span class="badge badge-info">Request pending</span>':'<button class="btn btn-warning btn-sm" onclick="requestLocationForMaterial('+idx+')"><i class="bx bx-send"></i> Request Location</button>';
+        if(_ib.length&&tp<m.qty)act+=' <button class="btn btn-info btn-sm" onclick="openGRPick('+idx+')"><i class="bx bx-transfer"></i> Unloading Material ('+_ib.length+')</button>';
         h+='<tr><td>'+esc(m.material)+'<br><small style="color:var(--text-muted)">'+esc(m.ean)+'</small></td><td>'+m.qty+'</td><td>'+tl+'</td><td>'+tp+'</td><td>'+st+'</td><td>'+act+'</td></tr>';
     });
     h+='</tbody></table></div>';
@@ -3855,25 +4103,6 @@ function doPickFromLock(lockId){
 }
 
 // ---------- Not found at location -> request to admin (with auto report) ----------
-function buildLocReport(rack,ean,obdNo){
-    var R=String(rack||'').toUpperCase();
-    var recs=DB.filter('location_master',function(l){return l.ean===ean&&String(l.rack||'').toUpperCase()===R;}).map(function(l){
-        return{action:l.action||'-',user:l.user||'-',dateTime:l.dateTime||l.date||'',qty:l.quantity,grnNo:l.grnNo||'',invoiceNo:l.invoiceNo||''};
-    });
-    var picks=[];
-    DB.get('picking_done').forEach(function(p){(p.details||[]).forEach(function(d){(d.locations||[]).forEach(function(lc){
-        if(String(lc.rack).toUpperCase()===R&&lc.ean===ean)picks.push({obdNo:p.obdNo,by:p.pickedByName,at:p.pickedAt,qty:lc.qty,status:p.status});
-    });});});
-    var others=DB.filter('location_locks',function(k){return isActiveLock(k)&&k.ean===ean&&String(k.rack||'').toUpperCase()===R&&k.obdNo!==obdNo;}).map(function(k){return{obdNo:k.obdNo,qty:k.lockedQty};});
-    return{rack:rack,ean:ean,systemQty:sumBy(recs,function(r){return r.qty;}),records:recs,recentPicks:picks.slice(-10),otherLocks:others,generatedAt:nowISO()};
-}
-function buildEanReport(ean,obdNo){
-    var recs=DB.filter('location_master',function(l){return l.ean===ean&&l.quantity>0;}).map(function(l){
-        return{rack:l.rack,action:l.action||'-',user:l.user||'-',dateTime:l.dateTime||l.date||'',qty:l.quantity,grnNo:l.grnNo||'',invoiceNo:l.invoiceNo||''};
-    });
-    var others=DB.filter('location_locks',function(k){return isActiveLock(k)&&k.ean===ean&&k.obdNo!==obdNo;}).map(function(k){return{obdNo:k.obdNo,rack:k.rack,qty:k.lockedQty};});
-    return{rack:'—',ean:ean,systemQty:sumBy(recs,function(r){return r.qty;}),records:recs,recentPicks:[],otherLocks:others,generatedAt:nowISO(),eanWide:true};
-}
 function locReportHTML(rep){
     if(!rep)return '<div style="color:var(--text-muted)">No report</div>';
     var h='<div style="font-size:12px;margin-bottom:6px">System stock'+(rep.eanWide?' (all racks)':' at <b>'+esc(rep.rack)+'</b>')+': <b>'+rep.systemQty+'</b></div>';
@@ -3895,16 +4124,16 @@ function locReportHTML(rep){
 }
 function nextReqNo(){return 'LR-'+new Date().getFullYear()+'-'+String(DB.count('location_requests')+1).padStart(4,'0');}
 function notifyLocRequest(req){
-    addNotif('Location Request '+req.reqNo+': '+req.material+' ('+req.obdNo+') '+(req.rack&&req.rack!=='—'?'rack '+req.rack+' par nahi mila. ':'stock locked nahi hua. ')+'Missing '+req.missingQty+'. By '+req.requestedByName+'. Reason: '+req.reason,'warning',null,req.id,'locreq');
+    addNotif('Location Request '+req.reqNo+': '+req.material+' ('+req.obdNo+') '+(req.rack&&req.rack!=='—'?'rack '+req.rack+' was not found at this location. ':'Stock could not be locked. ')+'Missing '+req.missingQty+'. By '+req.requestedByName+'. Reason: '+req.reason,'warning',null,req.id,'locreq');
 }
 function openNotFound(lockId){
     var l=DB.find('location_locks',lockId);if(!l)return;
     var rem=l.lockedQty-l.pickedQty;
-    var h='<div class="pk-info"><b>'+esc(l.material)+'</b> · EAN '+esc(l.ean)+'<br>Rack: <b>'+esc(l.rack)+'</b> · System ke hisaab se pick karna tha: <b>'+rem+'</b></div>';
-    h+='<div class="form-group"><label>Physically kitna mila? (0 agar bilkul nahi mila)</label><input type="number" id="nfFound" class="form-input" value="0" min="0" max="'+rem+'"></div>';
-    h+='<div class="form-group"><label>Reason <span class="req">*</span></label><select id="nfReason" class="form-input"><option>Material location par nahi mila</option><option>Qty system se kam hai</option><option>Material damaged hai</option><option>Dusri jagah rakha mila</option><option>Other</option></select></div>';
+    var h='<div class="pk-info"><b>'+esc(l.material)+'</b> · EAN '+esc(l.ean)+'<br>Rack: <b>'+esc(l.rack)+'</b> · System required quantity: <b>'+rem+'</b></div>';
+    h+='<div class="form-group"><label>Physically found quantity? (0 if nothing was found)</label><input type="number" id="nfFound" class="form-input" value="0" min="0" max="'+rem+'"></div>';
+    h+='<div class="form-group"><label>Reason <span class="req">*</span></label><select id="nfReason" class="form-input"><option>Material not found at the location</option><option>Quantity less than in system</option><option>Material is damaged</option><option>Found stored at another location</option><option>Other</option></select></div>';
     h+='<div class="form-group"><label>Note</label><textarea id="nfNote" class="form-input" placeholder="Kuch aur detail..."></textarea></div>';
-    h+='<div class="form-group"><label>Admin ko kya bhejna hai?</label><label class="pk-radio"><input type="radio" name="nfAct" value="newloc" checked> New location maango + report bhejo</label><label class="pk-radio"><input type="radio" name="nfAct" value="report"> Sirf report bhejo (stock system me hai par mujhe nahi mila)</label></div>';
+    h+='<div class="form-group"><label>What should be sent to the Admin?</label><label class="pk-radio"><input type="radio" name="nfAct" value="newloc" checked> Request new location + send report</label><label class="pk-radio"><input type="radio" name="nfAct" value="report"> Send report only (stock exists in system but was not found)</label></div>';
     showModal('Material Not Found',h,'sm','<button class="btn btn-glass" onclick="openPickingOBD(\''+l.obdId+'\')"><i class="bx bx-arrow-back"></i> Back</button><button class="btn btn-warning" onclick="submitNotFound(\''+lockId+'\')"><i class="bx bx-send"></i> Send to Admin</button>');
 }
 function submitNotFound(lockId){
@@ -3914,11 +4143,11 @@ function submitNotFound(lockId){
     var found=parseInt(document.getElementById('nfFound').value)||0;
     if(found<0||found>rem){showToast('Found qty 0 se '+rem+' ke beech ho','error');return;}
     var reason=document.getElementById('nfReason').value,note=document.getElementById('nfNote').value.trim();
-    if(reason==='Other'&&!note){showToast('Other ke liye note likhein','error');return;}
+    if(reason==='Other'&&!note){showToast('Please enter a note describing the issue','error');return;}
     var actEl=document.querySelector('input[name="nfAct"]:checked'),act=actEl?actEl.value:'newloc';
     var mat=pd.materials.filter(function(m){return m.ean===l.ean;})[0];
     var tp=sumBy(DB.filter('location_locks',function(x){return x.obdId===pd.obdId&&x.ean===l.ean&&isActiveLock(x);}),function(x){return x.pickedQty;});
-    if(mat&&tp+found>mat.qty){showToast('Required qty se zyada nahi','error');return;}
+    if(mat&&tp+found>mat.qty){showToast('Cannot exceed the required quantity','error');return;}
     var missing=rem-found;
     if(missing<=0){
         if(found>0)DB.update('location_locks',lockId,{pickedQty:l.pickedQty+found,pickedBy:APP.currentUser.name,pickedAt:nowISO()});
@@ -3938,7 +4167,7 @@ function submitNotFound(lockId){
 function requestLocationForMaterial(matIdx){
     var pd=window._pickData;if(!pd)return;
     var m=pd.materials[matIdx];
-    var h='<div class="pk-info"><b>'+esc(m.material)+'</b> · EAN '+esc(m.ean)+'<br>OBD qty: <b>'+m.qty+'</b></div><div class="form-group"><label>Reason / Note</label><textarea id="rlReason" class="form-input" placeholder="Stock kyu nahi mil raha?"></textarea></div>';
+    var h='<div class="pk-info"><b>'+esc(m.material)+'</b> · EAN '+esc(m.ean)+'<br>OBD qty: <b>'+m.qty+'</b></div><div class="form-group"><label>Reason / Note</label><textarea id="rlReason" class="form-input" placeholder="Why could the stock not be found?"></textarea></div>';
     showModal('Request Location',h,'sm','<button class="btn btn-glass" onclick="openPickingOBD(\''+pd.obdId+'\')"><i class="bx bx-arrow-back"></i> Back</button><button class="btn btn-warning" onclick="submitLocationRequest('+matIdx+')"><i class="bx bx-send"></i> Send to Admin</button>');
 }
 function submitLocationRequest(matIdx){
@@ -3946,10 +4175,10 @@ function submitLocationRequest(matIdx){
     var m=pd.materials[matIdx];
     var locks=DB.filter('location_locks',function(l){return l.obdId===pd.obdId&&l.ean===m.ean&&isActiveLock(l);});
     var missing=m.qty-sumBy(locks,function(l){return l.lockedQty;});
-    if(missing<=0){showToast('Poora lock hai','info');openPickingOBD(pd.obdId);return;}
-    if(DB.filter('location_requests',function(r){return r.obdId===pd.obdId&&r.ean===m.ean&&r.status==='Pending'&&r.source==='NO_STOCK';}).length){showToast('Request pehle se bheji hui hai','warning');openPickingOBD(pd.obdId);return;}
+    if(missing<=0){showToast('Fully locked','info');openPickingOBD(pd.obdId);return;}
+    if(DB.filter('location_requests',function(r){return r.obdId===pd.obdId&&r.ean===m.ean&&r.status==='Pending'&&r.source==='NO_STOCK';}).length){showToast('A request has already been sent','warning');openPickingOBD(pd.obdId);return;}
     var note=document.getElementById('rlReason').value.trim();
-    var req=DB.add('location_requests',{reqNo:nextReqNo(),type:'NEW_LOCATION',source:'NO_STOCK',obdId:pd.obdId,obdNo:pd.obdNo,material:m.material,ean:m.ean,rack:'—',holdLockId:'',missingQty:missing,foundQty:0,reason:'Stock locked nahi hua',note:note,requestedBy:APP.currentUser.id,requestedByName:APP.currentUser.name,requestedAt:nowISO(),status:'Pending',report:buildEanReport(m.ean,pd.obdNo),assigned:[]});
+    var req=DB.add('location_requests',{reqNo:nextReqNo(),type:'NEW_LOCATION',source:'NO_STOCK',obdId:pd.obdId,obdNo:pd.obdNo,material:m.material,ean:m.ean,rack:'—',holdLockId:'',missingQty:missing,foundQty:0,reason:'Stock could not be locked',note:note,requestedBy:APP.currentUser.id,requestedByName:APP.currentUser.name,requestedAt:nowISO(),status:'Pending',report:buildEanReport(m.ean,pd.obdNo),assigned:[]});
     notifyLocRequest(req);
     logAction('Picking','LOC_REQUEST',req.reqNo+' '+m.material+' no stock (OBD '+pd.obdNo+')');
     showToast('Request admin ko bhej di','success');openPickingOBD(pd.obdId);
@@ -3957,15 +4186,15 @@ function submitLocationRequest(matIdx){
 
 // ---------- Admin: Location Requests ----------
 function renderLocRequests(){
-    if(!isMgrUser()){setHtml('<div class="card"><div class="empty-state"><i class="bx bx-lock"></i><p>Sirf Admin / Manager</p></div></div>');return;}
+    if(!isMgrUser()){setHtml('<div class="card"><div class="empty-state"><i class="bx bx-lock"></i><p>Admin / Manager access only</p></div></div>');return;}
     var all=DB.get('location_requests').slice().reverse();
     var pend=all.filter(function(r){return r.status==='Pending';}),hist=all.filter(function(r){return r.status!=='Pending';}).slice(0,50);
     function tbl(list,isPend){
         var t='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Req</th><th>OBD</th><th>Material</th><th>Rack</th><th>Missing</th><th>By</th><th>Reason</th><th>'+(isPend?'Action':'Status')+'</th></tr></thead><tbody>';
         if(!list.length)t+='<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:16px">Nothing</td></tr>';
         list.forEach(function(r){
-            t+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(r.reqNo)+'</td><td>'+esc(r.obdNo)+'</td><td>'+esc(r.material)+'</td><td>'+esc(r.rack)+'</td><td><b>'+r.missingQty+'</b></td><td>'+esc(r.requestedByName)+'<br><small style="color:var(--text-muted)">'+fmtDT(r.requestedAt)+'</small></td><td style="font-size:11px">'+esc(r.reason)+(r.note?'<br><small>'+esc(r.note)+'</small>':'')+'</td><td>';
-            t+=isPend?'<button class="btn btn-glass btn-sm" onclick="openLocRequest(\''+r.id+'\')"><i class="bx bx-show"></i> Review / Assign</button>':'<span class="badge '+(r.status==='Resolved'?'badge-success':'badge-info')+'">'+esc(r.status)+'</span> <button class="btn btn-glass btn-sm" onclick="openLocRequest(\''+r.id+'\')"><i class="bx bx-show"></i></button>';
+            t+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(r.reqNo||'-')+'</td><td>'+esc(r.obdNo||'-')+'</td><td>'+esc(r.material||'-')+'</td><td>'+esc(r.rack||'-')+'</td><td><b>'+(r.missingQty||0)+'</b></td><td>'+esc(r.requestedByName||'-')+'<br><small style="color:var(--text-muted)">'+fmtDT(r.requestedAt)+'</small></td><td style="font-size:11px">'+esc(r.reason||'-')+(r.note?'<br><small>'+esc(r.note)+'</small>':'')+'</td><td>';
+            t+=isPend?'<div class="table-actions"><button class="btn btn-glass btn-sm" onclick="openLocRequest(\''+r.id+'\')"><i class="bx bx-show"></i> Review / Assign</button><button class="btn btn-danger btn-sm" title="Delete" onclick="deleteLocRequest(\''+r.id+'\')"><i class="bx bx-trash"></i></button></div>':'<div class="table-actions"><span class="badge '+(r.status==='Resolved'?'badge-success':'badge-info')+'">'+esc(r.status)+'</span> <button class="btn btn-glass btn-sm" title="View" onclick="openLocRequest(\''+r.id+'\')"><i class="bx bx-show"></i></button><button class="btn btn-danger btn-sm" title="Delete" onclick="deleteLocRequest(\''+r.id+'\')"><i class="bx bx-trash"></i></button></div>';
             t+='</td></tr>';
         });
         return t+'</tbody></table></div>';
@@ -3975,13 +4204,13 @@ function renderLocRequests(){
     h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-history"></i> History</div>'+tbl(hist,false)+'</div>';
     setHtml(h);
 }
-function locNotifOpen(id){document.getElementById('notifPanel').classList.remove('open');if(!isMgrUser()){showToast('Sirf Admin/Manager','error');return;}openLocRequest(id);}
+function locNotifOpen(id){document.getElementById('notifPanel').classList.remove('open');if(!isMgrUser()){showToast('Admin / Manager access only','error');return;}openLocRequest(id);}
 function pickerNotifOpen(obdId){document.getElementById('notifPanel').classList.remove('open');navTo('picking','start-picking');setTimeout(function(){openPickingOBD(obdId);},300);}
 function openLocRequest(reqId){
     var r=DB.find('location_requests',reqId);if(!r)return;
     var isP=r.status==='Pending'&&isMgrUser();
-    var h='<div class="pk-info"><b>'+esc(r.reqNo)+'</b> · OBD <b>'+esc(r.obdNo)+'</b> · '+esc(r.material)+' ('+esc(r.ean)+')<br>Rack: <b>'+esc(r.rack)+'</b> · Missing qty: <b>'+r.missingQty+'</b>'+(r.foundQty?' · Found: '+r.foundQty:'')+'<br>By: '+esc(r.requestedByName)+' · '+fmtDT(r.requestedAt)+'<br>Reason: <span style="color:var(--warning)">'+esc(r.reason)+'</span>'+(r.note?' — '+esc(r.note):'')+'<br>Type: '+(r.type==='NEW_LOCATION'?'New location maanga hai':'Sirf report')+' · Status: <b>'+esc(r.status)+'</b></div>';
-    h+='<div class="card-title" style="margin-top:12px"><i class="bx bx-file"></i> Report — kisne kab stock add kiya</div>'+locReportHTML(r.report);
+    var h='<div class="pk-info"><b>'+esc(r.reqNo)+'</b> · OBD <b>'+esc(r.obdNo)+'</b> · '+esc(r.material)+' ('+esc(r.ean)+')<br>Rack: <b>'+esc(r.rack)+'</b> · Missing qty: <b>'+(r.missingQty||0)+'</b>'+(r.foundQty?' · Found: '+r.foundQty:'')+'<br>By: '+esc(r.requestedByName)+' · '+fmtDT(r.requestedAt)+'<br>Reason: <span style="color:var(--warning)">'+esc(r.reason)+'</span>'+(r.note?' — '+esc(r.note):'')+'<br>Type: '+(r.type==='NEW_LOCATION'?'New location requested':'Report only')+' · Status: <b>'+esc(r.status)+'</b></div>';
+    h+='<div class="card-title" style="margin-top:12px"><i class="bx bx-file"></i> Report — stock additions (who / when)</div>'+locReportHTML(r.report);
     if(r.assigned&&r.assigned.length)h+='<div style="margin-top:10px;font-size:12px"><b>Assigned:</b> '+r.assigned.map(function(a){return esc(a.rack)+' ('+a.qty+')';}).join(', ')+'</div>';
     if(isP){
         var obd=DB.find('obd_data',r.obdId);
@@ -3989,11 +4218,11 @@ function openLocRequest(reqId){
         var free=av.filter(function(a){return a.available>0;});
         free.sort(function(a,b){return rackDist(r.rack,a.rack)-rackDist(r.rack,b.rack);});
         window._lrFree=free;
-        h+='<div class="card-title" style="margin-top:14px"><i class="bx bx-map"></i> Assign New Location (nearest pehle)</div>';
+        h+='<div class="card-title" style="margin-top:14px"><i class="bx bx-map"></i> Assign New Location (nearest first)</div>';
         if(!free.length){
-            h+='<div class="pk-info" style="border-color:var(--danger)">Free stock available nahi hai.';
+            h+='<div class="pk-info" style="border-color:var(--danger)">No free stock is available.';
             var lockedAll=av.filter(function(a){return a.locked>0;});
-            if(lockedAll.length)h+='<br>Stock hai par dusri OBD ko locked: '+lockedAll.map(function(a){return esc(a.rack)+' → '+a.lockedBy.map(function(x){return esc(x.obdNo)+':'+x.qty;}).join(', ');}).join(' | ');
+            if(lockedAll.length)h+='<br>Stock exists but is locked for another OBD: '+lockedAll.map(function(a){return esc(a.rack)+' → '+a.lockedBy.map(function(x){return esc(x.obdNo)+':'+x.qty;}).join(', ');}).join(' | ');
             h+='</div>';
         }else{
             h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Rack</th><th>Stock</th><th>Available</th><th>Distance</th><th>Assign Qty</th></tr></thead><tbody>';
@@ -4001,10 +4230,10 @@ function openLocRequest(reqId){
                 var d=rackDist(r.rack,a.rack);
                 h+='<tr><td><b>'+esc(a.rack)+'</b></td><td>'+a.stock+(a.locked?' <small>(locked '+a.locked+')</small>':'')+'</td><td><b>'+a.available+'</b></td><td>'+(d<=10?'<span class="badge badge-success">Near</span>':(d<=1000?'<span class="badge badge-warning">Same aisle area</span>':'<span class="badge badge-danger">Far</span>'))+'</td><td><input type="number" class="form-input lrq-qty" id="lrq_'+i+'" min="0" max="'+a.available+'" value="0" style="width:90px"></td></tr>';
             });
-            h+='</tbody></table></div><button class="btn btn-info btn-sm" style="margin-top:6px" onclick="lrAutoFill('+r.missingQty+')"><i class="bx bx-magic-wand"></i> Auto-fill (nearest)</button>';
+            h+='</tbody></table></div><button class="btn btn-info btn-sm" style="margin-top:6px" onclick="lrAutoFill('+(r.missingQty||0)+')"><i class="bx bx-magic-wand"></i> Auto-fill (nearest)</button>';
         }
-        if(r.rack&&r.rack!=='—')h+='<div class="form-group" style="margin-top:12px"><label class="pk-radio"><input type="checkbox" id="lrAdjust"> Purane location ('+esc(r.rack)+') ka stock adjust karo (system se kam karo)</label></div>';
-        h+='<div class="form-group"><label>Admin Note</label><textarea id="lrNote" class="form-input" placeholder="Picker ko message / decision..."></textarea></div>';
+        if(r.rack&&r.rack!=='—')h+='<div class="form-group" style="margin-top:12px"><label class="pk-radio"><input type="checkbox" id="lrAdjust"> Purane location ('+esc(r.rack)+') — adjust its stock (reduce in system)</label></div>';
+        h+='<div class="form-group"><label>Admin Note</label><textarea id="lrNote" class="form-input" placeholder="Message / decision for the picker..."></textarea></div>';
     }
     var f='<button class="btn btn-glass" onclick="closeModal()">Close</button><button class="btn btn-info" onclick="downloadLocReportPDF(\''+r.id+'\')"><i class="bx bx-file"></i> Report PDF</button>';
     if(isP)f+='<button class="btn btn-danger" onclick="markLocShort(\''+r.id+'\')"><i class="bx bx-x"></i> Mark Short</button><button class="btn btn-glass" onclick="assignLocRequest(\''+r.id+'\')"><i class="bx bx-check-double"></i> Assign / Resolve</button>';
@@ -4032,15 +4261,15 @@ function assignLocRequest(reqId){
     (window._lrFree||[]).forEach(function(a,i){
         var el=document.getElementById('lrq_'+i),q=parseInt(el?el.value:0)||0;if(q<=0)return;
         var f=fresh.filter(function(x){return String(x.rack).toUpperCase()===String(a.rack).toUpperCase();})[0];
-        if(!f||q>f.available){chosen=null;showToast(a.rack+': sirf '+(f?f.available:0)+' available','error');return;}
+        if(!f||q>f.available){chosen=null;showToast(a.rack+': only '+(f?f.available:0)+' available','error');return;}
         if(chosen)chosen.push({loc:f,qty:q});sum+=q;
     });
     if(!chosen)return;
-    if(!chosen.length){showToast('Koi qty daalein ya Mark Short karein','error');return;}
-    if(sum>r.missingQty){showToast('Missing qty '+r.missingQty+' se zyada assign nahi','error');return;}
+    if(!chosen.length){showToast('Enter a quantity or use Mark Short','error');return;}
+    if(sum>r.missingQty){showToast('Missing qty '+(r.missingQty||0)+' — cannot assign more than the missing quantity','error');return;}
     var mat={material:r.material,ean:r.ean};
     chosen.forEach(function(c){addLock(obd,mat,c.loc,c.qty,{viaRequest:r.reqNo});assignedNow.push({rack:c.loc.rack,qty:c.qty});});
-    var left=r.missingQty-sum;
+    var left=(r.missingQty||0)-sum;
     var hold=r.holdLockId?DB.find('location_locks',r.holdLockId):null;
     if(hold&&hold.status==='Hold'){
         if(hold.lockedQty-sum<=0)DB.update('location_locks',hold.id,{status:'Released',releaseReason:'Resolved '+r.reqNo,releasedAt:nowISO()});
@@ -4051,29 +4280,29 @@ function assignLocRequest(reqId){
     if(left<=0)finishLocRequest(r,'Resolved',note,all);
     else DB.update('location_requests',r.id,{missingQty:left,assigned:all,adminNote:note});
     var txt=assignedNow.map(function(a){return a.rack+' ('+a.qty+')';}).join(', ');
-    addNotif('Naya location mila: '+r.material+' ('+r.obdNo+') → '+txt+(left>0?'. Abhi '+left+' qty baaki.':''),'success',r.requestedBy,r.obdId,'locreq-picker');
+    addNotif('New location assigned: '+r.material+' ('+r.obdNo+') → '+txt+(left>0?'. Remaining quantity: '+left+'.':''),'success',r.requestedBy,r.obdId,'locreq-picker');
     logAction('Picking','LOC_ASSIGN',r.reqNo+' → '+txt);
-    showToast('Location assign ho gayi','success');closeModal();
+    showToast('Location assigned successfully','success');closeModal();
     if(APP.currentSub==='loc-requests')renderLocRequests();
 }
 function markLocShort(reqId){
     var r=DB.find('location_requests',reqId);if(!r||r.status!=='Pending')return;
-    if(!confirm('Is material ko SHORT mark karein? Picker short ke saath submit karega.'))return;
+    if(!confirm('Mark this material as SHORT? The picker will submit with a short quantity.'))return;
     var adj=document.getElementById('lrAdjust')&&document.getElementById('lrAdjust').checked,note=(document.getElementById('lrNote')||{}).value||'';
     var hold=r.holdLockId?DB.find('location_locks',r.holdLockId):null;
     if(hold&&hold.status==='Hold')DB.update('location_locks',hold.id,{status:'Released',releaseReason:'Marked short '+r.reqNo,releasedAt:nowISO()});
-    if(adj)adjustLocStock(r.rack,r.ean,r.missingQty,r.reqNo);
+    if(adj)adjustLocStock(r.rack,r.ean,r.missingQty||0,r.reqNo);
     finishLocRequest(r,'Closed-Short',note||'No stock — short',r.assigned||[]);
-    addNotif('Short mark hua: '+r.material+' ('+r.obdNo+'). Picking short ke saath submit karein.','warning',r.requestedBy,r.obdId,'locreq-picker');
+    addNotif('Marked as SHORT: '+r.material+' ('+r.obdNo+'). Please submit picking with the short quantity.','warning',r.requestedBy,r.obdId,'locreq-picker');
     logAction('Picking','LOC_SHORT',r.reqNo+' marked short');
-    showToast('Short mark kar diya','success');closeModal();
+    showToast('Material marked as SHORT','success');closeModal();
     if(APP.currentSub==='loc-requests')renderLocRequests();
 }
 function downloadLocReportPDF(reqId){
     var r=DB.find('location_requests',reqId);if(!r||!r.report)return;
     var rep=r.report,pdf=new jspdf.jsPDF();
     pdf.setFontSize(13);pdf.text('Location Request Report — '+r.reqNo,14,14);
-    pdf.setFontSize(9);pdf.text('OBD '+r.obdNo+' | '+r.material+' | EAN '+r.ean+' | Rack '+r.rack+' | Missing '+r.missingQty,14,21);
+    pdf.setFontSize(9);pdf.text('OBD '+r.obdNo+' | '+r.material+' | EAN '+r.ean+' | Rack '+r.rack+' | Missing '+(r.missingQty||0),14,21);
     pdf.text('Reason: '+r.reason+(r.note?' - '+r.note:'')+' | By '+r.requestedByName+' | '+fmtDT(r.requestedAt),14,27);
     pdf.autoTable({startY:32,head:[[rep.eanWide?'Rack':'Type','Entry','By','Date','Qty','GRN/Invoice']],body:rep.records.map(function(x){return [rep.eanWide?x.rack:'',x.action,x.user,fmtDT(x.dateTime),x.qty,x.grnNo||x.invoiceNo||'-'];}),styles:{fontSize:8}});
     pdf.save('LocReport_'+r.reqNo+'.pdf');
@@ -4087,19 +4316,6 @@ function downloadPickList(){
 }
 
 // ---------- stock deduct / restore ----------
-function deductStock(rack,ean,qty){
-    var R=String(rack||'').toUpperCase(),rem=qty,src=[];
-    DB.filter('location_master',function(l){return l.ean===ean&&String(l.rack||'').toUpperCase()===R&&l.quantity>0;})
-      .sort(function(a,b){return String(a.dateTime||a.date).localeCompare(String(b.dateTime||b.date));})
-      .forEach(function(r){
-        if(rem<=0)return;
-        var d=Math.min(r.quantity,rem),nq=r.quantity-d;
-        src.push({action:r.action||'',user:r.user||'',userId:r.userId||'',dateTime:r.dateTime||'',date:r.date||'',grnNo:r.grnNo||'',invoiceNo:r.invoiceNo||'',packing:r.packing||'',box:r.box||'',description:r.description||'',material:r.material||'',qty:d});
-        if(nq<=0)DB.remove('location_master',r.id);else DB.update('location_master',r.id,{quantity:nq});
-        rem-=d;
-      });
-    return{sources:src,deducted:qty-rem};
-}
 function restoreStock(rack,ean,qty,sources,meta){
     var left=qty;
     (sources||[]).forEach(function(s){
@@ -4117,19 +4333,19 @@ function submitPicking(){
     var locks=DB.filter('location_locks',function(l){return l.obdId===pd.obdId&&isActiveLock(l);});
     var mats=groupMats(obd);
     var totalPicked=sumBy(locks,function(l){return l.pickedQty;});
-    if(totalPicked<=0){showToast('Kuch bhi pick nahi hua','error');return;}
+    if(totalPicked<=0){showToast('Nothing has been picked yet','error');return;}
     var allPicked=mats.every(function(m){return sumBy(locks.filter(function(l){return l.ean===m.ean;}),function(l){return l.pickedQty;})>=m.qty;});
     var holds=locks.filter(function(l){return l.status==='Hold';}).length;
-    if(!allPicked&&!confirm((holds?holds+' location request admin ke paas pending hai. ':'')+'Kuch material poora pick nahi hua. Short ke saath submit karein?'))return;
+    if(!allPicked&&!confirm((holds?holds+' location request(s) are pending with the admin. ':'')+'Some materials were not fully picked. Submit with short quantity?'))return;
     var details=[];
     mats.forEach(function(m){
         var byRack={},locs=[];
         locks.filter(function(l){return l.ean===m.ean&&l.pickedQty>0;}).forEach(function(l){
             var R=String(l.rack).toUpperCase();
-            if(!byRack[R]){byRack[R]={rack:l.rack,qty:0,ean:m.ean,material:m.material};locs.push(byRack[R]);}
+            if(!byRack[R]){byRack[R]={rack:l.rack,qty:0,ean:m.ean,material:m.material,source:l.source||'',invMatId:l.invMatId||''};locs.push(byRack[R]);}
             byRack[R].qty+=l.pickedQty;
         });
-        locs.forEach(function(lc){var r=deductStock(lc.rack,lc.ean,lc.qty);lc.sources=r.sources;if(r.deducted<lc.qty)lc.stockShort=lc.qty-r.deducted;});
+        locs.forEach(function(lc){if(lc.source==='GR'){var gim=DB.find('invoice_materials',lc.invMatId);if(gim)DB.update('invoice_materials',gim.id,{crossdockedQty:(gim.crossdockedQty||0)+lc.qty});lc.sources=[];return;}var r=deductStock(lc.rack,lc.ean,lc.qty);lc.sources=r.sources;if(r.deducted<lc.qty)lc.stockShort=lc.qty-r.deducted;});
         var picked=sumBy(locs,function(x){return x.qty;}),rs=[];
         DB.filter('location_requests',function(r){return r.obdId===pd.obdId&&r.ean===m.ean;}).forEach(function(r){var t=r.reason+(r.note?' — '+r.note:'');if(rs.indexOf(t)<0)rs.push(t);});
         details.push({material:m.material,ean:m.ean,requiredQty:m.qty,pickedQty:picked,locations:routeSort(locs,function(x){return x.rack;}),short:m.qty-picked,shortReason:rs.join(' | ')});
@@ -4153,13 +4369,13 @@ function submitPicking(){
 // ---------- Confirmed tasks + reverse picking ----------
 function renderPickingDone(){
     var done=DB.get('picking_done').slice().reverse();
-    var h='<div class="section-header"><h2><i class="bx bx-check-circle"></i> Picking Done ('+done.length+')</h2>';
+    var h='<div class="section-header"><h2><i class="bx bx-check-circle"></i> Confirmed Picking Tasks ('+done.length+')</h2>';
     h+='<div style="display:flex;gap:6px"><button class="btn btn-glass" onclick="exportPickingDoneExcel()"><i class="bx bx-download"></i> Excel</button><button class="btn btn-glass" onclick="exportPickingDonePDF()"><i class="bx bx-file"></i> PDF</button></div></div>';
     h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Materials</th><th>Picked By</th><th>Time</th><th>Short</th><th>Status</th><th>Actions</th></tr></thead><tbody>';
     if(!done.length)h+='<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:24px">No picking done yet</td></tr>';
     else done.forEach(function(d){
         var sc=0;(d.details||[]).forEach(function(det){if(det.short>0)sc++;});
-        h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(d.obdNo)+'</td><td><span class="badge badge-info">'+(d.details||[]).length+'</span></td><td>'+esc(d.pickedByName)+'</td><td style="font-size:11px;color:var(--text-muted)">'+fmtDT(d.pickedAt)+'</td><td>'+(sc?'<span class="badge badge-danger">'+sc+' short</span>':'<span class="badge badge-success">Complete</span>')+'</td><td>'+(d.status==='Reversed'?'<span class="badge badge-warning">Reversed</span>':'<span class="badge badge-success">Done</span>')+'</td><td style="display:flex;gap:4px"><button class="btn btn-glass btn-sm" onclick="viewPickingDoneDetail(\''+d.id+'\')"><i class="bx bx-eye"></i></button>'+(d.status==='Done'?'<button class="btn btn-warning btn-sm" onclick="openReverseModal(\''+d.id+'\')"><i class="bx bx-undo"></i> Reverse</button>':'')+'</td></tr>';
+        h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(d.obdNo)+'</td><td><span class="badge badge-info">'+(d.details||[]).length+'</span></td><td>'+esc(d.pickedByName)+'</td><td style="font-size:11px;color:var(--text-muted)">'+fmtDT(d.pickedAt)+'</td><td>'+(sc?'<span class="badge badge-danger">'+sc+' short</span>':'<span class="badge badge-success">Complete</span>')+'</td><td>'+(d.status==='Reversed'?'<span class="badge badge-warning">Reversed</span>':'<span class="badge badge-success">Done</span>')+'</td><td><div class="table-actions"><button class="btn btn-glass btn-sm" title="View" onclick="viewPickingDoneDetail(\''+d.id+'\')"><i class="bx bx-eye"></i></button>'+(d.status==='Done'?'<button class="btn btn-warning btn-sm" title="Reverse" onclick="openReverseModal(\''+d.id+'\')"><i class="bx bx-undo"></i></button>':'')+'<button class="btn btn-danger btn-sm" title="Delete" onclick="deletePickingDone(\''+d.id+'\')"><i class="bx bx-trash"></i></button></div></td></tr>';
     });
     h+='</tbody></table></div>';
     setHtml(h);
@@ -4177,46 +4393,46 @@ function viewPickingDoneDetail(id){
 }
 function reverseBlocker(d){
     var inLoaded=DB.filter('loaded_vehicles',function(l){return (l.obdIds||[]).indexOf(d.id)>-1;}).length;
-    if(inLoaded)return 'Is OBD ki loading shuru/ho chuki hai — reverse nahi ho sakta';
+    if(inLoaded)return 'Loading for this OBD is in progress or already completed — it cannot be reversed';
     var inAssign=DB.filter('loading_assignments',function(a){return a.status==='Assigned'&&(a.obdIds||[]).indexOf(d.id)>-1;}).length;
-    if(inAssign)return 'Loading assign hai — pehle Loading Assign se Unassign karein';
+    if(inAssign)return 'Loading is assigned — please unassign it first in Assign Loading';
     var inAppr=DB.filter('loading_approvals',function(a){return a.status==='Pending'&&(a.obdIds||[]).indexOf(d.id)>-1;}).length;
-    if(inAppr)return 'Loading approval pending hai';
+    if(inAppr)return 'Loading approval is pending';
     return '';
 }
 function openReverseModal(id){
     var d=DB.find('picking_done',id);if(!d||d.status!=='Done')return;
     var blk=reverseBlocker(d);if(blk){showToast(blk,'error');return;}
-    var h='<div class="pk-info">OBD <b>'+esc(d.obdNo)+'</b> · Picked by '+esc(d.pickedByName)+' · '+fmtDT(d.pickedAt)+'<br>Reverse karne par ye stock wapas jayega:</div>';
+    var h='<div class="pk-info">OBD <b>'+esc(d.obdNo)+'</b> · Picked by '+esc(d.pickedByName)+' · '+fmtDT(d.pickedAt)+'<br>On reversing, the following stock will be restored:</div>';
     h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>Rack</th><th>Qty</th></tr></thead><tbody>';
     (d.details||[]).forEach(function(det){(det.locations||[]).forEach(function(l){h+='<tr><td>'+esc(det.material)+'</td><td>'+esc(l.rack)+'</td><td><b>+'+l.qty+'</b></td></tr>';});});
     h+='</tbody></table></div>';
     h+='<div class="form-group" style="margin-top:10px"><label>Reverse Reason <span class="req">*</span></label><textarea id="rvReason" class="form-input"></textarea></div>';
-    if(!isAdminUser())h+='<div class="pk-info" style="border-color:var(--warning)"><b>Admin authorization zaruri hai</b><div class="form-group" style="margin-top:6px"><label>Admin Username</label><input id="rvUser" class="form-input" autocomplete="off"></div><div class="form-group"><label>Admin Password</label><input id="rvPass" type="password" class="form-input" autocomplete="new-password"></div></div>';
+    if(!isAdminUser())h+='<div class="pk-info" style="border-color:var(--warning)"><b>Admin authorization is required</b><div class="form-group" style="margin-top:6px"><label>Admin Username</label><input id="rvUser" class="form-input" autocomplete="off"></div><div class="form-group"><label>Admin Password</label><input id="rvPass" type="password" class="form-input" autocomplete="new-password"></div></div>';
     showModal('Reverse Picking — '+esc(d.obdNo),h,'lg','<button class="btn btn-glass" onclick="closeModal()">Cancel</button><button class="btn btn-warning" onclick="doReversePicking(\''+id+'\')"><i class="bx bx-undo"></i> Reverse & Restore Stock</button>');
 }
 function doReversePicking(id){
     var d=DB.find('picking_done',id);if(!d||d.status!=='Done')return;
     var blk=reverseBlocker(d);if(blk){showToast(blk,'error');return;}
     var reason=(document.getElementById('rvReason')||{}).value||'';
-    if(!reason.trim()){showToast('Reason likhein','error');return;}
+    if(!reason.trim()){showToast('Please enter a reason','error');return;}
     var authBy=null;
     if(isAdminUser())authBy=APP.currentUser;
     else{
         var un=((document.getElementById('rvUser')||{}).value||'').trim().toLowerCase(),pw=(document.getElementById('rvPass')||{}).value||'';
         authBy=DB.get('users').filter(function(u){return (u.role==='Admin'||u.role==='Super Admin')&&String(u.username||'').toLowerCase()===un&&u.password===pw;})[0];
-        if(!authBy){showToast('Admin username/password galat hai','error');return;}
+        if(!authBy){showToast('Incorrect admin username or password','error');return;}
     }
     (d.details||[]).forEach(function(det){
-        (det.locations||[]).forEach(function(l){restoreStock(l.rack,l.ean||det.ean,l.qty,l.sources,{material:det.material,obdNo:d.obdNo});});
+        (det.locations||[]).forEach(function(l){if(l.source==='GR'){var gim=DB.find('invoice_materials',l.invMatId);if(gim)DB.update('invoice_materials',gim.id,{crossdockedQty:Math.max(0,(gim.crossdockedQty||0)-l.qty)});return;}restoreStock(l.rack,l.ean||det.ean,l.qty,l.sources,{material:det.material,obdNo:d.obdNo});});
     });
     DB.update('picking_done',id,{status:'Reversed',reversedBy:authBy.id,reversedByName:authBy.name,reversedAt:nowISO(),reverseReason:reason,reverseRequestedBy:APP.currentUser.name});
     DB.update('obd_data',d.obdId,{status:'Pending',priority:'Normal'});
     DB.filter('picking_reports',function(r){return r.obdNo===d.obdNo;}).forEach(function(r){DB.update('picking_reports',r.id,{reversed:true});});
     DB.filter('short_reports',function(s){return s.lrNo==='OBD'&&s.unloadNo===d.obdNo&&!s.posted;}).forEach(function(s){DB.remove('short_reports',s.id);});
     logAction('Picking','REVERSE','OBD '+d.obdNo+' reversed. Auth: '+authBy.name+'. Reason: '+reason);
-    addNotif('Picking reversed: '+d.obdNo+' (auth '+authBy.name+'). Stock wapas add hua.','warning');
-    showToast('Reversed — stock restore ho gaya','success');
+    addNotif('Picking reversed: '+d.obdNo+' (auth '+authBy.name+'). Stock restored.','warning');
+    showToast('Reversed — stock restored','success');
     closeModal();renderPickingDone();
 }
 
@@ -4234,6 +4450,538 @@ function showLoadAssignDetail(pdId){
     showModal('OBD Detail — '+esc(d.obdNo),h,'lg','<button class="btn btn-glass" onclick="closeModal()">Close</button>');
 }
 
+// =====================================================================
+//  UPDATE 2 : Unloading report, Putaway fix, Warehouse stock merge,
+//  Gate (city + gate pass), Loading Vehicle Register, Cross-Dock
+// =====================================================================
+function rkey(r){return String(r||'').trim().toUpperCase();}
+
+// ---------- Putaway: received qty (incl. excess) minus cross-dock ----------
+function reservedGR(invMatId){
+    return sumBy(DB.filter('location_locks',function(l){return l.source==='GR'&&l.invMatId===invMatId&&isActiveLock(l);}),function(l){return l.lockedQty;});
+}
+function pwTotal(m){return Math.max(0,(m.unloadedQty||0)-(m.crossdockedQty||0)-reservedGR(m.id));}
+function putawayMats(invoiceId){
+    return DB.filter('invoice_materials',function(m){return m.invoiceId===invoiceId;}).map(function(m){
+        var c=JSON.parse(JSON.stringify(m));c.invQty=m.qty;c.qty=pwTotal(m);return c;
+    }).filter(function(m){return m.qty>0;});
+}
+// same date + same rack + same material => merged into one row
+function addPutawayStock(rec){
+    var R=rkey(rec.rack),d=rec.date||today();
+    var entry={action:'PUTAWAY',user:rec.user,userId:APP.currentUser?APP.currentUser.id:'',dateTime:rec.dateTime||nowISO(),qty:rec.quantity,grnNo:rec.grnNo||'',invoiceNo:rec.invoiceNo||'',packing:rec.packing||'',box:rec.box||''};
+    var ex=DB.filter('location_master',function(l){return l.action==='PUTAWAY'&&l.ean===rec.ean&&rkey(l.rack)===R&&l.date===d&&l.quantity>0;})[0];
+    if(!ex)return DB.add('location_master',rec);
+    var entries=(ex.entries&&ex.entries.length)?ex.entries.slice():[{action:ex.action,user:ex.user,userId:ex.userId||'',dateTime:ex.dateTime,qty:ex.quantity,grnNo:ex.grnNo||'',invoiceNo:ex.invoiceNo||'',packing:ex.packing||'',box:ex.box||''}];
+    entries.push(entry);
+    var box=ex.box||'';if(rec.box&&box.indexOf(rec.box)<0)box=box?box+', '+rec.box:rec.box;
+    var pk=ex.packing||'';if(rec.packing&&pk.indexOf(rec.packing)<0)pk=pk?pk+', '+rec.packing:rec.packing;
+    return DB.update('location_master',ex.id,{quantity:ex.quantity+rec.quantity,entries:entries,box:box,packing:pk});
+}
+function recRows(l){
+    if(l.entries&&l.entries.length)return l.entries.map(function(e){return{rack:l.rack,action:e.action||'-',user:e.user||'-',dateTime:e.dateTime||l.date||'',qty:e.qty,grnNo:e.grnNo||'',invoiceNo:e.invoiceNo||''};});
+    return [{rack:l.rack,action:l.action||'-',user:l.user||'-',dateTime:l.dateTime||l.date||'',qty:l.quantity,grnNo:l.grnNo||'',invoiceNo:l.invoiceNo||''}];
+}
+function buildLocReport(rack,ean,obdNo){
+    var R=rkey(rack),recs=[];
+    DB.filter('location_master',function(l){return l.ean===ean&&rkey(l.rack)===R&&l.quantity>0;}).forEach(function(l){recs=recs.concat(recRows(l));});
+    var picks=[];
+    DB.get('picking_done').forEach(function(p){(p.details||[]).forEach(function(d){(d.locations||[]).forEach(function(lc){
+        if(rkey(lc.rack)===R&&lc.ean===ean)picks.push({obdNo:p.obdNo,by:p.pickedByName,at:p.pickedAt,qty:lc.qty,status:p.status});
+    });});});
+    var others=DB.filter('location_locks',function(k){return isActiveLock(k)&&k.ean===ean&&rkey(k.rack)===R&&k.obdNo!==obdNo;}).map(function(k){return{obdNo:k.obdNo,qty:k.lockedQty};});
+    return{rack:rack,ean:ean,systemQty:sumBy(recs,function(r){return r.qty;}),records:recs,recentPicks:picks.slice(-10),otherLocks:others,generatedAt:nowISO()};
+}
+function buildEanReport(ean,obdNo){
+    var recs=[];
+    DB.filter('location_master',function(l){return l.ean===ean&&l.quantity>0;}).forEach(function(l){recs=recs.concat(recRows(l));});
+    var others=DB.filter('location_locks',function(k){return isActiveLock(k)&&k.ean===ean&&k.obdNo!==obdNo;}).map(function(k){return{obdNo:k.obdNo,rack:k.rack,qty:k.lockedQty};});
+    return{rack:'—',ean:ean,systemQty:sumBy(recs,function(r){return r.qty;}),records:recs,recentPicks:[],otherLocks:others,generatedAt:nowISO(),eanWide:true};
+}
+function deductStock(rack,ean,qty){
+    var R=rkey(rack),rem=qty,src=[];
+    DB.filter('location_master',function(l){return l.ean===ean&&rkey(l.rack)===R&&l.quantity>0;})
+      .sort(function(a,b){return String(a.dateTime||a.date).localeCompare(String(b.dateTime||b.date));})
+      .forEach(function(r){
+        if(rem<=0)return;
+        var d=Math.min(r.quantity,rem),nq=r.quantity-d;
+        if(r.entries&&r.entries.length){
+            var need=d,ne=[];
+            r.entries.forEach(function(e){
+                if(need<=0){ne.push(e);return;}
+                var t=Math.min(e.qty,need);
+                src.push({action:e.action||'',user:e.user||'',userId:e.userId||'',dateTime:e.dateTime||'',date:r.date||'',grnNo:e.grnNo||'',invoiceNo:e.invoiceNo||'',packing:e.packing||'',box:e.box||'',description:r.description||'',material:r.material||'',qty:t});
+                need-=t;
+                if(e.qty-t>0){var c=JSON.parse(JSON.stringify(e));c.qty=e.qty-t;ne.push(c);}
+            });
+            if(nq<=0)DB.remove('location_master',r.id);else DB.update('location_master',r.id,{quantity:nq,entries:ne});
+        }else{
+            src.push({action:r.action||'',user:r.user||'',userId:r.userId||'',dateTime:r.dateTime||'',date:r.date||'',grnNo:r.grnNo||'',invoiceNo:r.invoiceNo||'',packing:r.packing||'',box:r.box||'',description:r.description||'',material:r.material||'',qty:d});
+            if(nq<=0)DB.remove('location_master',r.id);else DB.update('location_master',r.id,{quantity:nq});
+        }
+        rem-=d;
+      });
+    return{sources:src,deducted:qty-rem};
+}
+// Bin master: occupancy (rack normalised, qty>0, distinct materials)
+function buildOccMap(){
+    var occ={},seen={};
+    DB.get('location_master').forEach(function(l){
+        if(!(l.quantity>0))return;
+        var k=rkey(l.rack);
+        if(!occ[k]){occ[k]={mats:0,qty:0};seen[k]={};}
+        occ[k].qty+=l.quantity;
+        var id=l.ean||l.material;if(!seen[k][id]){seen[k][id]=1;occ[k].mats++;}
+    });
+    return occ;
+}
+function showBinMaterials(binName){
+    var locs=DB.filter('location_master',function(l){return rkey(l.rack)===rkey(binName)&&l.quantity>0;});
+    var totalQty=sumBy(locs,function(l){return l.quantity;}),distinct={};
+    locs.forEach(function(l){distinct[l.ean||l.material]=1;});
+    var h='<div style="text-align:center;margin-bottom:14px"><div style="font-size:22px;font-weight:800;color:var(--accent);font-family:var(--font-display);letter-spacing:2px">'+esc(binName)+'</div><div style="font-size:11px;color:var(--text-muted)">'+Object.keys(distinct).length+' materials | '+totalQty+' total qty</div></div>';
+    if(!locs.length){
+        h+='<div style="text-align:center;color:var(--text-muted);padding:30px"><i class="bx bx-box" style="font-size:32px;display:block;margin-bottom:10px"></i>This bin is empty</div>';
+    }else{
+        h+='<div class="table-wrapper" style="max-height:400px;overflow-y:auto"><table class="data-table"><thead><tr><th>#</th><th>Date</th><th>Material</th><th>Description</th><th>EAN</th><th>Qty</th><th>Action</th><th>Packing</th><th>Box</th><th>User</th></tr></thead><tbody>';
+        locs.forEach(function(l,i){
+            var actCls=l.action==='PUTAWAY'?'badge-accent':(l.action==='PIV'?'badge-info':(l.action==='EAN-SCAN'?'badge-success':'badge-warning'));
+            var users={};(l.entries||[]).forEach(function(e){users[e.user]=1;});
+            var ustr=Object.keys(users).length?Object.keys(users).join(', '):(l.user||'-');
+            h+='<tr><td>'+(i+1)+'</td><td style="font-size:11px">'+esc(l.date)+'</td><td><strong>'+esc(l.material)+'</strong></td><td style="font-size:10px;color:var(--text-secondary);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(l.description||'-')+'</td><td style="font-family:var(--font-display);font-size:9px">'+esc(l.ean||'-')+'</td><td><strong style="color:var(--accent)">'+l.quantity+'</strong></td><td><span class="badge '+actCls+'">'+esc(l.action)+'</span></td><td>'+esc(l.packing||'-')+'</td><td>'+esc(l.box||'-')+'</td><td style="font-size:11px">'+esc(ustr)+'</td></tr>';
+        });
+        h+='</tbody></table></div>';
+    }
+    h+='<div class="form-actions" style="margin-top:14px"><button class="btn btn-glass" onclick="closeModal()">Close</button></div>';
+    showModal('Bin Details — '+esc(binName),h,'xl','');
+}
+
+// ---------- Unloading Report ----------
+function unloadReportData(unloadNo){
+    var rec=DB.filter('unloading_records',function(r){return r.unloadNo===unloadNo;})[0];if(!rec)return null;
+    var v=DB.find('vehicles',rec.vehicleId)||{};
+    var rows=(rec.materials||[]).map(function(m){
+        return{material:m.material,ean:m.ean,invQty:m.expectedQty,received:m.scannedQty,short:Math.max(0,m.expectedQty-m.scannedQty),excess:Math.max(0,m.scannedQty-m.expectedQty)};
+    });
+    (rec.wrongItems||[]).forEach(function(w){rows.push({material:w.material||w.ean,ean:w.ean,invQty:0,received:w.scannedQty,short:0,excess:w.scannedQty,notInInvoice:true});});
+    var ser=DB.filter('short_excess_reports',function(s){return s.unloadNo===unloadNo;})[0];
+    var mins=null;
+    if(rec.startedAt&&rec.unloadedAt)mins=Math.max(1,Math.round((new Date(rec.unloadedAt)-new Date(rec.startedAt))/60000));
+    return{rec:rec,v:v,rows:rows,ser:ser,mins:mins,
+        tInv:sumBy(rows,function(r){return r.invQty;}),tRec:sumBy(rows,function(r){return r.received;}),
+        tShort:sumBy(rows,function(r){return r.short;}),tEx:sumBy(rows,function(r){return r.excess;})};
+}
+function showUnloadReport(unloadNo){
+    var d=unloadReportData(unloadNo);if(!d)return;
+    var r=d.rec,v=d.v;
+    var h='<div style="text-align:center;margin-bottom:12px"><div style="font-size:20px;font-weight:900;color:var(--accent);font-family:var(--font-display);letter-spacing:2px">'+esc(r.unloadNo)+'</div><div style="font-size:11px;color:var(--text-muted)">Unloading Report</div></div>';
+    h+='<div class="pk-info">Vehicle: <b>'+esc(r.vehicleNo)+'</b> · LR: <b>'+esc(r.lrNo||'-')+'</b>'+(v.city?' · City: <b>'+esc(v.city)+'</b>':'')+' · Transporter: '+esc(v.transportName||'-')+'<br>Invoices: <b>'+esc((r.invoiceNos||[]).join(', ')||'-')+'</b><br>Unloaded by: <b>'+esc(r.unloadedByName||'-')+'</b>'+(r.startedAt?' · Start: '+fmtDT(r.startedAt):'')+' · End: '+fmtDT(r.unloadedAt)+(d.mins?' · Time: <b>'+d.mins+' min</b>':'')+(r.wasPartial?' · Partial sessions: '+r.partialSessions:'')+'</div>';
+    h+='<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px"><span class="badge badge-info">Invoice Qty '+d.tInv+'</span><span class="badge badge-accent">Received '+d.tRec+' (putaway ko jayega)</span><span class="badge '+(d.tShort?'badge-danger':'badge-success')+'">Short '+d.tShort+'</span><span class="badge '+(d.tEx?'badge-warning':'badge-success')+'">Excess '+d.tEx+'</span></div>';
+    h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>EAN</th><th>Invoice Qty</th><th>Received</th><th>Short</th><th>Excess</th></tr></thead><tbody>';
+    d.rows.forEach(function(x){
+        h+='<tr class="'+((x.short||x.excess)?'scan-row-red':'scan-row-green')+'"><td>'+esc(x.material)+(x.notInInvoice?' <span class="badge badge-warning">Not in invoice</span>':'')+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(x.ean||'-')+'</td><td>'+x.invQty+'</td><td><b>'+x.received+'</b></td><td>'+(x.short?'<b style="color:var(--danger)">-'+x.short+'</b>':'0')+'</td><td>'+(x.excess?'<b style="color:var(--warning)">+'+x.excess+'</b>':'0')+'</td></tr>';
+    });
+    h+='</tbody></table></div>';
+    var f='<button class="btn btn-glass" onclick="closeModal()">Close</button><button class="btn btn-info" onclick="downloadUnloadReportPDF(\''+esc(r.unloadNo)+'\')"><i class="bx bx-file"></i> PDF</button>';
+    if(d.ser)f+='<button class="btn btn-warning" onclick="showSEReport(\''+d.ser.id+'\')"><i class="bx bx-error"></i> Short/Excess Report</button>';
+    showModal('Unloading Report — '+esc(r.vehicleNo),h,'lg',f);
+}
+function downloadUnloadReportPDF(unloadNo){
+    var d=unloadReportData(unloadNo);if(!d)return;
+    var r=d.rec,pdf=new jspdf.jsPDF();
+    pdf.setFontSize(14);pdf.text('Unloading Report — '+r.unloadNo,14,14);
+    pdf.setFontSize(9);
+    pdf.text('Vehicle '+r.vehicleNo+' | LR '+(r.lrNo||'-')+' | Invoices '+((r.invoiceNos||[]).join(', ')||'-'),14,21);
+    pdf.text('By '+(r.unloadedByName||'-')+' | '+(r.startedAt?'Start '+fmtDT(r.startedAt)+' | ':'')+'End '+fmtDT(r.unloadedAt)+(d.mins?' | '+d.mins+' min':''),14,27);
+    pdf.text('Invoice '+d.tInv+' | Received '+d.tRec+' | Short '+d.tShort+' | Excess '+d.tEx,14,33);
+    pdf.autoTable({startY:38,head:[['Material','EAN','Invoice Qty','Received','Short','Excess']],body:d.rows.map(function(x){return [x.material+(x.notInInvoice?' (not in invoice)':''),x.ean||'-',x.invQty,x.received,x.short,x.excess];}),styles:{fontSize:8}});
+    pdf.save('Unloading_Report_'+r.unloadNo+'.pdf');
+}
+
+// ---------- Inbound Control Tower: View invoices + per-vehicle Excel ----------
+function viewVehicleInvoices(vehId){
+    var v=DB.find('vehicles',vehId);if(!v)return;
+    var invs=DB.filter('invoices',function(i){return i.vehicleId===vehId;});
+    var h='<div class="pk-info">Vehicle <b>'+esc(v.vehicleNo)+'</b> · LR '+esc(v.lrNo||'-')+' · '+esc(v.transportName||'-')+(v.city?' · '+esc(v.city):'')+' · Status: <b>'+esc(v.status)+'</b></div>';
+    if(!invs.length)h+='<div style="color:var(--text-muted);padding:16px;text-align:center">No invoices have been uploaded for this vehicle</div>';
+    invs.forEach(function(inv){
+        var mats=DB.filter('invoice_materials',function(m){return m.invoiceId===inv.id;});
+        h+='<div class="card" style="margin-bottom:10px"><div class="card-title"><i class="bx bx-file"></i> '+esc(inv.invoiceNo)+' <span style="font-size:11px;color:var(--text-muted);font-weight:normal">'+esc(inv.customer||'')+' · '+esc(inv.status||'')+'</span></div>';
+        h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>Description</th><th>EAN</th><th>Invoice Qty</th><th>Received</th><th>Putaway</th></tr></thead><tbody>';
+        mats.forEach(function(m){h+='<tr><td>'+esc(m.material)+(m.extra?' <span class="badge badge-warning">Extra</span>':'')+'</td><td style="font-size:11px">'+esc(m.description||'-')+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(m.ean)+'</td><td><b>'+m.qty+'</b></td><td>'+(m.unloadedQty||0)+'</td><td>'+(m.putawayedQty||0)+'</td></tr>';});
+        h+='</tbody></table></div></div>';
+    });
+    showModal('Invoices — '+esc(v.vehicleNo),h,'xl','<button class="btn btn-glass" onclick="closeModal()">Close</button>');
+}
+function showVehicleExcelUpload(vehId){
+    var v=DB.find('vehicles',vehId);if(!v)return;
+    var h='<div class="pk-info">Vehicle <b>'+esc(v.vehicleNo)+'</b> ke liye Excel upload. Vehicle/LR apne aap lag jayega.<br><b>Format:</b> Invoice No | Material | Description | EAN | Qty | Customer</div>';
+    h+='<input type="file" id="vehExcelFile" accept=".xlsx,.xls,.csv" class="form-input">';
+    showModal('Excel Upload — '+esc(v.vehicleNo),h,'sm','<button class="btn btn-glass" onclick="closeModal()">Cancel</button><button class="btn btn-glass" onclick="processVehicleExcel(\''+vehId+'\')"><i class="bx bx-upload"></i> Upload</button>');
+}
+function processVehicleExcel(vehId){
+    var fi=document.getElementById('vehExcelFile');if(!fi||!fi.files[0]){showToast('Please select a file','error');return;}
+    var reader=new FileReader();
+    reader.onload=function(e){
+        try{
+            var wb=XLSX.read(e.target.result,{type:'array'});var data=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1});
+            var start=(String(data[0]&&data[0][0]||'').toLowerCase().indexOf('inv')>-1)?1:0;
+            var map={},order=[];
+            for(var i=start;i<data.length;i++){
+                var r=data[i];if(!r||!r[0])continue;
+                var inv=String(r[0]).trim().toUpperCase(),mat=String(r[1]||'').trim(),desc=String(r[2]||'').trim(),ean=String(r[3]||'').trim().toUpperCase(),qty=parseInt(r[4])||0,cust=String(r[5]||'').trim();
+                if(!inv||!mat||!ean||qty<=0)continue;
+                if(!map[inv]){map[inv]={customer:cust,mats:[]};order.push(inv);}
+                map[inv].mats.push({material:mat,description:desc,ean:ean,qty:qty});
+            }
+            var added=0,skipped=0,mc=0;
+            order.forEach(function(no){
+                if(DB.filter('invoices',function(x){return x.vehicleId===vehId&&x.invoiceNo===no;}).length){skipped++;return;}
+                var inv=DB.add('invoices',{vehicleId:vehId,invoiceNo:no,customer:map[no].customer,status:'Pending'});
+                map[no].mats.forEach(function(m){DB.add('invoice_materials',{invoiceId:inv.id,material:m.material,description:m.description,ean:m.ean,qty:m.qty,unloadedQty:0});mc++;});
+                added++;
+            });
+            if(!added&&!skipped){showToast('No valid rows were found','error');return;}
+            logAction('Inbound','INVOICE_UPLOAD',added+' invoices ('+mc+' materials) uploaded for vehicle');
+            showToast(added+' invoice upload'+(skipped?', '+skipped+' already exist':''),'success');
+            closeModal();renderInbound('pending-vehicle');
+        }catch(err){showToast('Excel error: '+err.message,'error');}
+    };
+    reader.readAsArrayBuffer(fi.files[0]);
+}
+
+// ---------- Security Gate (City + Gate Pass) ----------
+function genGatePassNo(){
+    var d=new Date(),ds=d.getFullYear()+String(d.getMonth()+1).padStart(2,'0')+String(d.getDate()).padStart(2,'0');
+    var c=DB.filter('vehicles',function(v){return (v.gatePassNo||'').indexOf('GP-'+ds)===0;}).length;
+    return 'GP-'+ds+'-'+String(c+1).padStart(3,'0');
+}
+function renderSecurityGate(){
+    var cities={};DB.get('vehicles').forEach(function(v){if(v.city)cities[v.city]=1;});
+    var h='<div class="section-header"><h2><i class="bx bx-shield-quarter"></i> Gate Check-In</h2></div>';
+    h+='<div class="card"><div class="card-title"><i class="bx bxs-truck"></i> Vehicle Reporting</div>';
+    h+='<div class="form-group" style="margin-bottom:16px"><label>Vehicle Type <span class="req">*</span></label>';
+    h+='<div style="display:flex;gap:10px;margin-top:6px">';
+    h+='<label style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:10px 18px;border:2px solid var(--accent);border-radius:var(--radius-sm);background:var(--accent-dim);flex:1;justify-content:center;font-weight:600;color:var(--accent)"><input type="radio" name="vehType" value="Unloading" checked style="accent-color:var(--accent);width:16px;height:16px"> UNLOADING</label>';
+    h+='<label style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:10px 18px;border:2px solid var(--border);border-radius:var(--radius-sm);flex:1;justify-content:center;font-weight:600;color:var(--text-secondary)"><input type="radio" name="vehType" value="Loading" style="accent-color:var(--accent2);width:16px;height:16px"> LOADING</label>';
+    h+='</div></div>';
+    h+='<div class="form-row">';
+    h+='<div class="form-group"><label>Vehicle Number <span class="req">*</span></label><input type="text" id="secVNo" class="form-input" placeholder="MH-12-AB-1234" style="text-transform:uppercase"></div>';
+    h+='<div class="form-group" id="lrGrp"><label>LR Number <span class="req">*</span></label><input type="text" id="secLR" class="form-input" placeholder="LR-2025-001" style="text-transform:uppercase"></div>';
+    h+='<div class="form-group" id="cityGrp" style="display:none"><label>City <span class="req">*</span></label><input type="text" id="secCity" class="form-input" list="secCityList" placeholder="Destination city"><datalist id="secCityList">'+Object.keys(cities).map(function(c){return '<option value="'+esc(c)+'">';}).join('')+'</datalist></div>';
+    h+='<div class="form-group"><label>Driver Name <span class="req">*</span></label><input type="text" id="secDriver" class="form-input" placeholder="Driver full name"></div>';
+    h+='<div class="form-group"><label>Driver Mobile <span class="req">*</span></label><input type="tel" id="secMobile" class="form-input" placeholder="10 digit" maxlength="10"></div>';
+    h+='<div class="form-group"><label>Transporter Name <span class="req">*</span></label><input type="text" id="secTransport" class="form-input" placeholder="Transport company"></div>';
+    h+='<div class="form-group"><label>Reporting Time</label><div class="form-input" style="background:var(--bg-secondary);color:var(--accent);font-weight:600">'+fmtDT(new Date())+' <small>(Auto)</small></div></div>';
+    h+='<div class="form-group"><label>Entry By</label><div class="form-input" style="background:var(--bg-secondary);color:var(--accent2);font-weight:600"><i class="bx bx-user-check"></i> '+(APP.currentUser?esc(APP.currentUser.name)+' ('+esc(APP.currentUser.role)+')':'Unknown')+'</div></div>';
+    h+='</div>';
+    h+='<div class="form-actions">';
+    if(chkAct('canSecurityEntry'))h+='<button class="btn btn-glass" onclick="submitSecGate()"><i class="bx bx-check-circle"></i> Submit Vehicle</button>';
+    else h+='<button class="btn btn-glass" disabled><i class="bx bx-block"></i> Access Denied</button>';
+    h+='</div></div>';
+    setHtml(h);
+}
+document.addEventListener('change',function(e){
+    if(e.target.name==='vehType'){var cg=document.getElementById('cityGrp');if(cg)cg.style.display=e.target.value==='Loading'?'':'none';}
+});
+function submitSecGate(){
+    var vt=document.querySelector('input[name="vehType"]:checked');
+    var vno=document.getElementById('secVNo').value.trim().toUpperCase();
+    var lr=document.getElementById('secLR').value.trim().toUpperCase();
+    var city=(document.getElementById('secCity')||{value:''}).value.trim();
+    var dr=document.getElementById('secDriver').value.trim();
+    var mb=document.getElementById('secMobile').value.trim();
+    var tp=document.getElementById('secTransport').value.trim();
+    var type=vt?vt.value:'Unloading';
+    if(!vno||!dr||!mb||!tp){showToast('All fields are required','error');return;}
+    if(!/^\d{10}$/.test(mb)){showToast('Invalid 10-digit mobile','error');return;}
+    if(type==='Unloading'&&!lr){showToast('LR Number required for unloading','error');return;}
+    if(type==='Loading'&&!city){showToast('City required for loading vehicle','error');return;}
+    if(type==='Unloading'){
+        if(DB.filter('vehicles',function(v){return v.lrNo&&v.lrNo.toUpperCase()===lr;}).length){showToast('LR Number already exists!','error');return;}
+    }else{
+        var act=DB.filter('vehicles',function(v){return v.vehicleType==='Loading'&&v.vehicleNo===vno&&v.status!=='Gate Out'&&loadingVehicleState(v).state!=='Loaded';});
+        if(act.length){showToast('This vehicle is already IN at the gate ('+act[0].gatePassNo+')','error');return;}
+    }
+    var gp=genGatePassNo();
+    DB.add('vehicles',{vehicleNo:vno,lrNo:lr||'',city:city,gatePassNo:gp,driverName:dr,driverMobile:mb,transportName:tp,vehicleType:type,status:type==='Unloading'?'Unload Pending':'Loading Pending',reportedAt:nowISO(),entryBy:APP.currentUser?APP.currentUser.id:'',entryByName:APP.currentUser?APP.currentUser.name:''});
+    addNotif('New '+type+' Vehicle '+vno+(city?' ('+city+')':'')+' reported at gate by '+(APP.currentUser?APP.currentUser.name:'Unknown'),'warning');
+    logAction('Security Gate','ENTRY',type+' Vehicle '+vno+' '+gp+(city?' City:'+city:'')+' LR:'+(lr||'N/A'));
+    showToast('Vehicle submitted! Gate Pass '+gp,'success');
+    ['secVNo','secLR','secCity','secDriver','secMobile','secTransport'].forEach(function(id){var e=document.getElementById(id);if(e)e.value='';});
+}
+
+// ---------- Loading Vehicle Register ----------
+function loadingVehicleLoads(v){
+    var vn=rkey(v.vehicleNo),t0=String(v.reportedAt||'');
+    return{
+        loads:DB.filter('loaded_vehicles',function(l){return rkey(l.vehicleNo)===vn&&String(l.loadedAt||l.lastScannedAt||'')>=t0;}),
+        pending:DB.filter('loading_approvals',function(a){return rkey(a.vehicleNo)===vn&&String(a.createdAt||'')>=t0&&a.status==='Pending';})
+    };
+}
+function loadingVehicleState(v){
+    var x=loadingVehicleLoads(v),base=String(v.reopenedAt||v.reportedAt||'');
+    var loads=x.loads.filter(function(l){return String(l.loadedAt||l.lastScannedAt||'')>=base;});
+    var pend=x.pending.filter(function(a){return String(a.createdAt||'')>=base;});
+    var full=loads.filter(function(l){return l.loadStatus==='Fully Loaded';}).length;
+    var part=loads.filter(function(l){return l.loadStatus==='Partial';}).length;
+    var s='Waiting';
+    if(part||pend.length)s='Under Loading';
+    else if(full)s='Loaded';
+    return{state:s,loads:x.loads,pending:x.pending};
+}
+function loadingGateVehicles(){
+    return DB.filter('vehicles',function(v){return v.vehicleType==='Loading'&&v.status!=='Gate Out';}).filter(function(v){var s=loadingVehicleState(v).state;return s==='Waiting'||s==='Under Loading';});
+}
+function isLoadingGateVehicle(vno){return loadingGateVehicles().some(function(v){return rkey(v.vehicleNo)===rkey(vno);});}
+function loadingVehSelect(id,secId){
+    var vs=loadingGateVehicles();
+    if(!vs.length)return '<div class="pk-info" style="border-color:var(--danger)">No loading vehicle is currently IN at the gate. Please create a loading vehicle entry at the Security Gate first.</div><input type="hidden" id="'+id+'" value="">';
+    var h='<select id="'+id+'" class="form-input" onchange="var o=this.options[this.selectedIndex],s=document.getElementById(\''+secId+'\');if(s&&o.getAttribute(\'data-gp\'))s.value=o.getAttribute(\'data-gp\');"><option value="">-- Select Vehicle (Gate IN) --</option>';
+    vs.forEach(function(v){h+='<option value="'+esc(v.vehicleNo)+'" data-gp="'+esc(v.gatePassNo||v.lrNo||'')+'">'+esc(v.vehicleNo)+(v.city?' — '+esc(v.city):'')+' ['+loadingVehicleState(v).state+']</option>';});
+    return h+'</select>';
+}
+function renderLoadingRegister(){
+    var from=(window._lrgFrom!==undefined)?window._lrgFrom:today(),to=(window._lrgTo!==undefined)?window._lrgTo:today();
+    var sf=window._lrgStatus||'',q=(window._lrgQ||'').toLowerCase();
+    var all=DB.filter('vehicles',function(v){return v.vehicleType==='Loading';}).reverse(),rows=[];
+    all.forEach(function(v){
+        var st=loadingVehicleState(v),d=String(v.reportedAt||'').substring(0,10);
+        var lastLoad=st.loads.length?st.loads[st.loads.length-1]:null;
+        var ld=lastLoad?String(lastLoad.loadedAt||'').substring(0,10):'';
+        var inRange=(!from||d>=from||ld>=from)&&(!to||d<=to||ld<=to);
+        var open=(st.state!=='Loaded'&&v.status!=='Gate Out');
+        if(!inRange&&!open)return;
+        var s=v.status==='Gate Out'?'Gate Out':st.state;
+        if(sf&&s!==sf)return;
+        var obds=[],loadNos=[],by={},qty=0;
+        st.loads.forEach(function(l){(l.obdNos||[]).forEach(function(n){if(obds.indexOf(n)<0)obds.push(n);});if(l.loadNo)loadNos.push(l.loadNo);if(l.loadedByName)by[l.loadedByName]=1;qty+=sumBy(l.scannedItems||[],function(i){return i.qty;});});
+        var row={v:v,state:s,obds:obds,loadNos:loadNos,by:Object.keys(by).join(', '),qty:qty,loadedAt:lastLoad?lastLoad.loadedAt:''};
+        var hay=(v.vehicleNo+' '+(v.city||'')+' '+(v.transportName||'')+' '+(v.gatePassNo||'')+' '+obds.join(' ')).toLowerCase();
+        if(q&&hay.indexOf(q)<0)return;
+        rows.push(row);
+    });
+    window._lrgRows=rows;
+    var cnt={Waiting:0,'Under Loading':0,Loaded:0};rows.forEach(function(r){if(cnt[r.state]!==undefined)cnt[r.state]++;});
+    var h='<div class="section-header"><h2><i class="bx bx-clipboard"></i> Loading Vehicle Register</h2><div style="display:flex;gap:6px"><button class="btn btn-glass" onclick="exportLoadingRegister()"><i class="bx bx-download"></i> Excel</button><button class="btn btn-glass" onclick="exportLoadingRegisterPDF()"><i class="bx bx-file"></i> PDF</button></div></div>';
+    h+='<div class="card"><div style="display:flex;gap:10px;flex-wrap:wrap;align-items:end">';
+    h+='<div class="form-group" style="margin:0"><label>From</label><input type="date" id="lrgFrom" class="form-input" value="'+from+'"></div>';
+    h+='<div class="form-group" style="margin:0"><label>To</label><input type="date" id="lrgTo" class="form-input" value="'+to+'"></div>';
+    h+='<div class="form-group" style="margin:0"><label>Status</label><select id="lrgStatus" class="form-input"><option value="">All</option>'+['Waiting','Under Loading','Loaded','Gate Out'].map(function(s){return '<option'+(sf===s?' selected':'')+'>'+s+'</option>';}).join('')+'</select></div>';
+    h+='<div class="form-group" style="margin:0;flex:1;min-width:160px"><label>Search</label><input type="text" id="lrgQ" class="form-input" value="'+esc(window._lrgQ||'')+'" placeholder="Vehicle, city, OBD..."></div>';
+    h+='<button class="btn btn-glass" onclick="applyLrgFilter()"><i class="bx bx-filter"></i> Apply</button></div></div>';
+    h+='<div style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0"><span class="badge badge-info">Waiting '+cnt.Waiting+'</span><span class="badge badge-warning">Under Loading '+cnt['Under Loading']+'</span><span class="badge badge-success">Loaded '+cnt.Loaded+'</span><span class="badge badge-accent">Total Qty Loaded '+sumBy(rows,function(r){return r.qty;})+'</span></div>';
+    h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Gate Pass</th><th>Vehicle</th><th>City</th><th>Transporter / Driver</th><th>Gate IN</th><th>Status</th><th>Load No</th><th>OBDs</th><th>Qty</th><th>Loaded By</th><th>Loaded At</th><th></th></tr></thead><tbody>';
+    if(!rows.length)h+='<tr><td colspan="12" style="text-align:center;color:var(--text-muted);padding:20px">No records</td></tr>';
+    rows.forEach(function(r){
+        var v=r.v,cls=r.state==='Loaded'?'badge-success':(r.state==='Under Loading'?'badge-warning':(r.state==='Gate Out'?'badge-danger':'badge-info'));
+        h+='<tr><td style="font-family:var(--font-display);font-size:10px">'+esc(v.gatePassNo||'-')+'</td><td><b>'+esc(v.vehicleNo)+'</b></td><td>'+esc(v.city||'-')+'</td><td style="font-size:11px">'+esc(v.transportName||'-')+'<br><small style="color:var(--text-muted)">'+esc(v.driverName||'')+' '+esc(v.driverMobile||'')+'</small></td><td style="font-size:11px">'+fmtDT(v.reportedAt)+'</td><td><span class="badge '+cls+'">'+r.state+'</span></td><td style="font-size:10px">'+esc(r.loadNos.join(', ')||'-')+'</td><td style="font-size:11px">'+esc(r.obds.join(', ')||'-')+'</td><td>'+(r.qty||'-')+'</td><td style="font-size:11px">'+esc(r.by||'-')+'</td><td style="font-size:11px">'+(r.loadedAt?fmtDT(r.loadedAt):'-')+'</td><td style="display:flex;gap:4px">';
+        if(r.state==='Waiting')h+='<button class="btn btn-danger btn-sm" onclick="gateOutVehicle(\''+v.id+'\')">Gate Out</button>';
+        if(r.state==='Loaded')h+='<button class="btn btn-glass btn-sm" onclick="reopenGateVehicle(\''+v.id+'\')">Load more</button>';
+        h+='</td></tr>';
+    });
+    h+='</tbody></table></div>';
+    setHtml(h);
+}
+function applyLrgFilter(){
+    window._lrgFrom=document.getElementById('lrgFrom').value;window._lrgTo=document.getElementById('lrgTo').value;
+    window._lrgStatus=document.getElementById('lrgStatus').value;window._lrgQ=document.getElementById('lrgQ').value.trim();
+    renderLoadingRegister();
+}
+function gateOutVehicle(id){if(!confirm('Gate Out this vehicle? It will no longer be selectable for loading.'))return;DB.update('vehicles',id,{status:'Gate Out',gateOutAt:nowISO()});logAction('Security Gate','GATE_OUT','Loading vehicle gate out');renderLoadingRegister();}
+function reopenGateVehicle(id){DB.update('vehicles',id,{reopenedAt:nowISO()});showToast('Vehicle is available again for loading','success');renderLoadingRegister();}
+function lrgTable(){return (window._lrgRows||[]).map(function(r){return [r.v.gatePassNo||'',r.v.vehicleNo,r.v.city||'',r.v.transportName||'',fmtDT(r.v.reportedAt),r.state,r.loadNos.join(', '),r.obds.join(', '),r.qty,r.by,r.loadedAt?fmtDT(r.loadedAt):''];});}
+function exportLoadingRegister(){
+    var rows=[['Gate Pass','Vehicle','City','Transporter','Gate IN','Status','Load No','OBDs','Qty','Loaded By','Loaded At']].concat(lrgTable());
+    var ws=XLSX.utils.aoa_to_sheet(rows),wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Loading Register');XLSX.writeFile(wb,'Loading_Register_'+today()+'.xlsx');
+}
+function exportLoadingRegisterPDF(){
+    var pdf=new jspdf.jsPDF({orientation:'landscape'});pdf.setFontSize(13);pdf.text('Loading Vehicle Register — VIP INDUSTRIES MD20',14,14);pdf.setFontSize(8);pdf.text('Generated: '+fmtDT(new Date()),14,20);
+    pdf.autoTable({startY:25,head:[['Gate Pass','Vehicle','City','Transporter','Gate IN','Status','Load No','OBDs','Qty','By','Loaded At']],body:lrgTable(),styles:{fontSize:7}});
+    pdf.save('Loading_Register_'+today()+'.pdf');
+}
+
+// ---------- Inbound info for a material (OBD assign / pick screen) ----------
+function inboundForEan(ean){
+    var out=[];if(!ean)return out;
+    var E=String(ean).toUpperCase();
+    DB.get('invoice_materials').forEach(function(m){
+        if(String(m.ean||'').toUpperCase()!==E)return;
+        var inv=DB.find('invoices',m.invoiceId);if(!inv)return;
+        var v=DB.find('vehicles',inv.vehicleId);if(!v||v.vehicleType!=='Unloading'||v.status==='Rejected')return;
+        var recv=m.unloadedQty||0,put=m.putawayedQty||0,cd=m.crossdockedQty||0,res=reservedGR(m.id);
+        var gr=Math.max(0,recv-put-cd-res);
+        var part=DB.filter('partial_unloads',function(p){return p.vehicleId===v.id;})[0];
+        var partScanned=part?sumBy((part.scanHistory||[]).filter(function(s){return s.matched&&String(s.ean||'').toUpperCase()===E;}),function(s){return s.qty;}):0;
+        var st,pendingVeh=(v.status==='Unload Pending'||v.status==='Assigned'||v.status==='Partial Unload');
+        if(v.status==='Partial Unload'||part)st='Unloading in progress'+(v.assignedToName?' — '+v.assignedToName:'')+' (scanned '+partScanned+')';
+        else if(v.status==='Unload Pending'||v.status==='Assigned')st=v.assignedToName?('Assigned to '+v.assignedToName+' — unloading not started'):'Gate me aayi — unassigned';
+        else if(v.status==='Posting Pending Approval')st='Unloaded — posting pending (GR area)';
+        else if(v.status==='Posted')st='Posted — GR area';
+        else st=v.status;
+        if(!pendingVeh&&gr<=0)return;
+        out.push({vehId:v.id,vehicleNo:v.vehicleNo,invoiceNo:inv.invoiceNo,invMatId:m.id,status:st,invQty:m.qty,received:recv,partScanned:partScanned,grAvail:gr,pickable:gr>0});
+    });
+    return out;
+}
+function inboundHTML(rows){
+    if(!rows.length)return '';
+    return rows.map(function(r){
+        return '<div class="ib-line"><i class="bx bx-down-arrow-circle"></i> <b>'+esc(r.vehicleNo)+'</b> · '+esc(r.invoiceNo)+' · '+esc(r.status)+' · invoice qty <b>'+r.invQty+'</b>'+(r.received?' · received <b>'+r.received+'</b>':'')+(r.grAvail?' · <span style="color:var(--success)">in GR area: <b>'+r.grAvail+'</b></span>':'')+'</div>';
+    }).join('');
+}
+function showOBDStockDetail(obdId){
+    var obd=DB.find('obd_data',obdId);if(!obd)return;
+    var info=obdStockInfo(obd);
+    var h='<div style="margin-bottom:12px;display:flex;gap:10px;flex-wrap:wrap;align-items:center"><strong style="color:var(--accent);font-family:var(--font-display)">'+esc(obd.obdNo)+'</strong><span>'+esc(obd.customer||'')+'</span>'+stockBadge(info)+'<span class="badge badge-accent">'+esc(obd.status||'Pending')+'</span></div>';
+    h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>EAN</th><th>OBD Qty</th><th>Total Stock</th><th>Locked (other OBD)</th><th>Free</th><th>Status</th></tr></thead><tbody>';
+    info.rows.forEach(function(r){
+        h+='<tr class="'+(r.status==='OK'?'scan-row-green':'scan-row-red')+'"><td>'+esc(r.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(r.ean)+'</td><td><strong>'+r.required+'</strong></td><td>'+r.stock+'</td><td>'+r.lockedOthers+'</td><td><strong>'+r.free+'</strong></td><td>'+(r.status==='OK'?'<span class="badge badge-success">OK</span>':(r.status==='Partial'?'<span class="badge badge-warning">Short '+(r.required-r.free)+'</span>':'<span class="badge badge-danger">No Stock</span>'))+'</td></tr>';
+        if(r.locs.length){
+            h+='<tr><td colspan="7" style="font-size:11px;color:var(--text-muted);padding:4px 12px 6px">';
+            r.locs.forEach(function(a){
+                var lb=a.lockedBy.map(function(x){return x.obdNo+':'+x.qty;}).join(', ');
+                h+='<span class="lr-chip'+(a.available>0?'':' off')+'"><i class="bx bx-map-pin"></i> '+esc(a.rack)+' · stock '+a.stock+(a.locked?' · locked '+a.locked+' ('+esc(lb)+')':'')+' · <b>free '+a.available+'</b></span> ';
+            });
+            h+='</td></tr>';
+        }
+        var ib=inboundForEan(r.ean);
+        if(ib.length)h+='<tr><td colspan="7" style="padding:2px 12px 10px"><div style="font-size:10px;color:var(--info);letter-spacing:1px;margin-bottom:2px">INBOUND / UNLOADING</div>'+inboundHTML(ib)+'</td></tr>';
+    });
+    h+='</tbody></table></div>';
+    showModal('OBD Stock — '+esc(obd.obdNo),h,'xl','<button class="btn btn-glass" onclick="closeModal()">Close</button>');
+}
+
+// ---------- Self-healing locks (re-allocate when stock is not found at the location) ----------
+function validateOBDLocks(obdId){
+    var obd=DB.find('obd_data',obdId);if(!obd)return 0;
+    var trimmed=0,groups={};
+    DB.filter('location_locks',function(l){return l.obdId===obdId&&l.status==='Locked'&&l.source!=='GR';}).forEach(function(l){var k=l.ean+'|'+rkey(l.rack);(groups[k]=groups[k]||[]).push(l);});
+    for(var k in groups){
+        var g=groups[k],ean=g[0].ean,R=rkey(g[0].rack);
+        var stock=sumBy(DB.filter('location_master',function(l){return l.ean===ean&&rkey(l.rack)===R&&l.quantity>0;}),function(l){return l.quantity;});
+        var others=sumBy(DB.filter('location_locks',function(l){return isActiveLock(l)&&l.obdId!==obdId&&l.ean===ean&&rkey(l.rack)===R&&l.source!=='GR';}),function(l){return l.lockedQty;});
+        var mine=sumBy(g,function(l){return l.lockedQty;}),picked=sumBy(g,function(l){return l.pickedQty;});
+        var cap=Math.max(Math.max(0,stock-others),picked);
+        if(mine>cap){
+            var cut=mine-cap;
+            g.slice().reverse().forEach(function(l){
+                if(cut<=0)return;
+                var c=Math.min(l.lockedQty-(l.pickedQty||0),cut);if(c<=0)return;
+                if(l.lockedQty-c<=0)DB.update('location_locks',l.id,{status:'Released',releaseReason:'Stock not at location',releasedAt:nowISO()});
+                else DB.update('location_locks',l.id,{lockedQty:l.lockedQty-c});
+                cut-=c;trimmed+=c;
+            });
+        }
+    }
+    if(trimmed>0)lockLocationsForOBD(obdId,obd.obdNo);
+    return trimmed;
+}
+// remove extra unpicked rack locks once material was picked from GR
+function trimExcessLocks(obdId,ean,matQty){
+    var locks=DB.filter('location_locks',function(l){return l.obdId===obdId&&l.ean===ean&&l.status==='Locked';});
+    var excess=sumBy(locks,function(l){return l.lockedQty;})-matQty;if(excess<=0)return;
+    locks.filter(function(l){return l.source!=='GR';}).reverse().forEach(function(l){
+        if(excess<=0)return;
+        var c=Math.min(l.lockedQty-(l.pickedQty||0),excess);if(c<=0)return;
+        if(l.lockedQty-c<=0)DB.update('location_locks',l.id,{status:'Released',releaseReason:'Covered by unloading material',releasedAt:nowISO()});
+        else DB.update('location_locks',l.id,{lockedQty:l.lockedQty-c});
+        excess-=c;
+    });
+}
+
+// ---------- Cross-dock: pick directly from unloading (GR area) ----------
+function openGRPick(matIdx){
+    var pd=window._pickData;if(!pd)return;
+    var m=pd.materials[matIdx];
+    var locks=DB.filter('location_locks',function(l){return l.obdId===pd.obdId&&l.ean===m.ean&&isActiveLock(l);});
+    var remain=m.qty-sumBy(locks,function(l){return l.pickedQty;});
+    var rows=inboundForEan(m.ean);window._grRows=rows;
+    var h='<div class="pk-info"><b>'+esc(m.material)+'</b> · EAN '+esc(m.ean)+'<br>OBD qty <b>'+m.qty+'</b> · Picked <b>'+(m.qty-remain)+'</b> · Remaining <b>'+remain+'</b><br><small style="color:var(--text-muted)">Unloaded material is picked directly for the OBD (without putaway). It is visible in the Cross-Dock Report.</small></div>';
+    if(!rows.length)h+='<div style="color:var(--text-muted);padding:12px">There is no inbound vehicle for this material.</div>';
+    else{
+        h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Vehicle</th><th>Invoice</th><th>Status</th><th>Invoice Qty</th><th>Received</th><th>GR Area</th><th>Pick Qty</th></tr></thead><tbody>';
+        rows.forEach(function(r,i){
+            h+='<tr><td><b>'+esc(r.vehicleNo)+'</b></td><td>'+esc(r.invoiceNo)+'</td><td style="font-size:11px">'+esc(r.status)+'</td><td>'+r.invQty+'</td><td>'+r.received+'</td><td><b>'+r.grAvail+'</b></td><td>';
+            if(r.grAvail>0&&remain>0)h+='<input type="number" id="gr_'+i+'" class="form-input" style="width:80px;display:inline-block" min="1" max="'+Math.min(r.grAvail,remain)+'" value="'+Math.min(r.grAvail,remain)+'"> <button class="btn btn-glass btn-sm" onclick="pickFromGR('+matIdx+','+i+')"><i class="bx bx-check"></i> Pick</button>';
+            else h+='<span style="color:var(--text-muted);font-size:11px">'+(r.grAvail>0?'—':'Not yet in the GR area')+'</span>';
+            h+='</td></tr>';
+        });
+        h+='</tbody></table></div>';
+    }
+    showModal('Use Unloading Material',h,'lg','<button class="btn btn-glass" onclick="openPickingOBD(\''+pd.obdId+'\')"><i class="bx bx-arrow-back"></i> Back</button>');
+}
+function pickFromGR(matIdx,i){
+    var pd=window._pickData;if(!pd)return;
+    var m=pd.materials[matIdx],r=(window._grRows||[])[i];if(!r)return;
+    var im=DB.find('invoice_materials',r.invMatId);if(!im){showToast('Record not found','error');return;}
+    var avail=Math.max(0,(im.unloadedQty||0)-(im.putawayedQty||0)-(im.crossdockedQty||0)-reservedGR(im.id));
+    var qty=parseInt((document.getElementById('gr_'+i)||{}).value)||0;
+    var locks=DB.filter('location_locks',function(l){return l.obdId===pd.obdId&&l.ean===m.ean&&isActiveLock(l);});
+    var remain=m.qty-sumBy(locks,function(l){return l.pickedQty;});
+    if(qty<=0){showToast('Please enter a quantity','error');return;}
+    if(qty>avail){showToast('Only '+avail+' available','error');return;}
+    if(qty>remain){showToast('Only '+remain+' remaining','error');return;}
+    var rack='GR:'+r.vehicleNo+'/'+r.invoiceNo;
+    var ex=DB.filter('location_locks',function(l){return l.obdId===pd.obdId&&l.ean===m.ean&&l.rack===rack&&l.status==='Locked';})[0];
+    if(ex)DB.update('location_locks',ex.id,{lockedQty:ex.lockedQty+qty,pickedQty:ex.pickedQty+qty});
+    else DB.add('location_locks',{obdId:pd.obdId,obdNo:pd.obdNo,material:m.material,ean:m.ean,locationId:'GR',rack:rack,lockedQty:qty,pickedQty:qty,status:'Locked',source:'GR',invMatId:im.id,vehicleNo:r.vehicleNo,invoiceNo:r.invoiceNo,vehId:r.vehId,pickedBy:APP.currentUser.name,pickedAt:nowISO(),priority:(DB.find('obd_data',pd.obdId)||{}).priority||'Normal'});
+    trimExcessLocks(pd.obdId,m.ean,m.qty);
+    logAction('Cross-Dock','PICK',qty+' x '+m.material+' from '+r.vehicleNo+' to '+pd.obdNo);
+    showToast(qty+' unloading se pick hua','success');
+    openPickingOBD(pd.obdId);
+}
+function removeGRPick(lockId){
+    var pd=window._pickData;var l=DB.find('location_locks',lockId);if(!l||l.source!=='GR')return;
+    if(!confirm('Ye unloading pick hata dein?'))return;
+    DB.update('location_locks',lockId,{status:'Released',releaseReason:'Removed by picker',releasedAt:nowISO()});
+    if(pd)openPickingOBD(pd.obdId);
+}
+function renderCrossdockReport(){
+    var from=(window._cdFrom!==undefined)?window._cdFrom:'',to=(window._cdTo!==undefined)?window._cdTo:'';
+    var rows=[];
+    DB.get('picking_done').forEach(function(p){
+        (p.details||[]).forEach(function(d){(d.locations||[]).forEach(function(l){
+            if(l.source!=='GR'&&String(l.rack||'').indexOf('GR:')!==0)return;
+            var parts=String(l.rack).substring(3).split('/');
+            var lv=DB.filter('loaded_vehicles',function(x){return (x.obdIds||[]).indexOf(p.id)>-1;})[0];
+            rows.push({date:String(p.pickedAt||'').substring(0,10),at:p.pickedAt,inVeh:parts[0],inv:parts[1]||'',material:d.material,ean:d.ean,qty:l.qty,obdNo:p.obdNo,by:p.pickedByName,status:p.status==='Reversed'?'Reversed':(lv?(lv.loadStatus==='Fully Loaded'?'Loaded':'Loading'):'Picked'),outVeh:lv?lv.vehicleNo:'',loadNo:lv?lv.loadNo:''});
+        });});
+    });
+    DB.filter('location_locks',function(l){return l.source==='GR'&&l.status==='Locked';}).forEach(function(l){
+        rows.push({date:String(l.pickedAt||'').substring(0,10),at:l.pickedAt,inVeh:l.vehicleNo,inv:l.invoiceNo,material:l.material,ean:l.ean,qty:l.pickedQty,obdNo:l.obdNo,by:l.pickedBy,status:'In picking',outVeh:'',loadNo:''});
+    });
+    rows=rows.filter(function(r){return (!from||r.date>=from)&&(!to||r.date<=to);}).sort(function(a,b){return String(b.at).localeCompare(String(a.at));});
+    window._cdRows=rows;
+    var h='<div class="section-header"><h2><i class="bx bx-transfer"></i> Cross-Dock Report <span style="font-size:12px;color:var(--text-muted);font-weight:normal">(Unloading → OBD / Loading)</span></h2><div style="display:flex;gap:6px"><button class="btn btn-glass" onclick="exportCrossdock()"><i class="bx bx-download"></i> Excel</button></div></div>';
+    h+='<div class="sap-report-header" style="margin-bottom:14px">';
+    h+='<div class="srh-company"><h2>VIP INDUSTRIES LIMITED</h2><p>Plant MD20 · Cross-Docking Analysis</p></div>';
+    h+='<div class="srh-divider"></div>';
+    h+='<div class="srh-info"><span><strong>Report:</strong> Unloading → OBD / Loading</span><span><strong>Generated:</strong> '+fmtDT(new Date())+'</span><span><strong>User:</strong> '+esc(APP.currentUser?APP.currentUser.name:'-')+'</span></div>';
+    h+='<div class="srh-title-bar"><h3><i class="bx bx-transfer"></i> Cross-Dock Report</h3><div class="report-export-bar"><span class="rsb-item"><strong>'+rows.length+'</strong> Records</span><span class="rsb-item"><strong>'+sumBy(rows.filter(function(r){return r.status!=='Reversed';}),function(r){return r.qty;})+'</strong> Total Qty</span></div></div>';
+    h+='</div>';
+    h+='<div class="report-filter-box" style="margin-bottom:14px"><div class="report-filter-header" style="margin-bottom:0;padding-bottom:0;border-bottom:none"><div class="rfh-title"><i class="bx bx-filter"></i> Filters</div></div><div class="report-date-row" style="margin-top:14px">';
+    h+='<div class="form-group"><label>From Date</label><input type="date" id="cdFrom" class="form-input" value="'+from+'"></div>';
+    h+='<div class="form-group"><label>To Date</label><input type="date" id="cdTo" class="form-input" value="'+to+'"></div>';
+    h+='<div class="form-group" style="display:flex;align-items:flex-end"><button class="btn btn-primary" onclick="window._cdFrom=document.getElementById(\'cdFrom\').value;window._cdTo=document.getElementById(\'cdTo\').value;renderCrossdockReport()"><i class="bx bx-check"></i> Apply</button></div>';
+    h+='</div></div>';
+    h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Date</th><th>Inbound Vehicle</th><th>Invoice</th><th>Material</th><th>Qty</th><th>OBD</th><th>Picked By</th><th>Status</th><th>Outbound Vehicle</th><th>Load No</th></tr></thead><tbody>';
+    if(!rows.length)h+='<tr><td colspan="10" style="text-align:center;color:var(--text-muted);padding:20px">No cross-dock records</td></tr>';
+    rows.forEach(function(r){h+='<tr><td style="font-size:11px">'+esc(r.date)+'</td><td><b>'+esc(r.inVeh)+'</b></td><td>'+esc(r.inv)+'</td><td>'+esc(r.material)+'</td><td><b>'+r.qty+'</b></td><td style="color:var(--accent)">'+esc(r.obdNo)+'</td><td>'+esc(r.by||'-')+'</td><td><span class="badge '+(r.status==='Loaded'?'badge-success':(r.status==='Reversed'?'badge-warning':'badge-info'))+'">'+r.status+'</span></td><td>'+esc(r.outVeh||'-')+'</td><td style="font-size:10px">'+esc(r.loadNo||'-')+'</td></tr>';});
+    h+='</tbody></table></div>';
+    setHtml(h);
+}
+function exportCrossdock(){
+    var rows=[['Date','Inbound Vehicle','Invoice','Material','EAN','Qty','OBD','Picked By','Status','Outbound Vehicle','Load No']].concat((window._cdRows||[]).map(function(r){return [r.date,r.inVeh,r.inv,r.material,r.ean,r.qty,r.obdNo,r.by,r.status,r.outVeh,r.loadNo];}));
+    var ws=XLSX.utils.aoa_to_sheet(rows),wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'CrossDock');XLSX.writeFile(wb,'CrossDock_Report_'+today()+'.xlsx');
+}
+function inboundBadge(obd){
+    var n=0,gr=0;
+    groupMats(obd).forEach(function(m){var ib=inboundForEan(m.ean);if(ib.length){n++;gr+=sumBy(ib,function(r){return r.grAvail;});}});
+    if(!n)return '';
+    return '<span class="badge badge-info" title="'+n+' materials of this OBD are in inbound / unloading">Inbound '+n+(gr?' · GR '+gr:'')+'</span>';
+}
+
 function exportPickingDoneExcel(){
     var done=DB.get('picking_done');var rows=[['OBD No','Material','EAN','Required','Picked','Short','Picked By','Time']];
     done.forEach(function(d){(d.details||[]).forEach(function(det){rows.push([d.obdNo||d.obnNo,det.material,det.ean,det.requiredQty,det.pickedQty,det.short,det.pickedByName,fmtDT(d.pickedAt)]);});});
@@ -4249,7 +4997,7 @@ function exportPickingDonePDF(){
 // ==================== PICKING WITH LOADING ====================
 function renderPickingWithLoading(){
     var isAssigner=chkAct('canPick')&&chkAct('canLoad');
-    var h='<div class="section-header"><h2><i class="bx bx-transfer"></i> Picking with Loading</h2></div>';
+    var h='<div class="section-header"><h2><i class="bx bx-transfer"></i> Pick & Load</h2></div>';
 
     // ===== SECTION 1: ASSIGN =====
     if(isAssigner){
@@ -4346,7 +5094,7 @@ function buildPWLDoneTable(list){
     else list.forEach(function(l){
         var sb=l.loadStatus==='Fully Loaded'?'<span class="badge badge-success">Full</span>':'<span class="badge badge-warning">Partial</span>';
         var ot='';(l.obdNos||[]).forEach(function(n){ot+='<span class="badge badge-info" style="margin:1px;font-size:9px">'+esc(n)+'</span>';});
-        h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(l.loadNo)+'</td><td><strong>'+esc(l.vehicleNo)+'</strong></td><td style="font-size:11px">'+esc(l.securityNo||'-')+'</td><td>'+ot+'</td><td><span class="badge badge-info">'+(l.scannedItems||[]).length+'</span></td><td>'+sb+'</td><td style="font-size:11px">'+esc(l.loadedByName)+'</td><td style="font-size:10px;color:var(--text-muted)">'+fmtDT(l.loadedAt)+'</td><td><button class="btn btn-glass btn-sm" onclick="viewPWLDoneDetail(\''+l.id+'\')"><i class="bx bx-eye"></i></button></td></tr>';
+        h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(l.loadNo)+'</td><td><strong>'+esc(l.vehicleNo)+'</strong></td><td style="font-size:11px">'+esc(l.securityNo||'-')+'</td><td>'+ot+'</td><td><span class="badge badge-info">'+(l.scannedItems||[]).length+'</span></td><td>'+sb+'</td><td style="font-size:11px">'+esc(l.loadedByName)+'</td><td style="font-size:10px;color:var(--text-muted)">'+fmtDT(l.loadedAt)+'</td><td><div class="table-actions"><button class="btn btn-glass btn-sm" title="View" onclick="viewPWLDoneDetail(\''+l.id+'\')"><i class="bx bx-eye"></i></button><button class="btn btn-danger btn-sm" title="Delete" onclick="deletePWLDone(\''+l.id+'\')"><i class="bx bx-trash"></i></button></div></td></tr>';
     });
     h+='</tbody></table></div>';return h;
 }
@@ -4390,7 +5138,7 @@ function openPWLSetup(obdId){
     h+='<div style="font-weight:700;color:var(--accent);font-family:var(--font-display)">'+esc(obd.obdNo)+'</div>';
     h+='<div style="font-size:12px;color:var(--text-muted)">'+(obd.materials||[]).length+' materials | '+tq+' qty</div></div>';
     h+='<div class="form-row">';
-    h+='<div class="form-group"><label>Vehicle Number <span class="req">*</span></label><input type="text" id="pwlVehNo" class="form-input" placeholder="MH-12-AB-1234" style="text-transform:uppercase"></div>';
+    h+='<div class="form-group"><label>Vehicle Number <span class="req">*</span></label>'+loadingVehSelect('pwlVehNo','pwlSecNo')+'</div>';
     h+='<div class="form-group"><label>Security / LR No <span class="req">*</span></label><input type="text" id="pwlSecNo" class="form-input" placeholder="SEC-001" style="text-transform:uppercase"></div>';
     h+='</div>';
     showModal('P&L Setup — '+obd.obdNo,h,'sm',
@@ -4402,7 +5150,8 @@ function openPWLSetup(obdId){
 function openPWLPicking(){
     var vehNo=(document.getElementById('pwlVehNo').value||'').trim().toUpperCase();
     var secNo=(document.getElementById('pwlSecNo').value||'').trim().toUpperCase();
-    if(!vehNo){showToast('Enter vehicle number','error');return;}
+    if(!vehNo){showToast('Please select a Gate-IN vehicle','error');return;}
+    if(!isLoadingGateVehicle(vehNo)){showToast('This vehicle is not IN at the gate','error');return;}
     if(!secNo){showToast('Enter security number','error');return;}
     var obdId=window._pwlOBDId;
     var obd=DB.find('obd_data',obdId);if(!obd)return;
@@ -4726,6 +5475,7 @@ function viewPWLDoneDetail(id){
 function renderLoading(sub){
     switch(sub){
         case 'loading-assign':renderLoadingAssign();break;
+        case 'loading-register':renderLoadingRegister();break;
         case 'start-loading':renderStartLoading();break;
         case 'loading-done':renderLoadingDone();break;
         case 'qty-mismatch':renderQtyMismatch();break;
@@ -4743,7 +5493,7 @@ function renderLoadingAssign(){
     var availableOBDs=pickedOBDs.filter(function(o){return !fullyLoadedIds[o.id];});
     var assigned=DB.filter('loading_assignments',function(a){return a.status==='Assigned';});
 
-    var h='<div class="section-header"><h2><i class="bx bx-truck"></i> Loading Assign</h2></div>';
+    var h='<div class="section-header"><h2><i class="bx bx-truck"></i> Assign Loading</h2></div>';
     h+='<div class="card"><div class="card-title"><i class="bx bx-box"></i> Picking Done OBDs — Ready to Load ('+availableOBDs.length+')</div>';
     if(!availableOBDs.length)h+='<div style="color:var(--text-muted);padding:16px;text-align:center">No OBDs ready for loading</div>';
     else{
@@ -4817,7 +5567,7 @@ function renderStartLoading(){
         var cn=(APP.currentUser.name||'').toLowerCase().trim();
         return an&&cn&&an===cn;
     });
-    var h='<div class="section-header"><h2><i class="bx bx-truck"></i> My Loading</h2></div>';
+    var h='<div class="section-header"><h2><i class="bx bx-truck"></i> My Loading Tasks</h2></div>';
     if(!myAssigns.length){h+='<div class="card"><div class="empty-state"><i class="bx bx-inbox"></i><p>No OBDs assigned to you</p></div></div>';setHtml(h);return;}
 
     var allOBDs=[];
@@ -4922,7 +5672,7 @@ function startMultiLoading(){
     obdNos.forEach(function(n){h+='<span class="badge badge-info" style="font-size:10px">'+esc(n)+'</span>';});
     h+='</div><div style="font-size:12px;color:var(--text-muted)">'+totalMats+' materials | '+totalQty+' total qty</div></div>';
     h+='<div class="form-row">';
-    h+='<div class="form-group"><label>Vehicle Number <span class="req">*</span></label><input type="text" id="loadVehicleNo" class="form-input" placeholder="MH-12-AB-1234" style="text-transform:uppercase"></div>';
+    h+='<div class="form-group"><label>Vehicle Number <span class="req">*</span></label>'+loadingVehSelect('loadVehicleNo','loadSecurityNo')+'</div>';
     h+='<div class="form-group"><label>Security / LR Number <span class="req">*</span></label><input type="text" id="loadSecurityNo" class="form-input" placeholder="SEC-001" style="text-transform:uppercase"></div>';
     h+='</div>';
     showModal('Loading Setup — '+obdIds.length+' OBDs',h,'sm',
@@ -4933,7 +5683,8 @@ function startMultiLoading(){
 function openMultiLoadingScanner(){
     var vehNo=(document.getElementById('loadVehicleNo').value||'').trim().toUpperCase();
     var secNo=(document.getElementById('loadSecurityNo').value||'').trim().toUpperCase();
-    if(!vehNo){showToast('Enter vehicle number','error');return;}
+    if(!vehNo){showToast('Please select a Gate-IN vehicle','error');return;}
+    if(!isLoadingGateVehicle(vehNo)){showToast('This vehicle is not IN at the gate','error');return;}
     if(!secNo){showToast('Enter security number','error');return;}
     var ml=window._multiLoadOBDs;if(!ml)return;
     var expected=[];
@@ -5271,7 +6022,7 @@ function genLoadNo(){
 function renderLoadingDone(){
    var all=DB.get('loaded_vehicles').filter(function(l){return l.type!=='pickandload';}).reverse();
     var approved=DB.filter('loading_approvals',function(a){return a.status==='Approved';});
-    var h='<div class="section-header"><h2><i class="bx bx-check-circle"></i> Loaded Vehicles ('+(all.length+approved.length)+')</h2>';
+    var h='<div class="section-header"><h2><i class="bx bx-check-circle"></i> Goods Issue Records ('+(all.length+approved.length)+')</h2>';
     h+='<div style="display:flex;gap:6px"><button class="btn btn-glass" onclick="exportLoadingExcel()"><i class="bx bx-download"></i> Excel</button><button class="btn btn-glass" onclick="exportLoadingPDF()"><i class="bx bx-file"></i> PDF</button></div></div>';
     h+='<div class="search-box"><i class="bx bx-search"></i><input type="text" id="loadDoneSearch" placeholder="Search LOAD-202601, vehicle, OBD..." oninput="searchLoadDone()"></div>';
     h+='<div id="loadDoneTable">'+buildLoadDoneTable(all,approved)+'</div>';
@@ -5293,14 +6044,15 @@ function buildLoadDoneTable(loaded,approved){
         var by=esc(l.loadedByName||l.requestedByName||'-');
         var tm=fmtDT(l.loadedAt||l.createdAt);
         var fn=it.t==='load'?'viewLoadDetail(\''+l.id+'\')':'viewApprovalDetail(\''+l.id+'\')';
-        h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(l.loadNo)+'</td><td><strong>'+esc(l.vehicleNo)+'</strong></td><td style="font-size:11px">'+esc(l.securityNo||'-')+'</td><td>'+ot+'</td><td><span class="badge badge-info">'+(l.scannedItems||[]).length+'</span></td><td>'+sb+'</td><td style="font-size:11px">'+by+'</td><td style="font-size:10px;color:var(--text-muted)">'+tm+'</td><td><button class="btn btn-glass btn-sm" onclick="'+fn+'"><i class="bx bx-eye"></i></button></td></tr>';
+        var dl=it.t==='load'?'deleteLoadedVehicle(\''+l.id+'\')':'deleteApprovalReq(\''+l.id+'\')';
+        h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(l.loadNo)+'</td><td><strong>'+esc(l.vehicleNo)+'</strong></td><td style="font-size:11px">'+esc(l.securityNo||'-')+'</td><td>'+ot+'</td><td><span class="badge badge-info">'+(l.scannedItems||[]).length+'</span></td><td>'+sb+'</td><td style="font-size:11px">'+by+'</td><td style="font-size:10px;color:var(--text-muted)">'+tm+'</td><td><div class="table-actions"><button class="btn btn-glass btn-sm" title="View" onclick="'+fn+'"><i class="bx bx-eye"></i></button><button class="btn btn-danger btn-sm" title="Delete" onclick="'+dl+'"><i class="bx bx-trash"></i></button></div></td></tr>';
     });
     h+='</tbody></table></div>';return h;
 }
 
 function searchLoadDone(){
     var q=(document.getElementById('loadDoneSearch').value||'').trim().toUpperCase();
-    var all=DB.get('loaded_vehicles').reverse();
+    var all=DB.get('loaded_vehicles').slice().reverse();
     var approved=DB.filter('loading_approvals',function(a){return a.status==='Approved';});
     if(q){
         all=all.filter(function(l){return(l.loadNo||'').toUpperCase().indexOf(q)>-1||(l.vehicleNo||'').toUpperCase().indexOf(q)>-1||(l.obdNos||[]).join(',').toUpperCase().indexOf(q)>-1;});
@@ -5360,11 +6112,11 @@ function viewApprovalDetail(id){
 
 // --- Qty Mismatch ---
 function renderQtyMismatch(){
-    var shorts=DB.get('short_reports').reverse();
-    var loadMis=DB.get('loading_data').reverse();
+    var shorts=DB.get('short_reports').slice().reverse();
+    var loadMis=DB.get('loading_data').slice().reverse();
     var pending=DB.filter('loading_approvals',function(a){return a.status==='Pending';});
     var rejected=DB.filter('loading_approvals',function(a){return a.status==='Rejected';});
-    var h='<div class="section-header"><h2><i class="bx bx-error-circle"></i> Quantity Mismatch</h2>';
+    var h='<div class="section-header"><h2><i class="bx bx-error-circle"></i> Quantity Differences</h2>';
     h+='<div style="display:flex;gap:6px"><button class="btn btn-glass" onclick="exportMismatchExcel()"><i class="bx bx-download"></i> Excel</button><button class="btn btn-glass" onclick="exportMismatchPDF()"><i class="bx bx-file"></i> PDF</button></div></div>';
     h+='<div class="search-box" style="margin-bottom:12px"><i class="bx bx-search"></i><input type="text" id="mismatchSearch" placeholder="Search LOAD-202601, vehicle, OBD..." oninput="searchMismatch()"></div>';
     h+='<div id="mismatchContent">'+buildMismatchHTML(shorts,loadMis,pending,rejected)+'</div>';
@@ -5379,9 +6131,9 @@ function buildMismatchHTML(shorts,loadMis,pending,rejected){
         h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Load No</th><th>Vehicle</th><th>OBD</th><th>By</th><th>Reason</th><th>Time</th><th>Actions</th></tr></thead><tbody>';
         pending.forEach(function(a){
             h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(a.loadNo)+'</td><td>'+esc(a.vehicleNo)+'</td><td>'+(a.obdNos||[]).map(function(n){return '<span class="badge badge-info" style="font-size:9px">'+esc(n)+'</span>';}).join(' ')+'</td><td>'+esc(a.requestedByName)+'</td><td style="font-size:11px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(a.reason)+'</td><td style="font-size:10px;color:var(--text-muted)">'+fmtDT(a.createdAt)+'</td>';
-            h+='<td><div class="table-actions"><button class="btn btn-glass btn-sm" onclick="viewApprovalRequest(\''+a.id+'\')"><i class="bx bx-eye"></i></button>';
-            if(chkAct('canApprove'))h+='<button class="btn btn-glass btn-sm" style="color:var(--success)" onclick="approveLoading(\''+a.id+'\')"><i class="bx bx-check"></i></button><button class="btn btn-danger btn-sm" onclick="rejectLoading(\''+a.id+'\')"><i class="bx bx-x"></i></button>';
-            h+='</div></td></tr>';
+            h+='<td><div class="table-actions"><button class="btn btn-glass btn-sm" title="View" onclick="viewApprovalRequest(\''+a.id+'\')"><i class="bx bx-eye"></i></button>';
+            if(chkAct('canApprove'))h+='<button class="btn btn-glass btn-sm" style="color:var(--success)" title="Approve" onclick="approveLoading(\''+a.id+'\')"><i class="bx bx-check"></i></button><button class="btn btn-danger btn-sm" title="Reject" onclick="rejectLoading(\''+a.id+'\')"><i class="bx bx-x"></i></button>';
+            h+='<button class="btn btn-danger btn-sm" title="Delete" onclick="deleteApprovalReq(\''+a.id+'\')"><i class="bx bx-trash"></i></button></div></td></tr>';
         });
         h+='</tbody></table></div></div>';
     }
@@ -5390,7 +6142,7 @@ function buildMismatchHTML(shorts,loadMis,pending,rejected){
         h+='<div class="card" style="margin-top:12px"><div class="card-title"><i class="bx bx-x-circle" style="color:var(--danger)"></i> Rejected ('+rejected.length+')</div>';
         h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Load No</th><th>Vehicle</th><th>OBD</th><th>By</th><th>Reason</th><th>Time</th><th>Actions</th></tr></thead><tbody>';
         rejected.forEach(function(a){
-            h+='<tr class="scan-row-red"><td style="font-family:var(--font-display);font-size:11px;color:var(--danger)">'+esc(a.loadNo)+'</td><td>'+esc(a.vehicleNo)+'</td><td>'+(a.obdNos||[]).map(function(n){return '<span class="badge badge-info" style="font-size:9px">'+esc(n)+'</span>';}).join(' ')+'</td><td>'+esc(a.requestedByName)+'</td><td style="font-size:11px">'+esc(a.reason)+'</td><td style="font-size:10px;color:var(--text-muted)">'+fmtDT(a.createdAt)+'</td><td><button class="btn btn-glass btn-sm" onclick="viewApprovalRequest(\''+a.id+'\')"><i class="bx bx-eye"></i></button></td></tr>';
+            h+='<tr class="scan-row-red"><td style="font-family:var(--font-display);font-size:11px;color:var(--danger)">'+esc(a.loadNo)+'</td><td>'+esc(a.vehicleNo)+'</td><td>'+(a.obdNos||[]).map(function(n){return '<span class="badge badge-info" style="font-size:9px">'+esc(n)+'</span>';}).join(' ')+'</td><td>'+esc(a.requestedByName)+'</td><td style="font-size:11px">'+esc(a.reason)+'</td><td style="font-size:10px;color:var(--text-muted)">'+fmtDT(a.createdAt)+'</td><td><div class="table-actions"><button class="btn btn-glass btn-sm" title="View" onclick="viewApprovalRequest(\''+a.id+'\')"><i class="bx bx-eye"></i></button><button class="btn btn-danger btn-sm" title="Delete" onclick="deleteApprovalReq(\''+a.id+'\')"><i class="bx bx-trash"></i></button></div></td></tr>';
         });
         h+='</tbody></table></div></div>';
     }
@@ -5401,7 +6153,7 @@ function buildMismatchHTML(shorts,loadMis,pending,rejected){
         h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Load No</th><th>Vehicle</th><th>Material</th><th>EAN</th><th>Expected</th><th>Scanned</th><th>Diff</th><th>Actions</th></tr></thead><tbody>';
         loadMis.forEach(function(lm){
             (lm.mismatches||[]).forEach(function(m){
-                h+='<tr class="scan-row-red"><td style="font-family:var(--font-display);font-size:10px;color:var(--accent)">'+esc(lm.loadNo)+'</td><td>'+esc(lm.vehicleNo)+'</td><td>'+esc(m.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(m.ean||'')+'</td><td>'+m.expectedQty+'</td><td>'+m.scannedQty+'</td><td class="qty-mismatch">'+(m.diff>0?'-'+m.diff:'+'+Math.abs(m.diff))+'</td><td><button class="btn btn-glass btn-sm" onclick="viewMismatchDetail(\''+lm.id+'\')"><i class="bx bx-eye"></i></button></td></tr>';
+                h+='<tr class="scan-row-red"><td style="font-family:var(--font-display);font-size:10px;color:var(--accent)">'+esc(lm.loadNo)+'</td><td>'+esc(lm.vehicleNo)+'</td><td>'+esc(m.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(m.ean||'')+'</td><td>'+m.expectedQty+'</td><td>'+m.scannedQty+'</td><td class="qty-mismatch">'+(m.diff>0?'-'+m.diff:'+'+Math.abs(m.diff))+'</td><td><div class="table-actions"><button class="btn btn-glass btn-sm" title="View" onclick="viewMismatchDetail(\''+lm.id+'\')"><i class="bx bx-eye"></i></button><button class="btn btn-danger btn-sm" title="Delete" onclick="deleteLoadingMismatch(\''+lm.id+'\')"><i class="bx bx-trash"></i></button></div></td></tr>';
             });
         });
         h+='</tbody></table></div>';
@@ -5414,7 +6166,7 @@ function buildMismatchHTML(shorts,loadMis,pending,rejected){
         h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Short No</th><th>Vehicle</th><th>Invoice</th><th>Material</th><th>EAN</th><th>Expected</th><th>Actual</th><th>Short</th><th>Posted</th><th>Actions</th></tr></thead><tbody>';
         shorts.forEach(function(s){
             (s.items||[]).forEach(function(it){
-                h+='<tr class="scan-row-red"><td style="font-family:var(--font-display);font-size:10px">'+esc(s.shortNo)+'</td><td>'+esc(s.vehicleNo)+'</td><td>'+esc(it.invoiceNo)+'</td><td>'+esc(it.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(it.ean||'')+'</td><td>'+it.expected+'</td><td>'+it.scanned+'</td><td class="qty-mismatch">-'+it.short+'</td><td>'+(s.posted?'<span class="badge badge-success">Yes</span>':'<span class="badge badge-warning">No</span>')+'</td><td><button class="btn btn-glass btn-sm" onclick="viewShortDetail(\''+s.id+'\')"><i class="bx bx-eye"></i></button></td></tr>';
+                h+='<tr class="scan-row-red"><td style="font-family:var(--font-display);font-size:10px">'+esc(s.shortNo)+'</td><td>'+esc(s.vehicleNo)+'</td><td>'+esc(it.invoiceNo)+'</td><td>'+esc(it.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(it.ean||'')+'</td><td>'+it.expected+'</td><td>'+it.scanned+'</td><td class="qty-mismatch">-'+it.short+'</td><td>'+(s.posted?'<span class="badge badge-success">Yes</span>':'<span class="badge badge-warning">No</span>')+'</td><td><div class="table-actions"><button class="btn btn-glass btn-sm" title="View" onclick="viewShortDetail(\''+s.id+'\')"><i class="bx bx-eye"></i></button><button class="btn btn-danger btn-sm" title="Delete" onclick="deleteShortReport(\''+s.id+'\')"><i class="bx bx-trash"></i></button></div></td></tr>';
             });
         });
         h+='</tbody></table></div>';
@@ -5424,8 +6176,8 @@ function buildMismatchHTML(shorts,loadMis,pending,rejected){
 
 function searchMismatch(){
     var q=(document.getElementById('mismatchSearch').value||'').trim().toUpperCase();
-    var shorts=DB.get('short_reports').reverse();
-    var loadMis=DB.get('loading_data').reverse();
+    var shorts=DB.get('short_reports').slice().reverse();
+    var loadMis=DB.get('loading_data').slice().reverse();
     var pending=DB.filter('loading_approvals',function(a){return a.status==='Pending';});
     var rejected=DB.filter('loading_approvals',function(a){return a.status==='Rejected';});
     if(q){
@@ -5565,9 +6317,9 @@ function exportMismatchPDF(){
 
 // ==================== USER WORKING TIME ====================
 function renderUserWorkingTime(){
-    var logs=DB.get('user_work_log').reverse();
-    var h='<div class="section-header"><h2><i class="bx bx-time-five"></i> User Working Time</h2>';
-    h+='<div style="display:flex;gap:6px"><button class="btn btn-glass" onclick="exportWorkTimeExcel()"><i class="bx bx-download"></i> Excel</button><button class="btn btn-glass" onclick="exportWorkTimePDF()"><i class="bx bx-file"></i> PDF</button></div></div>';
+    var logs=DB.get('user_work_log').slice().reverse();
+    var h='<div class="section-header"><h2><i class="bx bx-time-five"></i> Resource Activity</h2>';
+    h+='<div style="display:flex;gap:6px"><button class="btn btn-glass" onclick="exportWorkTimeExcel()"><i class="bx bx-download"></i> Excel</button><button class="btn btn-glass" onclick="exportWorkTimePDF()"><i class="bx bx-file"></i> PDF</button><button class="btn btn-danger" onclick="deleteWorkLog()"><i class="bx bx-trash"></i> Clear Log</button></div></div>';
     h+='<div class="form-row" style="margin-bottom:16px"><div class="form-group"><label>From Date</label><input type="date" id="wtFrom" class="form-input" value="'+today()+'"></div><div class="form-group"><label>To Date</label><input type="date" id="wtTo" class="form-input" value="'+today()+'"></div><div class="form-group"><label>User</label><select id="wtUser" class="form-input"><option value="">All Users</option>';
     var users=DB.get('users');
     users.forEach(function(u){h+='<option value="'+u.id+'">'+esc(u.name)+'</option>';});
@@ -5605,19 +6357,19 @@ function filterWorkTime(){
     var from=document.getElementById('wtFrom').value;
     var to=document.getElementById('wtTo').value;
     var userId=document.getElementById('wtUser').value;
-    var logs=DB.get('user_work_log').reverse();
+    var logs=DB.get('user_work_log').slice().reverse();
     if(from)logs=logs.filter(function(l){return l.dateTime&&l.dateTime.split('T')[0]>=from;});
     if(to)logs=logs.filter(function(l){return l.dateTime&&l.dateTime.split('T')[0]<=to;});
     if(userId)logs=logs.filter(function(l){return l.userId===userId;});
     document.getElementById('wtResult').innerHTML=buildWorkTimeTable(logs);
 }
 function exportWorkTimeExcel(){
-    var logs=DB.get('user_work_log').reverse();var rows=[['User','Module','Action','Date Time']];
+    var logs=DB.get('user_work_log').slice().reverse();var rows=[['User','Module','Action','Date Time']];
     logs.forEach(function(l){rows.push([l.userName,l.module,l.action,fmtDT(l.dateTime)]);});
     var ws=XLSX.utils.aoa_to_sheet(rows);var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'WorkTime');XLSX.writeFile(wb,'User_Work_Time_'+today()+'.xlsx');showToast('Excel downloaded!','success');
 }
 function exportWorkTimePDF(){
-    var logs=DB.get('user_work_log').reverse();var rows=[];
+    var logs=DB.get('user_work_log').slice().reverse();var rows=[];
     logs.forEach(function(l){rows.push([l.userName,l.module,l.action,fmtDT(l.dateTime)]);});
     var pdf=new jspdf.jsPDF({orientation:'landscape'});pdf.setFontSize(14);pdf.text('User Working Time — VIP INDUSTRIES MD20',14,15);
     pdf.autoTable({startY:22,head:[['User','Module','Action','Date Time']],body:rows,theme:'grid',headStyles:{fillColor:[0,180,120]},styles:{fontSize:7}});
@@ -5628,42 +6380,45 @@ function exportWorkTimePDF(){
 
 // --- Module & Action Definitions ---
 var ALL_MODULES = [
-    {id:'dashboard',label:'Dashboard',group:'System'},
-    {id:'inbound',label:'Inbound (Full)',group:'Inbound'},
-    {id:'security-gate',label:'Security Gate',group:'Inbound'},
-    {id:'pending-vehicle',label:'Pending Vehicle',group:'Inbound'},
-    {id:'unloading-screen',label:'Unloading Screen',group:'Inbound'},
-    {id:'posting-pending',label:'Posting Pending',group:'Inbound'},
-    {id:'inbound-record',label:'Inbound Record',group:'Inbound'},
-    {id:'unloading-stock',label:'Unloading Stock',group:'Inbound'},
-    {id:'putaway',label:'Putaway',group:'Warehouse'},
-    {id:'piv',label:'PIV',group:'Warehouse'},
-    {id:'location',label:'Location Master',group:'Warehouse'},
-    {id:'rack',label:'Bin Master',group:'Warehouse'},
-    {id:'material',label:'Material Master',group:'Warehouse'},
-    {id:'picking',label:'Picking',group:'Outbound'},
-    {id:'loading',label:'Loading',group:'Outbound'},
-    {id:'qty-mismatch',label:'Qty Mismatch',group:'Outbound'},
-    {id:'user-time',label:'User Working Time',group:'System'},
+    {id:'dashboard',label:'Home',group:'System'},
+    {id:'inbound',label:'Goods Inward (Full Access)',group:'Inbound'},
+    {id:'security-gate',label:'Gate Entry',group:'Inbound'},
+    {id:'pending-vehicle',label:'Waiting Vehicles',group:'Inbound'},
+    {id:'unloading-screen',label:'Unload Vehicle',group:'Inbound'},
+    {id:'posting-pending',label:'Pending Approvals',group:'Inbound'},
+    {id:'inbound-record',label:'Inward History',group:'Inbound'},
+    {id:'unloading-stock',label:'Unloaded Stock',group:'Inbound'},
+    {id:'putaway',label:'Putaway (Store Stock)',group:'Warehouse'},
+    {id:'piv',label:'Stock Count',group:'Warehouse'},
+    {id:'location',label:'Stock Overview',group:'Warehouse'},
+    {id:'rack',label:'Bins & Racks',group:'Warehouse'},
+    {id:'material',label:'Products',group:'Warehouse'},
+    {id:'picking',label:'Order Picking',group:'Outbound'},
+    {id:'loading',label:'Dispatch & Loading',group:'Outbound'},
+    {id:'qty-mismatch',label:'Qty Difference Report',group:'Outbound'},
+    {id:'loading-register',label:'Loading Register',group:'Outbound'},
+    {id:'loc-requests',label:'Location Requests',group:'Outbound'},
+    {id:'crossdock-report',label:'Cross-Dock Report',group:'Outbound'},
+    {id:'user-time',label:'User Work Log',group:'System'},
     {id:'reports',label:'Reports',group:'System'},
-    {id:'audit',label:'Audit Log',group:'System'},
-    {id:'admin',label:'Admin',group:'System'},
+    {id:'audit',label:'Activity History',group:'System'},
+    {id:'admin',label:'Users & Permissions',group:'System'},
     {id:'settings',label:'Settings',group:'System'}
 ];
 
 var ALL_ACTIONS = [
-    {id:'canSecurityEntry',label:'Security Gate Entry Button',mod:'Security Gate'},
-    {id:'canUploadInvoice',label:'Upload Invoice Button',mod:'Pending Vehicle'},
-    {id:'canAssignVehicle',label:'Assign Vehicle Button',mod:'Pending Vehicle'},
-    {id:'canStartUnloading',label:'Start Unload Button',mod:'Unloading Screen'},
-    {id:'canPostVehicle',label:'Post Vehicle Button',mod:'Posting Pending'},
-    {id:'canApprove',label:'Approve / Reject Button',mod:'Posting Pending'},
+    {id:'canSecurityEntry',label:'Gate Entry Button',mod:'Gate Entry'},
+    {id:'canUploadInvoice',label:'Upload Invoice Button',mod:'Waiting Vehicles'},
+    {id:'canAssignVehicle',label:'Assign Vehicle Button',mod:'Waiting Vehicles'},
+    {id:'canStartUnloading',label:'Start Unload Button',mod:'Unload Vehicle'},
+    {id:'canPostVehicle',label:'Post Vehicle Button',mod:'Pending Approvals'},
+    {id:'canApprove',label:'Approve / Reject Button',mod:'Pending Approvals'},
     {id:'canViewReports',label:'View Reports Button',mod:'Reports'},
     {id:'canPutaway',label:'Putaway Save Button',mod:'Putaway'},
-    {id:'canPIV',label:'PIV Save Button',mod:'PIV'},
-    {id:'canPick',label:'Picking Start Button',mod:'Picking'},
-    {id:'canLoad',label:'Loading Start Button',mod:'Loading'},
-    {id:'canAdmin',label:'Admin Panel Access',mod:'Admin'}
+    {id:'canPIV',label:'Stock Count Save Button',mod:'Stock Count'},
+    {id:'canPick',label:'Picking Start Button',mod:'Order Picking'},
+    {id:'canLoad',label:'Loading Start Button',mod:'Dispatch & Loading'},
+    {id:'canAdmin',label:'Admin Panel Access',mod:'Users & Permissions'}
 ];
 
 var ROLE_DEFAULTS = {
@@ -5758,7 +6513,7 @@ function buildPermHTML(prefix,isSuperAdmin,currentPerms){
 
     // === MODULE VISIBILITY ===
     h+='<div style="margin-bottom:16px">';
-    h+='<div class="card-title" style="margin-bottom:8px"><i class="bx bx-layout" style="color:var(--accent)"></i> Module Visibility <span style="font-size:10px;color:var(--text-muted);font-weight:normal">(Sidebar mein kya dikhega)</span></div>';
+    h+='<div class="card-title" style="margin-bottom:8px"><i class="bx bx-layout" style="color:var(--accent)"></i> Module Visibility <span style="font-size:10px;color:var(--text-muted);font-weight:normal">(controls what appears in the sidebar)</span></div>';
 
     // ALL toggle
     h+='<div style="margin-bottom:8px"><label class="perm-item" style="border-color:var(--accent);background:var(--accent-dim);cursor:pointer"><input type="checkbox" id="'+prefix+'_allMods" '+(isAll?'checked':'')+' '+disabled+' onchange="toggleAllMods(\''+prefix+'\')"> <strong style="color:var(--accent)">ALL MODULES</strong></label></div>';
@@ -6127,9 +6882,9 @@ function renderReports(){
 
 // ==================== AUDIT LOG ====================
 function renderAuditLog(){
-    var logs=DB.get('audit_log').reverse();
+    var logs=DB.get('audit_log').slice().reverse();
     var pg=paginate(logs,APP.auditPage,APP.auditPerPage);
-    var h='<div class="section-header"><h2><i class="bx bx-receipt"></i> Audit Log ('+logs.length+')</h2><button class="btn btn-glass" onclick="exportAuditExcel()"><i class="bx bx-download"></i> Excel</button></div>';
+    var h='<div class="section-header"><h2><i class="bx bx-receipt"></i> Audit Log ('+logs.length+')</h2><div style="display:flex;gap:6px"><button class="btn btn-glass" onclick="exportAuditExcel()"><i class="bx bx-download"></i> Excel</button><button class="btn btn-danger" onclick="clearAuditLog()"><i class="bx bx-trash"></i> Clear Log</button></div></div>';
     h+='<div class="search-box"><i class="bx bx-search"></i><input type="text" id="auditSearch" placeholder="Search module, action, user..." oninput="searchAudit()"></div>';
     h+='<div id="auditTable">'+buildAuditTable(pg.items)+'</div>';
     h+=renderPag(APP.auditPage,pg.pages,'goAuditPage');
@@ -6144,7 +6899,7 @@ function buildAuditTable(logs){
 function goAuditPage(p){APP.auditPage=p;renderAuditLog();}
 function searchAudit(){
     var q=document.getElementById('auditSearch').value.trim().toLowerCase();
-    var logs=DB.get('audit_log').reverse();
+    var logs=DB.get('audit_log').slice().reverse();
     if(q)logs=logs.filter(function(l){return(l.module||'').toLowerCase().indexOf(q)>-1||(l.action||'').toLowerCase().indexOf(q)>-1||(l.userName||'').toLowerCase().indexOf(q)>-1;});
     document.getElementById('auditTable').innerHTML=buildAuditTable(logs);
 }
@@ -6152,6 +6907,116 @@ function exportAuditExcel(){
     var logs=DB.get('audit_log');var rows=[['Module','Action','Details','User','Date Time']];
     logs.forEach(function(l){rows.push([l.module,l.action,l.details,l.userName,fmtDT(l.dateTime)]);});
     var ws=XLSX.utils.aoa_to_sheet(rows);var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Audit');XLSX.writeFile(wb,'Audit_Log_'+today()+'.xlsx');showToast('Excel downloaded!','success');
+}
+
+// ==================== DELETE ACTIONS ====================
+// Centralised admin delete actions — every list/table in the ERP has a delete option.
+function deletePickingDone(id){
+    if(!isAdminUser()){showToast('Admin / Manager access only','error');return;}
+    var d=DB.find('picking_done',id);if(!d)return;
+    var blk=reverseBlocker(d);if(blk){showToast(blk,'error');return;}
+    if(!confirm('Delete picking record '+d.obdNo+'? The stock will be restored first.'))return;
+    (d.details||[]).forEach(function(det){(det.locations||[]).forEach(function(l){if(l.source==='GR'){var gim=DB.find('invoice_materials',l.invMatId);if(gim)DB.update('invoice_materials',gim.id,{crossdockedQty:Math.max(0,(gim.crossdockedQty||0)-l.qty)});return;}restoreStock(l.rack,l.ean||det.ean,l.qty,l.sources,{material:det.material,obdNo:d.obdNo});});});
+    DB.remove('picking_done',id);
+    DB.update('obd_data',d.obdId,{status:'Pending',priority:'Normal'});
+    DB.filter('short_reports',function(s){return s.lrNo==='OBD'&&s.unloadNo===d.obdNo&&!s.posted;}).forEach(function(s){DB.remove('short_reports',s.id);});
+    logAction('Picking','DELETE','Picking record '+d.obdNo+' deleted — stock restored');
+    showToast('Picking record deleted — stock restored','success');
+    renderPickingDone();
+}
+function deleteLocRequest(id){
+    if(!isMgrUser()){showToast('Admin / Manager access only','error');return;}
+    var r=DB.find('location_requests',id);if(!r)return;
+    if(!confirm('Delete location request '+r.reqNo+'?'))return;
+    DB.remove('location_requests',id);
+    logAction('Picking','LOC_DELETE','Location request '+r.reqNo+' deleted');
+    showToast('Request deleted','success');
+    renderLocRequests();
+}
+function deleteShortReport(id){
+    if(!isAdminUser()){showToast('Admin / Manager access only','error');return;}
+    var s=DB.find('short_reports',id);if(!s)return;
+    if(!confirm('Delete unloading short '+s.shortNo+'?'))return;
+    DB.remove('short_reports',id);
+    logAction('Reports','DELETE','Unloading short '+s.shortNo+' deleted');
+    showToast('Unloading short deleted','success');renderQtyMismatch();
+}
+function deleteLoadingMismatch(id){
+    if(!isAdminUser()){showToast('Admin / Manager access only','error');return;}
+    var l=DB.find('loading_data',id);if(!l)return;
+    if(!confirm('Delete loading mismatch '+l.loadNo+'?'))return;
+    DB.remove('loading_data',id);
+    logAction('Loading','DELETE','Loading mismatch '+l.loadNo+' deleted');
+    showToast('Mismatch record deleted','success');renderQtyMismatch();
+}
+function deleteApprovalReq(id){
+    if(!isAdminUser()){showToast('Admin / Manager access only','error');return;}
+    var a=DB.find('loading_approvals',id);if(!a)return;
+    if(!confirm('Delete approval record '+a.loadNo+'?'))return;
+    DB.remove('loading_approvals',id);
+    logAction('Loading','DELETE','Approval record '+a.loadNo+' deleted');
+    showToast('Approval record deleted','success');renderQtyMismatch();
+}
+function deleteLoadedVehicle(id){
+    if(!isAdminUser()){showToast('Admin / Manager access only','error');return;}
+    var l=DB.find('loaded_vehicles',id);if(!l)return;
+    if(!confirm('Delete goods issue record '+l.loadNo+'? The loading record will be removed.'))return;
+    DB.remove('loaded_vehicles',id);
+    logAction('Loading','DELETE','Goods issue record '+l.loadNo+' deleted');
+    showToast('Record deleted','success');renderLoadingDone();
+}
+function deletePWLDone(id){
+    if(!isAdminUser()){showToast('Admin / Manager access only','error');return;}
+    var l=DB.find('loaded_vehicles',id);if(!l)return;
+    if(!confirm('Delete P&L record '+l.loadNo+'?'))return;
+    DB.remove('loaded_vehicles',id);
+    logAction('Loading','DELETE','P&L record '+l.loadNo+' deleted');
+    showToast('Record deleted','success');renderPickingWithLoading();
+}
+function deleteVehicle(id){
+    if(!isAdminUser()){showToast('Admin / Manager access only','error');return;}
+    var v=DB.find('vehicles',id);if(!v)return;
+    if(v.status==='Posted'||v.status==='Unloaded'||v.status==='Posting Pending Approval'){showToast('Posted or unloaded vehicles cannot be deleted','error');return;}
+    if(!confirm('Delete vehicle '+v.vehicleNo+' with all its invoices and materials?'))return;
+    DB.filter('invoices',function(i){return i.vehicleId===id;}).forEach(function(i){
+        DB.filter('invoice_materials',function(m){return m.invoiceId===i.id;}).forEach(function(m){DB.remove('invoice_materials',m.id);});
+        DB.remove('invoices',i.id);
+    });
+    DB.remove('vehicles',id);
+    logAction('Inbound','VEHICLE_DELETE','Vehicle '+v.vehicleNo+' deleted');
+    showToast('Vehicle deleted','success');
+    renderPendingVehicle();
+}
+function deleteOBD(id){
+    if(!isAdminUser()){showToast('Admin / Manager access only','error');return;}
+    var o=DB.find('obd_data',id);if(!o)return;
+    if(o.status!=='Pending'){showToast('Only Pending OBDs can be deleted','error');return;}
+    if(!confirm('Delete OBD '+o.obdNo+'?'))return;
+    DB.filter('picking_assignments',function(a){return (a.obdIds||[]).indexOf(id)>-1&&a.status==='Assigned';}).forEach(function(a){
+        var ni=(a.obdIds||[]).filter(function(x){return x!==id;});
+        if(!ni.length)DB.remove('picking_assignments',a.id);else DB.update('picking_assignments',a.id,{obdIds:ni});
+    });
+    releaseLocksForOBD(id);
+    DB.remove('obd_data',id);
+    logAction('Picking','OBD_DELETE','OBD '+o.obdNo+' deleted');
+    showToast('OBD deleted','success');
+    renderOBDUpload();
+}
+function deleteNotif(id){
+    var n=DB.get('notifications').filter(function(x){return x.id!==id;});
+    DB.set('notifications',n);updateNotifBadge();renderNotifPanel();
+}
+function clearAuditLog(){
+    if(!isAdminUser()){showToast('Admin / Manager access only','error');return;}
+    if(!confirm('Delete the entire audit log? This cannot be undone.'))return;
+    DB.set('audit_log',[]);logAction('System','AUDIT_CLEAR','Audit log cleared');
+    showToast('Audit log cleared','success');renderAuditLog();
+}
+function deleteWorkLog(){
+    if(!isAdminUser()){showToast('Admin / Manager access only','error');return;}
+    if(!confirm('Delete the entire resource activity log?'))return;
+    DB.set('user_work_log',[]);logAction('System','WORKLOG_CLEAR','Resource activity log cleared');
+    showToast('Activity log cleared','success');renderUserWorkingTime();
 }
 
 // ==================== EXPORT UTILITY ====================
@@ -6221,17 +7086,17 @@ function initBottomNav(){
     // More panel
     document.getElementById('morePanelOverlay').addEventListener('click',function(){document.getElementById('morePanel').classList.remove('open');});
     document.getElementById('morePanelClose').addEventListener('click',function(){document.getElementById('morePanel').classList.remove('open');});
-    var modules=[
+        var modules=[
         {id:'putaway',icon:'bxs-package',label:'Putaway'},
-        {id:'piv',icon:'bxs-clipboard',label:'PIV'},
-        {id:'location',icon:'bxs-map-pin',label:'Location'},
-        {id:'rack',icon:'bxs-grid-alt',label:'Rack Master'},
-        {id:'material',icon:'bxs-label',label:'Material'},
-        {id:'admin',icon:'bxs-user-detail',label:'Admin'},
+        {id:'piv',icon:'bxs-clipboard',label:'Stock Count'},
+        {id:'location',icon:'bxs-map-pin',label:'Stock Overview'},
+        {id:'rack',icon:'bxs-grid-alt',label:'Bins & Racks'},
+        {id:'material',icon:'bxs-label',label:'Products'},
+        {id:'admin',icon:'bxs-user-detail',label:'Users'},
         {id:'settings',icon:'bxs-cog',label:'Settings'},
         {id:'reports',icon:'bxs-bar-chart-alt-2',label:'Reports'},
-        {id:'audit',icon:'bxs-receipt',label:'Audit Log'},
-        {id:'user-time',icon:'bx-time-five',label:'Work Time'}
+        {id:'audit',icon:'bxs-receipt',label:'Activity History'},
+        {id:'user-time',icon:'bx-time-five',label:'Work Log'}
     ];
     var gh='';
     modules.forEach(function(m){
@@ -6478,7 +7343,7 @@ function focusForBluetoothScanner() {
     SCANNER.btInput.autofocus = true;
     SCANNER.btInput.style.cssText = 'position:absolute;top:-200px;left:-200px;width:1px;height:1px;opacity:0;font-size:16px;';
     document.body.appendChild(SCANNER.btInput);
-    reader.innerHTML = '<div style="padding:24px;text-align:center"><i class="bx bx-bluetooth" style="font-size:40px;color:var(--accent);display:block;margin-bottom:12px;animation:glow 2s infinite"></i><div style="font-size:14px;font-weight:700;color:var(--accent);margin-bottom:4px">Bluetooth Scanner Ready</div><div style="font-size:12px;color:var(--text-muted);margin-bottom:16px">Barcode scan karo — result automatically aayega</div><div style="display:inline-flex;align-items:center;gap:8px;padding:10px 16px;background:var(--accent-dim);border-radius:var(--radius-sm);border:1px solid rgba(var(--accent-rgb),.2)"><i class="bx bx-check-circle" style="color:var(--accent)"></i><span style="font-size:12px;color:var(--accent);font-weight:600">Waiting for scan...</span></div></div>';
+    reader.innerHTML = '<div style="padding:24px;text-align:center"><i class="bx bx-bluetooth" style="font-size:40px;color:var(--accent);display:block;margin-bottom:12px;animation:glow 2s infinite"></i><div style="font-size:14px;font-weight:700;color:var(--accent);margin-bottom:4px">Bluetooth Scanner Ready</div><div style="font-size:12px;color:var(--text-muted);margin-bottom:16px">Scan a barcode — the result will appear automatically</div><div style="display:inline-flex;align-items:center;gap:8px;padding:10px 16px;background:var(--accent-dim);border-radius:var(--radius-sm);border:1px solid rgba(var(--accent-rgb),.2)"><i class="bx bx-check-circle" style="color:var(--accent)"></i><span style="font-size:12px;color:var(--accent);font-weight:600">Waiting for scan...</span></div></div>';
     setTimeout(function() { if (SCANNER.btInput) SCANNER.btInput.focus(); }, 300);
     SCANNER.btInput.addEventListener('keydown', function(e) {
         if (!SCANNER.isActive) return;
@@ -6593,8 +7458,8 @@ function clearReportFilters(){
 function runReport(){
     var from=document.getElementById('rptFrom').value;
     var to=document.getElementById('rptTo').value;
-    if(!from||!to){showToast('Date From aur Date To dono chahiye','error');return;}
-    if(from>to){showToast('Date From Date To se pehle hona chahiye','error');return;}
+    if(!from||!to){showToast('Both Date From and Date To are required','error');return;}
+    if(from>to){showToast('Date From must be earlier than Date To','error');return;}
     var filters={};
     var rt=null;
     for(var i=0;i<REPORT_TYPES.length;i++){if(REPORT_TYPES[i].id===RSTATE.type){rt=REPORT_TYPES[i];break;}}

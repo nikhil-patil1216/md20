@@ -27,6 +27,121 @@ try {
 }
 
 var ALL_TABLES = ['users','location_master','material_master','rack_master','vehicles','invoices','invoice_materials','picking_reports','audit_log','notifications','difference_reports','obd_data','picking_assignments','loading_assignments','loading_data','user_sessions','grn_records','short_reports','unloading_records','loaded_vehicles','picking_done','loading_users','user_work_log','partial_unloads','location_locks','loading_approvals','short_excess_reports','location_requests'];
+
+// ==================== SERVER-SIDE SEARCH ENGINE (60k+ rows safe) ====================
+// Master data (material_master / location_master) browser memory me FULL load NAHI hota.
+// Har search/scan direct Supabase par hota hai. SQL indexes zaroori hain (supabase_setup.sql).
+var _sbCache = {};      // scan cache (table|field|value -> row) — repeat scan instant
+var _sbCacheN = 0;
+var _sbFullPullTs = {}; // sbPullFull TTL cache timestamps
+var _stockCtx = null;   // picking stock-map cache
+var _stockCtxTs = 0;
+
+function _sbClean(q){ return String(q||'').replace(/[%_,()"\u2019']/g,' ').trim(); }
+
+// Paginated server-side search: { search:'text', cols:['material','ean'], eq:{rack:'R1'}, limit:50, offset:0, order:'created_at' }
+async function sbSearch(table, opts){
+    if(!supabaseClient) return {rows:[],count:0};
+    opts = opts || {};
+    var limit = opts.limit || 50, offset = opts.offset || 0;
+    var q = supabaseClient.from(table).select('data', { count:'exact' });
+    if(opts.eq){ for(var f in opts.eq){ q = q.filter('data->>'+f,'eq',String(opts.eq[f])); } }
+    if(opts.gt){ for(var g in opts.gt){ q = q.filter('data->>'+g,'gt',String(opts.gt[g])); } }
+    if(opts.search && opts.cols && opts.cols.length){
+        var s = _sbClean(opts.search);
+        if(s){
+            var parts=[];
+            for(var i=0;i<opts.cols.length;i++) parts.push('data->>'+opts.cols[i]+'.ilike.%'+s+'%');
+            q = q.or(parts.join(','));
+        }
+    }
+    if(opts.order) q = q.order(opts.order, { ascending:false });
+    var res = await q.range(offset, offset+limit-1);
+    if(res.error){ console.warn('sbSearch ['+table+']:', res.error.message); return {rows:[],count:0}; }
+    return { rows:(res.data||[]).map(function(r){ return r.data; }), count:res.count||0 };
+}
+
+// Exact lookup — scanning ke liye (case-insensitive, indexed, ~20-50ms)
+async function sbFindOne(table, field, value){
+    if(!supabaseClient || !value) return null;
+    var ck = table+'|'+field+'|'+String(value).toLowerCase();
+    if(_sbCache[ck]) return _sbCache[ck];
+    var res = await supabaseClient.from(table).select('data').ilike('data->>'+field, _sbClean(value)).limit(1);
+    if(res.error || !res.data || !res.data.length) return null;
+    var row = res.data[0].data;
+    _sbCache[ck]=row; _sbCacheN++;
+    if(_sbCacheN>500){ _sbCache={}; _sbCacheN=0; }
+    return row;
+}
+
+// Sirf COUNT (KPI ke liye — rows download nahi hoti)
+async function sbCount(table, eq){
+    if(!supabaseClient) return 0;
+    var q = supabaseClient.from(table).select('data', { count:'exact', head:true });
+    if(eq){ for(var f in eq){ q = q.filter('data->>'+f,'eq',String(eq[f])); } }
+    var res = await q;
+    return res.error?0:(res.count||0);
+}
+
+// Row by id (edit ke liye)
+async function sbGetById(table, id){
+    if(!supabaseClient || !id) return null;
+    var res = await supabaseClient.from(table).select('data').eq('id',id).limit(1);
+    return (res.error||!res.data||!res.data.length) ? null : res.data[0].data;
+}
+
+// Direct server update (memory me row na ho tab bhi chalega)
+async function sbUpdate(table, id, patch){
+    if(!supabaseClient || !id) return null;
+    var cur = await sbGetById(table,id); if(!cur) return null;
+    for(var k in patch) cur[k]=patch[k];
+    cur.updatedAt = new Date().toISOString();
+    var res = await supabaseClient.from(table).update({ data:cur }).eq('id',id);
+    if(res.error) console.warn('sbUpdate ['+table+']:', res.error.message);
+    return res.error?null:cur;
+}
+
+// Direct server delete (memory me row na ho tab bhi chalega)
+async function sbRemove(table, id){
+    if(!supabaseClient || !id) return;
+    try{
+        var res = await supabaseClient.from(table).delete().eq('id',id);
+        if(res.error) console.warn('sbRemove ['+table+']:', res.error.message);
+    }catch(e){ console.warn('sbRemove catch:',e); }
+}
+
+// On-demand FULL pull — sirf Excel export / Reports / picking stock-map ke liye
+// maxAgeMs do to cached re-pull skip hota hai (e.g. 120000 = 2 min)
+async function sbPullFull(table, maxAgeMs){
+    if(!supabaseClient) return;
+    if(maxAgeMs && _sbFullPullTs[table] && (Date.now()-_sbFullPullTs[table])<maxAgeMs && MEMORY_DB[table] && MEMORY_DB[table].length) return;
+    showLoader();
+    try{
+        var all=[], from=0, step=1000, go=true;
+        while(go){
+            var res = await supabaseClient.from(table).select('data').order('created_at',{ascending:false}).range(from, from+step-1);
+            if(res.error){ console.warn('sbPullFull ['+table+']:',res.error.message); break; }
+            (res.data||[]).forEach(function(r){ if(r.data) all.push(r.data); });
+            go = res.data && res.data.length===step;
+            from += step;
+        }
+        MEMORY_DB[table]=all;
+        _localWriteTs[table]=Date.now();
+        _sbFullPullTs[table]=Date.now();
+    }catch(e){ console.warn('sbPullFull catch:',e); }
+    hideLoader();
+}
+
+// Picking stock-map (EAN -> locations) — server pull + 60s cache
+async function ensureStockCtx(){
+    var TTL=60000;
+    if(_stockCtx && (Date.now()-_stockCtxTs)<TTL) return _stockCtx;
+    await sbPullFull('location_master');
+    _stockCtx=makeAvailCtx();
+    _stockCtxTs=Date.now();
+    return _stockCtx;
+}
+
 // ==================== LIVE MASTER DATA (Supabase-only, no device storage) ====================
 var LIVE_TABLES = ['material_master','location_master','rack_master'];
 function isLiveTable(k){return LIVE_TABLES.indexOf(k)>-1;}
@@ -146,6 +261,11 @@ async function pullAll() {
         LIVE_TABLES.forEach(function(t){ try { localStorage.removeItem('wms_' + t); } catch(e) {} });
 
         await Promise.all(ALL_TABLES.map(async function(t) {
+            // MASTER TABLES (60k+ rows) — full pull BAND. Ye ab server-side search se chalte hain.
+            if(t==='material_master'||t==='location_master'){
+                if(!MEMORY_DB[t]) MEMORY_DB[t]=[];
+                return;
+            }
             try {
                 var res = await supabaseClient.from(t).select('data');
                 if (res.error) {
@@ -238,6 +358,7 @@ function broadcastRefresh(table) {
 }
 async function pullLiveTable(t) {
     if (!supabaseClient) return;
+    if(t==='material_master'||t==='location_master'){ rtScheduleRender(); return; } // server-driven screens — full pull nahi
     try {
         var res = await supabaseClient.from(t).select('data');
         if (!res.error && res.data) {
@@ -323,7 +444,7 @@ var DB = {
             rows[i].createdAt = rows[i].createdAt || new Date().toISOString();
             d.push(rows[i]);
         }
-        if (isLiveTable(k)) { _localWriteTs[k] = Date.now(); pushRows(k, rows); }
+        if (isLiveTable(k)) { _localWriteTs[k] = Date.now(); pushRows(k, rows); if(rows.length>2000){ MEMORY_DB[k]=[]; _stockCtxTs=0; } }
         else this.set(k, d);
         return rows.length;
     },
@@ -699,10 +820,30 @@ function chkPerm(mod){
     if(!APP.currentUser)return false;
     return APP.currentUser.permissions.modules.indexOf('all')>-1||APP.currentUser.permissions.modules.indexOf(mod)>-1;
 }
+// --- Permission helpers (button-level) ---
+var OLD_ACT_MAP={canSecurityEntry:'inb.gate.create',canUploadInvoice:'inb.inv.upload',canAssignVehicle:'inb.unload.assign',canStartUnloading:'inb.unload.start',canPostVehicle:'inb.grn.post',canApprove:'load.approve',canViewReports:'rep.run',canPutaway:'put.save',canPIV:'piv.save',canPick:'pick.confirm',canLoad:'load.execute',canAdmin:'adm.user.edit'};
+function upgPerms(p){
+    if(!p)p={modules:[],actions:{}};
+    if(p._v2)return p;
+    var a=p.actions||(p.actions={});
+    var OLD2NEW={canSecurityEntry:['inb.gate.create'],canUploadInvoice:['inb.inv.upload'],canAssignVehicle:['inb.unload.assign'],canStartUnloading:['inb.unload.start','inb.unload.partial'],canPostVehicle:['inb.grn.post'],canApprove:['inb.grn.approve','load.approve'],canViewReports:['rep.run','rep.export'],canPutaway:['put.save'],canPIV:['piv.add','piv.save'],canPick:['pick.confirm','pick.notfound','pick.short','pick.list'],canLoad:['load.execute','load.manual'],canAdmin:['adm.user.add','adm.user.edit','adm.user.delete']};
+    for(var k in OLD2NEW){if(a[k]===true){OLD2NEW[k].forEach(function(nid){a[nid]=true;});}}
+    p._v2=true;
+    return p;
+}
+function canBtn(id){
+    if(!APP.currentUser)return false;
+    if(APP.currentUser.role==='Super Admin')return true;
+    if(APP.currentUser.permissions)upgPerms(APP.currentUser.permissions);
+    var a=(APP.currentUser.permissions||{}).actions||{};
+    return a[id]===true;
+}
+function pBtn(id,html){return canBtn(id)?html:'';}
 function chkAct(act){
     if(!APP.currentUser)return false;
     if(APP.currentUser.role==='Super Admin')return true;
-    return APP.currentUser.permissions.actions&&APP.currentUser.permissions.actions[act]===true;
+    if(OLD_ACT_MAP[act])return canBtn(OLD_ACT_MAP[act]);
+    return canBtn(act);
 }
 
 // ==================== SIDEBAR ====================
@@ -886,8 +1027,8 @@ function renderSection(sec,sub){
 function setHtml(html){var el=document.getElementById('sec-content');if(el)el.innerHTML=html;}
 
 // ==================== DASHBOARD ====================
-function renderDashboard(){
-    var vehs=DB.get('vehicles'),locs=DB.get('location_master'),racks=DB.get('rack_master'),td=today();
+async function renderDashboard(){
+    var vehs=DB.get('vehicles'),racks=DB.get('rack_master'),td=today();
     var obds=DB.get('obd_data'),loadedV=DB.get('loaded_vehicles'),grns=DB.get('grn_records'),pickDone=DB.get('picking_done');
     var u=APP.currentUser||{name:'User',role:''};
 
@@ -908,13 +1049,11 @@ function renderDashboard(){
     if(loadReady<0)loadReady=0;
     var pendApprovals=DB.filter('loading_approvals',function(a){return a.status==='Pending';}).length;
 
-    var todayPut=0,todayPIV=0,totalStockQty=0;
-    locs.forEach(function(l){
-        totalStockQty+=(parseInt(l.quantity)||0);
-        if(l.date===td){if(l.action==='PUTAWAY')todayPut++;if(l.action==='PIV')todayPIV++;}
-    });
-    var occSet={};locs.forEach(function(l){if(l.quantity>0)occSet[l.rack]=1;});
-    var occ=0;racks.forEach(function(r){if(occSet[r.rack])occ++;});
+    var todayPut=0,todayPIV=0,totalStockQty=0,occ=0;
+    try{
+        var st=await supabaseClient.rpc('wms_dash_stats');
+        if(st.data){ totalStockQty=Math.round(st.data.totalQty||0); todayPut=st.data.todayPut||0; todayPIV=st.data.todayPIV||0; occ=st.data.occRacks||0; }
+    }catch(e){ console.warn('wms_dash_stats:',e); }
     var totalBins=racks.length,emptyBins=totalBins-occ;
     var utilPct=totalBins>0?Math.round((occ/totalBins)*100):0;
     var shorts=DB.get('short_excess_reports').length+DB.get('short_reports').length;
@@ -1139,16 +1278,16 @@ function addInvMatRow(){
     var div=document.createElement('div');div.innerHTML=invMatRow(imrIdx++);
     c.appendChild(div.firstElementChild);
 }
-function autoFillInvMat(eanInput){
+async function autoFillInvMat(eanInput){
     var ean=eanInput.value.trim().toUpperCase();
     if(!ean||ean.length<5)return;
     var row=eanInput.closest('.inv-mat-row');
     var matInput=row.querySelector('.imr-mat');
     var descInput=row.querySelector('.imr-desc');
-    var mm=DB.filter('material_master',function(m){return (m.ean||'').toUpperCase()===ean;});
-    if(mm.length>0){
-        if(!matInput.value)matInput.value=mm[0].material||'';
-        if(!descInput.value)descInput.value=mm[0].description||'';
+    var mm=await sbFindOne('material_master','ean',ean);   // ★ direct Supabase search
+    if(mm){
+        if(!matInput.value)matInput.value=mm.material||'';
+        if(!descInput.value)descInput.value=mm.description||'';
     }
 }
 function saveSingleInvoice(vehId){
@@ -1972,13 +2111,21 @@ function startPutawayFromStock(grnId){
 }
 
 // --- Putaway Modal (Rack Scan + Manual Qty + Partial Support) ---
-function doPutaway(grnId){
+async function doPutaway(grnId){
     var g=DB.find('grn_records',grnId);if(!g)return;
     var mats=putawayMats(g.invoiceId);
 
     // Show only materials whose putaway is pending
     var pendingMats=mats.filter(function(m){return (m.putawayedQty||0)<m.qty;});
     if(!pendingMats.length){showToast('All materials have been put away already!','success');return;}
+
+    // ★ EAN -> description map ek hi server query se (per-row memory search nahi)
+    var descMap={};
+    var _eans=pendingMats.map(function(m){return m.ean;}).filter(Boolean);
+    if(_eans.length && supabaseClient){
+        var mres=await supabaseClient.from('material_master').select('data').filter('data->>ean','in','('+_eans.join(',')+')');
+        if(!mres.error)(mres.data||[]).forEach(function(r){descMap[r.data.ean]=r.data.description||r.data.material;});
+    }
 
     var rackList=DB.get('rack_master');
     var rOpts='<option value="">-- Scan ya Select --</option>';
@@ -1993,8 +2140,7 @@ function doPutaway(grnId){
     h+='<div id="putawayGRNMatList">';
     pendingMats.forEach(function(m,idx){
         var remaining=m.qty-(m.putawayedQty||0);
-        var matMaster=DB.filter('material_master',function(mm){return mm.ean&&mm.ean===m.ean;});
-        var desc=matMaster.length>0?(matMaster[0].description||matMaster[0].material):m.material;
+        var desc=descMap[m.ean]||m.material;
         var pct=Math.round(((m.putawayedQty||0)/m.qty)*100);
 
         h+='<div id="paGRow_'+idx+'" style="margin-bottom:14px;padding:14px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-secondary)">';
@@ -2052,39 +2198,47 @@ function openScannerForPutawayRackModal(idx){
 }
 
 // --- Save Putaway from GRN (Partial Allowed) ---
-function savePutawayFromGRN(grnId){
+async function savePutawayFromGRN(grnId){
     var g=DB.find('grn_records',grnId);if(!g)return;
     var mats=putawayMats(g.invoiceId);
     var pendingMats=mats.filter(function(m){return (m.putawayedQty||0)<m.qty;});
     var count=0, totalSaved=0;
 
-    pendingMats.forEach(function(m,idx){
+    // ★ EAN -> description map ek hi server query se
+    var descMap={};
+    var _eans2=pendingMats.map(function(m){return m.ean;}).filter(Boolean);
+    if(_eans2.length && supabaseClient){
+        var mres2=await supabaseClient.from('material_master').select('data').filter('data->>ean','in','('+_eans2.join(',')+')');
+        if(!mres2.error)(mres2.data||[]).forEach(function(r){descMap[r.data.ean]=r.data.description||r.data.material;});
+    }
+
+    for(var pi=0;pi<pendingMats.length;pi++){
+      var m=pendingMats[pi],idx=pi;
         var rackField=document.getElementById('paGRackScan_'+idx);
         var qtyField=document.getElementById('paGQty_'+idx);
         var packField=document.getElementById('paGPack_'+idx);
         var boxField=document.getElementById('paGBox_'+idx);
 
-        if(!rackField||!qtyField)return;
+        if(!rackField||!qtyField)continue;
         var rack=rackField.value.trim().toUpperCase();
         var qty=parseInt(qtyField.value)||0;
         var packing=packField?packField.value.trim():'';
         var box=boxField?boxField.value.trim().toUpperCase():'';
         var remaining=m.qty-(m.putawayedQty||0);
 
-        if(!rack||qty<=0)return;
+        if(!rack||qty<=0)continue;
 
         // Validate qty — cannot exceed the remaining quantity
         if(qty>remaining){
             showToast(m.material+': Max '+remaining+' qty allowed','error');
-            return;
+            continue;
         }
 
-        // Description from material master
-        var matMaster=DB.filter('material_master',function(mm){return mm.ean&&mm.ean===m.ean;});
-        var desc=matMaster.length>0?(matMaster[0].description||matMaster[0].material):m.material;
+        // Description from material master (server-side map)
+        var desc=descMap[m.ean]||m.material;
 
-        // Location master mein save
-        addPutawayStock({date:today(),rack:rack,ean:m.ean,material:m.material,description:desc,quantity:qty,packing:packing,box:box,action:'PUTAWAY',user:APP.currentUser.name,dateTime:new Date().toISOString(),grnNo:g.grnNo,invoiceNo:g.invoiceNo,invoiceId:g.invoiceId});
+        // Location master mein save (server-side merge)
+        await addPutawayStock({date:today(),rack:rack,ean:m.ean,material:m.material,description:desc,quantity:qty,packing:packing,box:box,action:'PUTAWAY',user:APP.currentUser.name,dateTime:new Date().toISOString(),grnNo:g.grnNo,invoiceNo:g.invoiceNo,invoiceId:g.invoiceId});
 
         // Invoice materials mein putawayedQty update
         var newPutawayed=(m.putawayedQty||0)+qty;
@@ -2102,7 +2256,7 @@ function savePutawayFromGRN(grnId){
             if(packField)packField.disabled=true;
             if(boxField)boxField.disabled=true;
         }
-    });
+    }
 
     if(!count){showToast('Enter bin and quantity for at least one material','error');return;}
 
@@ -2139,13 +2293,11 @@ function openScannerForPutawayRack(){
     };
     document.getElementById('scannerModal').style.display='flex';focusForBluetoothScanner();
 }
-function lookupPutawayEan(){
+async function lookupPutawayEan(){
     var input=document.getElementById('putawayEanScan');
     var val=input.value.trim().toUpperCase();
     if(!val){showToast('Scan or type an EAN code','error');return;}
-    var mats=DB.get('material_master');
-    var found=null;
-    mats.forEach(function(m){if(!found&&m.ean&&m.ean.toUpperCase()===val)found=m;});
+    var found=await sbFindOne('material_master','ean',val);   // ★ direct Supabase search
     var infoDiv=document.getElementById('putawayMatInfo');
     var msgDiv=document.getElementById('paLookupMsg');
     infoDiv.style.display='';
@@ -2208,14 +2360,15 @@ function renderPutawayList(){
 }
 function removePutawayItem(idx){var r=window._putawayItems.splice(idx,1);renderPutawayList();showToast('Removed','warning');}
 function clearPutawayList(){if(!confirm('Delete all items from the list?'))return;window._putawayItems=[];renderPutawayList();showToast('List clear','warning');}
-function savePutawayScanList(){
+async function savePutawayScanList(){
     var items=window._putawayItems||[];
     if(!items.length){showToast('There are no items in the list','error');return;}
     var count=0;
-    items.forEach(function(item){
-        addPutawayStock({date:today(),rack:item.rack,ean:item.ean,material:item.material,description:item.description||item.material,quantity:item.qty,packing:item.packing,box:item.boxNo,action:'PUTAWAY',user:APP.currentUser.name,dateTime:new Date().toISOString(),grnNo:'EAN-SCAN',invoiceNo:'EAN-SCAN',invoiceId:''});
+    for(var si=0;si<items.length;si++){
+        var item=items[si];
+        await addPutawayStock({date:today(),rack:item.rack,ean:item.ean,material:item.material,description:item.description||item.material,quantity:item.qty,packing:item.packing,box:item.boxNo,action:'PUTAWAY',user:APP.currentUser.name,dateTime:new Date().toISOString(),grnNo:'EAN-SCAN',invoiceNo:'EAN-SCAN',invoiceId:''});
         count++;
-    });
+    }
     addNotif(count+' items putaway via EAN scan by '+APP.currentUser.name,'success');
     logAction('Putaway','EAN_SCAN_SAVE',count+' items');
     showToast(count+' items saved!','success');
@@ -2264,7 +2417,7 @@ function pivCycleEnd(cyc){
 }
 function pivRackStatus(cyc,rack,idx){
     var cycleStart=new Date(cyc.startDate+'T00:00:00').getTime();
-    var recs=DB.get('location_master').filter(function(l){
+    var recs=(window._pivRecsCache||[]).filter(function(l){
         if(l.action!=='PIV'||(l.rack||'')!==rack)return false;
         if(l.cycleNo)return l.cycleNo===cyc.cycleNo;
         var t=new Date(l.dateTime||l.createdAt||0).getTime();
@@ -2324,9 +2477,20 @@ function filterPivCycleTable(){
     var tb=document.getElementById('pivCycleBody');if(tb)tb.innerHTML=buildPivCycleRows(cyc,f);
 }
 function showAddPIVForRack(rack){showAddPIV(rack);}
-function renderPIV(){
-    var locs=DB.get('location_master').filter(function(l){return l.action==='PIV';}).reverse();
+var PIV_SRV={q:'',page:1,per:50,count:0};
+
+async function renderPIV(){
     var cyc=getCurrentPivCycle();
+    var off=(PIV_SRV.page-1)*PIV_SRV.per;
+    var res=await sbSearch('location_master',{search:PIV_SRV.q,cols:['rack','material','ean','description','user'],eq:{action:'PIV'},limit:PIV_SRV.per,offset:off,order:'created_at'});
+    PIV_SRV.count=res.count||0;
+    // Cycle panel + stats ke liye PIV rows cache (server se, latest 10000)
+    var pivAll=await sbSearch('location_master',{eq:{action:'PIV'},limit:10000,order:'created_at'});
+    window._pivRecsCache=pivAll.rows||[];
+    var td=today();
+    var todayRows=window._pivRecsCache.filter(function(l){return l.date===td;});
+    var todayPIV=todayRows.length, todayQty=0;
+    todayRows.forEach(function(l){todayQty+=(parseInt(l.quantity)||0);});
     var h='<div class="section-header"><h2><i class="bx bx-clipboard"></i> Stock Count — PIV (Physical Inventory Verification)</h2>';
     h+='<div style="display:flex;gap:6px;flex-wrap:wrap">';
     if(!cyc)h+='<button class="btn btn-glass" onclick="showPivCycleSetup()"><i class="bx bx-play"></i> Start Count Cycle</button>';
@@ -2336,28 +2500,38 @@ function renderPIV(){
     }
     h+='<button class="btn btn-glass" onclick="showAddPIV()"><i class="bx bx-plus"></i> Add Count</button>';
     h+='</div></div>';
-
-    // Quick stats
-    var todayPIV=locs.filter(function(l){return l.date===today();});
-    var todayQty=0;todayPIV.forEach(function(l){todayQty+=l.quantity;});
     h+='<div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap">';
-    h+='<div style="flex:1;min-width:140px;padding:14px;background:var(--accent-dim);border:1px solid var(--accent);border-radius:var(--radius-sm);text-align:center"><div style="font-size:24px;font-weight:800;color:var(--accent)">'+todayPIV.length+'</div><div style="font-size:10px;color:var(--text-muted);letter-spacing:1px">TODAY ENTRIES</div></div>';
+    h+='<div style="flex:1;min-width:140px;padding:14px;background:var(--accent-dim);border:1px solid var(--accent);border-radius:var(--radius-sm);text-align:center"><div style="font-size:24px;font-weight:800;color:var(--accent)">'+todayPIV+'</div><div style="font-size:10px;color:var(--text-muted);letter-spacing:1px">TODAY ENTRIES</div></div>';
     h+='<div style="flex:1;min-width:140px;padding:14px;background:rgba(0,255,136,0.06);border:1px solid var(--success);border-radius:var(--radius-sm);text-align:center"><div style="font-size:24px;font-weight:800;color:var(--success)">'+todayQty+'</div><div style="font-size:10px;color:var(--text-muted);letter-spacing:1px">TODAY QTY</div></div>';
-    h+='<div style="flex:1;min-width:140px;padding:14px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);text-align:center"><div style="font-size:24px;font-weight:800;color:var(--text-primary)">'+locs.length+'</div><div style="font-size:10px;color:var(--text-muted);letter-spacing:1px">TOTAL ENTRIES</div></div>';
+    h+='<div style="flex:1;min-width:140px;padding:14px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);text-align:center"><div style="font-size:24px;font-weight:800;color:var(--text-primary)">'+PIV_SRV.count.toLocaleString()+'</div><div style="font-size:10px;color:var(--text-muted);letter-spacing:1px">TOTAL ENTRIES</div></div>';
     h+='</div>';
-
     // Cycle Planner
     if(cyc)h+=renderPivCyclePanel(cyc);
     else h+='<div class="card" style="margin-bottom:16px"><div class="empty-state"><i class="bx bx-calendar-exclamation" style="color:var(--warning)"></i><p><strong>No count cycle running.</strong><br>Start a cycle to schedule rack counting — 1 rack = 1.5 days, 60 racks = 90 days.<br>Each rack gets a fixed count window and must be completed on time.</p><button class="btn btn-glass" onclick="showPivCycleSetup()"><i class="bx bx-play"></i> Start Count Cycle</button></div></div>';
-
     // Records
-    h+='<div class="card-title"><i class="bx bx-list-ul"></i> PIV Count Records ('+locs.length+') <span style="font-size:10px;color:var(--text-muted);font-weight:normal">— re-counting the same material at the same rack replaces the old entry (stock is never inflated)</span></div>';
-    h+='<div class="search-box" style="margin-bottom:12px"><i class="bx bx-search"></i><input type="text" id="pivSearchInput" placeholder="Search rack, material, EAN..." oninput="filterPIVTable()"></div>';
-    h+='<div id="pivTableWrap">';
-    h+=buildPIVTable(locs);
-    h+='</div>';
+    h+='<div class="card-title"><i class="bx bx-list-ul"></i> PIV Count Records ('+PIV_SRV.count.toLocaleString()+') <span style="font-size:10px;color:var(--text-muted);font-weight:normal">— re-counting the same material at the same rack replaces the old entry (stock is never inflated)</span></div>';
+    h+='<div class="search-box" style="margin-bottom:12px"><i class="bx bx-search"></i><input type="text" id="pivSearchInput" value="'+esc(PIV_SRV.q)+'" placeholder="Search rack, material, EAN..." oninput="pivSrvType()"></div>';
+    h+='<div id="pivTableWrap">'+buildPIVTable(res.rows)+'</div>';
+    h+=renderPag(PIV_SRV.page,Math.ceil(PIV_SRV.count/PIV_SRV.per)||1,'goPivPage');
     setHtml(h);
+    var f=document.getElementById('pivSearchInput');
+    if(f&&PIV_SRV.q){ f.focus(); f.setSelectionRange(f.value.length,f.value.length); }
 }
+var _pivT=null;
+function pivSrvType(){
+    clearTimeout(_pivT);
+    _pivT=setTimeout(async function(){
+        var inp=document.getElementById('pivSearchInput'); if(!inp)return;
+        PIV_SRV.q=inp.value.trim(); PIV_SRV.page=1;
+        var res=await sbSearch('location_master',{search:PIV_SRV.q,cols:['rack','material','ean','description','user'],eq:{action:'PIV'},limit:PIV_SRV.per,offset:0,order:'created_at'});
+        PIV_SRV.count=res.count||0;
+        var w=document.getElementById('pivTableWrap');
+        if(w)w.innerHTML=buildPIVTable(res.rows)+renderPag(PIV_SRV.page,Math.ceil(PIV_SRV.count/PIV_SRV.per)||1,'goPivPage');
+        var f2=document.getElementById('pivSearchInput');
+        if(f2){ f2.focus(); f2.setSelectionRange(f2.value.length,f2.value.length); }
+    },350);
+}
+async function goPivPage(p){ PIV_SRV.page=p; await renderPIV(); }
 
 function buildPIVTable(locs){
     var h='<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>Date</th><th>Time</th><th>Cycle</th><th>Rack</th><th>Material</th><th>Description</th><th>EAN</th><th>Qty</th><th>Packing</th><th>Box</th><th>Done By</th><th></th></tr></thead><tbody>';
@@ -2370,15 +2544,11 @@ function buildPIVTable(locs){
     return h;
 }
 
-function filterPIVTable(){
-    var q=document.getElementById('pivSearchInput').value.trim().toLowerCase();
-    var locs=DB.get('location_master').filter(function(l){return l.action==='PIV';}).reverse();
-    if(q){
-        locs=locs.filter(function(l){
-            return (l.rack||'').toLowerCase().indexOf(q)>-1||(l.material||'').toLowerCase().indexOf(q)>-1||(l.ean||'').toLowerCase().indexOf(q)>-1||(l.description||'').toLowerCase().indexOf(q)>-1||(l.user||'').toLowerCase().indexOf(q)>-1;
-        });
-    }
-    document.getElementById('pivTableWrap').innerHTML=buildPIVTable(locs);
+var _pivT2=null;
+async function filterPIVTable(){
+    var q=document.getElementById('pivSearchInput').value.trim();
+    var res=await sbSearch('location_master',{search:q,cols:['rack','material','ean','description','user'],eq:{action:'PIV'},limit:200,offset:0,order:'created_at'});
+    document.getElementById('pivTableWrap').innerHTML=buildPIVTable(res.rows);
 }
 
 // --- Add PIV Modal ---
@@ -2541,15 +2711,11 @@ function openScannerForPIVRack(){
 }
 
 // --- EAN Lookup from Material Master ---
-function lookupPIVEan(){
+async function lookupPIVEan(){
     var val=document.getElementById('pivEanScan').value.trim().toUpperCase();
     if(!val){showToast('Please scan or type an EAN number','error');return;}
 
-    var mats=DB.get('material_master');
-    var found=null;
-    mats.forEach(function(m){
-        if(!found&&m.ean&&m.ean.toUpperCase()===val)found=m;
-    });
+    var found=await sbFindOne('material_master','ean',val);   // ★ direct Supabase search
 
     var infoDiv=document.getElementById('pivMatInfo');
     var msgDiv=document.getElementById('pivLookupMsg');
@@ -2574,7 +2740,7 @@ function lookupPIVEan(){
 // --- Save PIV (Re-count Rule) ---
 // 1. Same material + same rack + same qty   → record stays as-is (no change)
 // 2. Same material + same rack + new qty    → OLD entry DELETED, new entry ADDED (stock never increases)
-function savePIV(){
+async function savePIV(){
     var ean=document.getElementById('pivEanSaved')?document.getElementById('pivEanSaved').value.trim():document.getElementById('pivEanScan').value.trim().toUpperCase();
     var material=document.getElementById('pivMaterial').value.trim();
     var description=document.getElementById('pivDescription').value.trim();
@@ -2605,10 +2771,9 @@ function savePIV(){
         cycleNo:cyc?cyc.cycleNo:null
     };
 
-    // --- Find the most recent PIV entry for the SAME material + SAME rack (location) ---
-    var prev=DB.get('location_master').filter(function(l){
-        return l.action==='PIV' && l.rack===rack && (l.material||'').toUpperCase()===material.toUpperCase();
-    }).sort(function(a,b){return new Date(b.dateTime||b.createdAt||0)-new Date(a.dateTime||a.createdAt||0);})[0]||null;
+    // --- Find the most recent PIV entry for the SAME material + SAME rack (SERVER-side) ---
+    var prevRes=await sbSearch('location_master',{eq:{action:'PIV',rack:rack},limit:50,order:'created_at'});
+    var prev=prevRes.rows.filter(function(l){return (l.material||'').toUpperCase()===material.toUpperCase();})[0]||null;
 
     if(prev && prev.quantity===qty){
         // RULE 1: same material, same location, same qty → no change, record stays as-is
@@ -2640,45 +2805,60 @@ function savePIV(){
 }
 
 // ==================== LOCATION MASTER ====================
-function renderLocationMaster(){
-    var locs=DB.get('location_master').filter(function(l){return l.quantity>0;}).reverse();
-    var pg=paginate(locs,APP.locPage,APP.locPerPage||50);
-    var h='<div class="section-header"><h2><i class="bx bx-map-pin"></i> Warehouse Stock ('+locs.length+')</h2>';
+var LOC_SRV={q:'',page:1,per:50,count:0,action:''};
+
+async function renderLocationMaster(){
+    var off=(LOC_SRV.page-1)*LOC_SRV.per;
+    var eq={}; if(LOC_SRV.action)eq.action=LOC_SRV.action;
+    var res=await sbSearch('location_master',{search:LOC_SRV.q,cols:['rack','material','ean','description','user'],eq:eq,limit:LOC_SRV.per,offset:off,order:'created_at'});
+    LOC_SRV.count=res.count||0;
+    var putawayC=await sbCount('location_master',{action:'PUTAWAY'});
+    var pivC=await sbCount('location_master',{action:'PIV'});
+    var scanC=await sbCount('location_master',{action:'EAN-SCAN'});
+    var h='<div class="section-header"><h2><i class="bx bx-map-pin"></i> Warehouse Stock ('+LOC_SRV.count.toLocaleString()+')</h2>';
     h+='<div style="display:flex;gap:6px;flex-wrap:wrap">';
     h+='<button class="btn btn-glass" onclick="showLocBulkUpload()"><i class="bx bx-upload"></i> Bulk Upload</button>';
     h+='<button class="btn btn-glass" onclick="downloadLocTemplate()"><i class="bx bx-file"></i> Template</button>';
-    h+='<button class="btn btn-glass" onclick="exportTableExcel(\'location_master\',\'Location_Master\')"><i class="bx bx-download"></i> Excel</button>';
+    h+='<button class="btn btn-glass" onclick="exportTableExcel(&#39;location_master&#39;,&#39;Location_Master&#39;)"><i class="bx bx-download"></i> Excel</button>';
     h+='<button class="btn btn-glass" onclick="showLocReport()"><i class="bx bx-bar-chart"></i> Report</button>';
     h+='</div></div>';
-
-    // Quick Stats
-    var putawayC=0,pivC=0,eanscanC=0,otherC=0,totalQty=0;
-    locs.forEach(function(l){totalQty+=l.quantity;if(l.action==='PUTAWAY')putawayC++;else if(l.action==='PIV')pivC++;else if(l.action==='EAN-SCAN')eanscanC++;else otherC++;});
     h+='<div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap">';
-    h+='<div style="flex:1;min-width:100px;padding:10px;background:var(--accent-dim);border:1px solid var(--accent);border-radius:var(--radius-sm);text-align:center"><div style="font-size:18px;font-weight:800;color:var(--accent)">'+locs.length+'</div><div style="font-size:9px;color:var(--text-muted);letter-spacing:1px">TOTAL ROWS</div></div>';
-    h+='<div style="flex:1;min-width:100px;padding:10px;background:rgba(0,255,136,0.06);border:1px solid var(--success);border-radius:var(--radius-sm);text-align:center"><div style="font-size:18px;font-weight:800;color:var(--success)">'+totalQty+'</div><div style="font-size:9px;color:var(--text-muted);letter-spacing:1px">TOTAL QTY</div></div>';
-    h+='<div style="flex:1;min-width:80px;padding:10px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);text-align:center"><div style="font-size:16px;font-weight:700;color:var(--accent)">'+putawayC+'</div><div style="font-size:9px;color:var(--text-muted)">PUTAWAY</div></div>';
-    h+='<div style="flex:1;min-width:80px;padding:10px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);text-align:center"><div style="font-size:16px;font-weight:700;color:var(--info)">'+pivC+'</div><div style="font-size:9px;color:var(--text-muted)">PIV</div></div>';
-    h+='<div style="flex:1;min-width:80px;padding:10px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);text-align:center"><div style="font-size:16px;font-weight:700;color:var(--accent2)">'+eanscanC+'</div><div style="font-size:9px;color:var(--text-muted)">EAN SCAN</div></div>';
+    h+='<div style="flex:1;min-width:100px;padding:10px;background:var(--accent-dim);border:1px solid var(--accent);border-radius:var(--radius-sm);text-align:center"><div style="font-size:18px;font-weight:800;color:var(--accent)">'+LOC_SRV.count.toLocaleString()+'</div><div style="font-size:9px;color:var(--text-muted);letter-spacing:1px">TOTAL ROWS</div></div>';
+    h+='<div style="flex:1;min-width:80px;padding:10px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);text-align:center"><div style="font-size:16px;font-weight:700;color:var(--accent)">'+putawayC.toLocaleString()+'</div><div style="font-size:9px;color:var(--text-muted)">PUTAWAY</div></div>';
+    h+='<div style="flex:1;min-width:80px;padding:10px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);text-align:center"><div style="font-size:16px;font-weight:700;color:var(--info)">'+pivC.toLocaleString()+'</div><div style="font-size:9px;color:var(--text-muted)">PIV</div></div>';
+    h+='<div style="flex:1;min-width:80px;padding:10px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);text-align:center"><div style="font-size:16px;font-weight:700;color:var(--accent2)">'+scanC.toLocaleString()+'</div><div style="font-size:9px;color:var(--text-muted)">EAN SCAN</div></div>';
     h+='</div>';
-
-    // Search + Filter
     h+='<div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">';
-    h+='<div class="search-box" style="flex:1;min-width:200px"><i class="bx bx-search"></i><input type="text" id="locSearch" placeholder="Search rack, material, EAN, user..." oninput="searchLoc()"></div>';
-    h+='<select class="form-input" id="locActionFilter" onchange="searchLoc()" style="width:auto;min-width:130px;font-size:12px"><option value="">All Actions</option><option value="PUTAWAY">PUTAWAY</option><option value="PIV">PIV</option><option value="EAN-SCAN">EAN-SCAN</option></select>';
-    h+='<select class="form-input" id="locPerPageSel" onchange="APP.locPerPage=parseInt(this.value)||50;APP.locPage=1;renderLocationMaster();" style="width:auto;min-width:100px;font-size:12px"><option value="50">50/Page</option><option value="100">100/Page</option><option value="200">200/Page</option><option value="500">500/Page</option></select>';
+    h+='<div class="search-box" style="flex:1;min-width:200px"><i class="bx bx-search"></i><input type="text" id="locSearch" value="'+esc(LOC_SRV.q)+'" placeholder="Search rack, material, EAN, user..." oninput="locSrvType()"></div>';
+    h+='<select class="form-input" id="locActionFilter" onchange="locSrvFilter(this.value)" style="width:auto;min-width:130px;font-size:12px"><option value="">All Actions</option><option value="PUTAWAY">PUTAWAY</option><option value="PIV">PIV</option><option value="EAN-SCAN">EAN-SCAN</option></select>';
+    h+='<select class="form-input" id="locPerPageSel" onchange="locSrvPerPage(this.value)" style="width:auto;min-width:100px;font-size:12px"><option value="50">50/Page</option><option value="100">100/Page</option><option value="200">200/Page</option><option value="500">500/Page</option></select>';
     h+='</div>';
-
-    h+='<div id="locTable">'+buildLocTable(pg.items)+'</div>';
-    h+=renderPag(APP.locPage,pg.pages,'goLocPage');
+    h+='<div id="locTable">'+buildLocTable(res.rows)+'</div>';
+    h+=renderPag(LOC_SRV.page,Math.ceil(LOC_SRV.count/LOC_SRV.per)||1,'goLocPage');
     setHtml(h);
+    var af=document.getElementById('locActionFilter'); if(af)af.value=LOC_SRV.action;
+    var ps=document.getElementById('locPerPageSel'); if(ps)ps.value=String(LOC_SRV.per);
+    var sf=document.getElementById('locSearch');
+    if(sf&&LOC_SRV.q){ sf.focus(); sf.setSelectionRange(sf.value.length,sf.value.length); }
 }
+var _locT=null;
+function locSrvType(){
+    clearTimeout(_locT);
+    _locT=setTimeout(async function(){
+        var inp=document.getElementById('locSearch'); if(!inp)return;
+        LOC_SRV.q=inp.value.trim(); LOC_SRV.page=1;
+        await renderLocationMaster();
+    },350);
+}
+function locSrvFilter(v){ LOC_SRV.action=v; LOC_SRV.page=1; renderLocationMaster(); }
+function locSrvPerPage(v){ LOC_SRV.per=parseInt(v)||50; LOC_SRV.page=1; renderLocationMaster(); }
+async function goLocPage(p){ LOC_SRV.page=p; await renderLocationMaster(); }
 
 function buildLocTable(locs){
     var h='<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>Date</th><th>Rack</th><th>Material</th><th>Description</th><th>EAN</th><th>Qty</th><th>Action</th><th>Packing</th><th>Box</th><th>User</th><th></th></tr></thead><tbody>';
     if(!locs.length)h+='<tr><td colspan="12" style="text-align:center;color:var(--text-muted);padding:20px"><i class="bx bx-inbox" style="font-size:20px;display:block;margin-bottom:6px"></i>No data</td></tr>';
     else {
-        var startIdx=(APP.locPage-1)*(APP.locPerPage||50);
+        var startIdx=(LOC_SRV.page-1)*LOC_SRV.per;
         locs.forEach(function(l,i){
             var actCls=l.action==='PUTAWAY'?'badge-accent':(l.action==='PIV'?'badge-info':(l.action==='EAN-SCAN'?'badge-success':'badge-warning'));
             h+='<tr><td>'+(startIdx+i+1)+'</td><td style="font-size:11px">'+esc(l.date)+'</td><td><span class="badge badge-accent">'+esc(l.rack)+'</span></td><td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><strong>'+esc(l.material)+'</strong></td><td style="font-size:10px;color:var(--text-secondary);max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(l.description||'-')+'</td><td style="font-family:var(--font-display);font-size:9px">'+esc(l.ean||'-')+'</td><td><strong style="color:var(--accent)">'+l.quantity+'</strong></td><td><span class="badge '+actCls+'">'+esc(l.action)+'</span></td><td>'+esc(l.packing||'-')+'</td><td>'+esc(l.box||'-')+'</td><td style="font-size:10px;color:var(--text-secondary)">'+esc(l.user||'-')+'</td><td><button class="btn btn-danger btn-sm" onclick="deleteLocRow(\''+l.id+'\')" title="Delete"><i class="bx bx-trash"></i></button></td></tr>';
@@ -2687,19 +2867,7 @@ function buildLocTable(locs){
     h+='</tbody></table></div>';return h;
 }
 
-function goLocPage(p){APP.locPage=p;renderLocationMaster();}
-function searchLoc(){
-    var q=document.getElementById('locSearch').value.trim().toLowerCase();
-    var actF=document.getElementById('locActionFilter').value;
-    var locs=DB.get('location_master').filter(function(l){return l.quantity>0;}).reverse();
-    if(q)locs=locs.filter(function(l){return(l.rack||'').toLowerCase().indexOf(q)>-1||(l.material||'').toLowerCase().indexOf(q)>-1||(l.ean||'').toLowerCase().indexOf(q)>-1||(l.description||'').toLowerCase().indexOf(q)>-1||(l.user||'').toLowerCase().indexOf(q)>-1;});
-    if(actF)locs=locs.filter(function(l){return l.action===actF;});
-    var total=locs.length;
-    var shown=locs.slice(0,100);   // 25k rows par bhi smooth
-    var h=buildLocTable(shown);
-    if(total>shown.length)h+='<div style="text-align:center;padding:10px;font-size:11px;color:var(--text-muted)">Showing first '+shown.length.toLocaleString()+' of '+total.toLocaleString()+' matches — type more letters to narrow down</div>';
-    document.getElementById('locTable').innerHTML=h;
-}
+async function goLocPageOld(p){LOC_SRV.page=p;renderLocationMaster();}
 
 // --- Delete Single Row ---
 function deleteLocRow(id){
@@ -2895,7 +3063,8 @@ function processLocBulkUpload(){
 }
 
 // --- Location Report ---
-function showLocReport(){
+async function showLocReport(){
+    await sbPullFull('location_master');   // server se poora data on-demand
     var locs=DB.get('location_master');
 
     // Action wise summary
@@ -2967,7 +3136,8 @@ function showLocReport(){
 }
 
 // --- Report PDF Download ---
-function downloadLocReportPDF(){
+async function downloadLocReportPDF(){
+    await sbPullFull('location_master');
     var locs=DB.get('location_master');
     var actionMap={},rackMap={},totalQty=0;
     locs.forEach(function(l){
@@ -3028,9 +3198,9 @@ function downloadLocReportPDF(){
 }
 
 // ==================== BIN MASTER ====================
-function renderRackMaster(){
+async function renderRackMaster(){
     var bins=DB.get('rack_master');
-    var locs=DB.get('location_master');
+    await sbPullFull('location_master',120000);   // occupancy ke liye on-demand (2 min cache)
 
     var h='<div class="section-header"><h2><i class="bx bx-grid-alt"></i> Storage Bins ('+bins.length+')</h2>';
     h+='<div style="display:flex;gap:6px;flex-wrap:wrap">';
@@ -3095,11 +3265,11 @@ function buildBinTable(allBins,pageBins,occMap){
 
 function goBinPage(p){APP.binPage=p;renderRackMaster();}
 
-function filterBinGrid(){
+async function filterBinGrid(){
     var q=(document.getElementById('binSearchInput').value||'').trim().toLowerCase();
     var statusF=document.getElementById('binStatusFilter').value;
     var bins=DB.get('rack_master');
-    var locs=DB.get('location_master');
+    await sbPullFull('location_master',120000);
     var occMap=buildOccMap();
     if(q)bins=bins.filter(function(b){return(b.rack||'').toLowerCase().indexOf(q)>-1;});
     if(statusF==='occupied')bins=bins.filter(function(b){return occMap[rkey(b.rack)];});
@@ -3250,14 +3420,35 @@ function processBulkBinUpload(){
 }
 
 // ==================== MATERIAL MASTER ====================
-function renderMaterialMaster(){
-    var mats=DB.get('material_master');var pg=paginate(mats,APP.matPage,APP.matPerPage);
-    var h='<div class="section-header"><h2><i class="bx bx-label"></i> Product Master ('+mats.length+')</h2><div style="display:flex;gap:6px"><button class="btn btn-glass" onclick="exportTableExcel(\'material_master\',\'Material_Master\')"><i class="bx bx-download"></i> Excel</button><button class="btn btn-glass" onclick="showBulkUploadMaterial()"><i class="bx bx-upload"></i> Bulk Upload</button><button class="btn btn-glass" onclick="showAddMaterial()"><i class="bx bx-plus"></i> Add</button></div></div>';
-    h+='<div class="search-box"><i class="bx bx-search"></i><input type="text" id="matSearch" placeholder="Search material, EAN..." oninput="searchMat()"></div>';
-    h+='<div id="matTable">'+buildMatTable(pg.items)+'</div>';
-    h+=renderPag(APP.matPage,pg.pages,'goMatPage');
+var MAT_SRV={q:'',page:1,per:50,count:0};
+
+async function renderMaterialMaster(){
+    var off=(MAT_SRV.page-1)*MAT_SRV.per;
+    var res=await sbSearch('material_master',{search:MAT_SRV.q,cols:['material','ean','description'],limit:MAT_SRV.per,offset:off,order:'created_at'});
+    MAT_SRV.count=res.count||0;
+    var h='<div class="section-header"><h2><i class="bx bx-label"></i> Product Master ('+MAT_SRV.count.toLocaleString()+')</h2><div style="display:flex;gap:6px"><button class="btn btn-glass" onclick="exportTableExcel(&#39;material_master&#39;,&#39;Material_Master&#39;)"><i class="bx bx-download"></i> Excel</button><button class="btn btn-glass" onclick="showBulkUploadMaterial()"><i class="bx bx-upload"></i> Bulk Upload</button><button class="btn btn-glass" onclick="showAddMaterial()"><i class="bx bx-plus"></i> Add</button></div></div>';
+    h+='<div class="search-box"><i class="bx bx-search"></i><input type="text" id="matSearch" value="'+esc(MAT_SRV.q)+'" placeholder="Search material, EAN..." oninput="matSrvType()"></div>';
+    h+='<div id="matTable">'+buildMatTable(res.rows)+'</div>';
+    h+=renderPag(MAT_SRV.page,Math.ceil(MAT_SRV.count/MAT_SRV.per)||1,'goMatPage');
     setHtml(h);
+    var f=document.getElementById('matSearch');
+    if(f&&MAT_SRV.q){ f.focus(); f.setSelectionRange(f.value.length,f.value.length); }
 }
+var _matT=null;
+function matSrvType(){
+    clearTimeout(_matT);
+    _matT=setTimeout(async function(){
+        var inp=document.getElementById('matSearch'); if(!inp)return;
+        MAT_SRV.q=inp.value.trim(); MAT_SRV.page=1;
+        var res=await sbSearch('material_master',{search:MAT_SRV.q,cols:['material','ean','description'],limit:MAT_SRV.per,offset:0,order:'created_at'});
+        MAT_SRV.count=res.count||0;
+        var w=document.getElementById('matTable');
+        if(w)w.innerHTML=buildMatTable(res.rows)+renderPag(MAT_SRV.page,Math.ceil(MAT_SRV.count/MAT_SRV.per)||1,'goMatPage');
+        var f2=document.getElementById('matSearch');
+        if(f2){ f2.focus(); f2.setSelectionRange(f2.value.length,f2.value.length); }
+    },350);
+}
+async function goMatPage(p){ MAT_SRV.page=p; await renderMaterialMaster(); }
 
 // ========== BULK UPLOAD FEATURE ==========
 function showBulkUploadMaterial(){
@@ -3543,17 +3734,7 @@ function buildMatTable(mats){
     else mats.forEach(function(m){h+='<tr><td><strong>'+esc(m.material)+'</strong></td><td>'+esc(m.description)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(m.ean)+'</td><td>'+esc(m.division)+'</td><td>'+esc(m.brand)+'</td><td><div class="table-actions"><button class="btn btn-glass btn-sm" onclick="editMaterial(\''+m.id+'\')"><i class="bx bx-edit"></i></button><button class="btn btn-danger btn-sm" onclick="deleteMaterial(\''+m.id+'\')"><i class="bx bx-trash"></i></button></div></td></tr>';});
     h+='</tbody></table></div>';return h;
 }
-function goMatPage(p){APP.matPage=p;renderMaterialMaster();}
-function searchMat(){
-    var q=document.getElementById('matSearch').value.trim().toLowerCase();
-    var mats=DB.get('material_master');
-    if(q)mats=mats.filter(function(m){return(m.material||'').toLowerCase().indexOf(q)>-1||(m.ean||'').toLowerCase().indexOf(q)>-1;});
-    var total=mats.length;
-    var shown=mats.slice(0,100);   // 60k rows par bhi typing smooth
-    var h=buildMatTable(shown);
-    if(total>shown.length)h+='<div style="text-align:center;padding:10px;font-size:11px;color:var(--text-muted)">Showing first '+shown.length.toLocaleString()+' of '+total.toLocaleString()+' matches — type more letters to narrow down</div>';
-    document.getElementById('matTable').innerHTML=h;
-}
+async function goMatPageOld(p){APP.matPage=p;renderMaterialMaster();}
 function showAddMaterial(){
     var h='<div class="form-row"><div class="form-group"><label>Material Name <span class="req">*</span></label><input type="text" id="matName" class="form-input"></div><div class="form-group"><label>EAN <span class="req">*</span></label><input type="text" id="matEan" class="form-input"></div></div>';
     h+='<div class="form-row"><div class="form-group"><label>Description</label><input type="text" id="matDesc" class="form-input"></div><div class="form-group"><label>Division</label><input type="text" id="matDiv" class="form-input"></div><div class="form-group"><label>Brand</label><input type="text" id="matBrand" class="form-input"></div></div>';
@@ -3565,15 +3746,17 @@ function saveMaterial(){
     DB.add('material_master',{material:name,ean:ean,description:document.getElementById('matDesc').value.trim(),division:document.getElementById('matDiv').value.trim(),brand:document.getElementById('matBrand').value.trim()});
     logAction('Material','ADD',name);showToast('Material added!','success');closeModal();renderMaterialMaster();
 }
-function editMaterial(id){
-    var m=DB.find('material_master',id);if(!m)return;
+async function editMaterial(id){
+    var m=await sbGetById('material_master',id);   // ★ server se row
+    if(!m){showToast('Record not found','error');return;}
     var h='<div class="form-row"><div class="form-group"><label>Material Name</label><input type="text" id="emName" class="form-input" value="'+esc(m.material)+'"></div><div class="form-group"><label>EAN</label><input type="text" id="emEan" class="form-input" value="'+esc(m.ean)+'"></div></div>';
     h+='<div class="form-row"><div class="form-group"><label>Description</label><input type="text" id="emDesc" class="form-input" value="'+esc(m.description||'')+'"></div><div class="form-group"><label>Division</label><input type="text" id="emDiv" class="form-input" value="'+esc(m.division||'')+'"></div><div class="form-group"><label>Brand</label><input type="text" id="emBrand" class="form-input" value="'+esc(m.brand||'')+'"></div></div>';
     showModal('Edit Material',h,'','<button class="btn btn-glass" onclick="closeModal()">Cancel</button><button class="btn btn-glass" onclick="updateMaterial(\''+id+'\')"><i class="bx bx-check"></i> Update</button>');
 }
-function updateMaterial(id){
-    DB.update('material_master',id,{material:document.getElementById('emName').value.trim(),ean:document.getElementById('emEan').value.trim(),description:document.getElementById('emDesc').value.trim(),division:document.getElementById('emDiv').value.trim(),brand:document.getElementById('emBrand').value.trim()});
-    logAction('Material','UPDATE','Material '+id+' updated');showToast('Material updated!','success');closeModal();renderMaterialMaster();
+async function updateMaterial(id){
+    var r=await sbUpdate('material_master',id,{material:document.getElementById('emName').value.trim(),ean:document.getElementById('emEan').value.trim(),description:document.getElementById('emDesc').value.trim(),division:document.getElementById('emDiv').value.trim(),brand:document.getElementById('emBrand').value.trim()});
+    if(!r){showToast('Update failed — row not found','error');return;}
+    logAction('Material','UPDATE','Material updated');showToast('Material updated!','success');closeModal();renderMaterialMaster();
 }
 function deleteMaterial(id){if(!confirm('Delete?'))return;DB.remove('material_master',id);showToast('Deleted','success');renderMaterialMaster();}
 
@@ -3727,17 +3910,18 @@ function addLock(obd,mat,loc,qty,extra){
 }
 
 // ---------- LOCK LOCATIONS for an OBD (same return shape as before) ----------
-function lockLocationsForOBD(obdId,obdNo){
+async function lockLocationsForOBD(obdId,obdNo){
     var obd=DB.find('obd_data',obdId);
     var res={totalMaterials:0,fullyLocked:0,partialLocked:0,noStock:0,details:[]};
     if(!obd)return res;
     var mats=groupMats(obd),anchor=null;res.totalMaterials=mats.length;
+    var _sctx=await ensureStockCtx();   // ★ stock map server se (60s cache)
     mats.forEach(function(m){
         if(m.qty<=0)return;
         var own=DB.filter('location_locks',function(l){return l.obdId===obdId&&l.ean===m.ean&&isActiveLock(l);});
         var have=sumBy(own,function(l){return l.lockedQty;}),locked=0,need=m.qty-have;
         if(need>0&&m.ean){
-            var al=allocateMaterial(m.ean,need,null,anchor,null);
+            var al=allocateMaterial(m.ean,need,null,anchor,_sctx);
             al.picks.forEach(function(pk){addLock(obd,m,pk.loc,pk.qty);});
             locked=al.locked;if(al.picks.length)anchor=al.anchor;
         }else if(own.length)anchor=own[own.length-1].rack;
@@ -3797,8 +3981,8 @@ function stockBadge(info){
 }
 
 // ---------- Create Outbound Delivery (OBD upload + stock view) ----------
-function renderOBDUpload(){
-    var obds=DB.get('obd_data').slice().reverse(),ctx=makeAvailCtx();
+async function renderOBDUpload(){
+    var obds=DB.get('obd_data').slice().reverse(),ctx=await ensureStockCtx();
     var h='<div class="section-header"><h2><i class="bx bx-upload"></i> Create Outbound Delivery</h2></div>';
     h+='<div class="card"><div class="card-title"><i class="bx bx-file"></i> Upload OBD (Bulk Excel)</div>';
     h+='<label class="btn btn-glass" style="cursor:pointer;margin-bottom:12px"><i class="bx bx-upload"></i> Choose OBD File<input type="file" id="obdFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="document.getElementById(\'obdFName\').innerText=this.files[0].name"></label>';
@@ -3847,7 +4031,7 @@ function processOBDUpload(){
 }
 
 // ---------- Picking Assign (priority queue + auto lock) ----------
-function renderPickingAssign(){
+async function renderPickingAssign(){
     var plIds={};
     DB.filter('picking_assignments',function(a){return a.type==='pickandload'&&a.status==='Assigned';}).forEach(function(a){(a.obdIds||[]).forEach(function(id){plIds[id]=1;});});
     var obds=DB.get('obd_data').filter(function(o){return o.status==='Pending'&&!plIds[o.id];});
@@ -3868,7 +4052,7 @@ function renderPickingAssign(){
         h+='<div id="manualUserWrap" style="display:none;margin-bottom:12px"><div class="form-group"><label>Enter User Name</label><input type="text" id="pickAssignUserManual" class="form-input" style="max-width:300px" placeholder="Type user name..."></div></div>';
         h+='<div class="pq-toolbar"><label><input type="checkbox" onchange="pqToggleAll(this.checked)"> Select all</label><span class="pq-hint">▲▼ to change sequence — the OBD on top gets the best / nearest locations first. ★ = Urgent (top priority).</span></div>';
         h+='<div id="pqList" class="pq-list">';
-        var ctx=makeAvailCtx();
+        var ctx=await ensureStockCtx();   // ★
         obds.forEach(function(o,i){
             var tq=sumBy(o.materials||[],function(m){return m.qty;});
             h+='<div class="pq-row" data-id="'+o.id+'" data-no="'+esc(o.obdNo)+'">';
@@ -3924,7 +4108,7 @@ function pqToggleUrgent(btn){
 }
 function pqToggleAll(c){document.querySelectorAll('#pqList .obd-chk').forEach(function(x){x.checked=c;});}
 
-function doPickingAssign(){
+async function doPickingAssign(){
     var sel=document.getElementById('pickAssignUser');
     var manualInp=document.getElementById('pickAssignUserManual');
     var userId='',userName='';
@@ -3939,12 +4123,13 @@ function doPickingAssign(){
     if(!rows.length){showToast('Select at least one OBD','error');return;}
     rows.sort(function(a,b){return ((b.urgent?1:0)-(a.urgent?1:0))||(a.i-b.i);});
     var results=[];
-    rows.forEach(function(r,idx){
+    for(var ri=0;ri<rows.length;ri++){
+        var r=rows[ri],idx=ri;
         var pr=r.urgent?'Urgent':'Normal';
         DB.add('picking_assignments',{obdId:r.id,obdNo:r.no,assignedTo:userId,assignedToName:userName,status:'Assigned',assignedAt:nowISO(),priority:pr,seq:idx+1});
         DB.update('obd_data',r.id,{status:'Assigned',priority:pr});
-        results.push({seq:idx+1,obdNo:r.no,priority:pr,result:lockLocationsForOBD(r.id,r.no)});
-    });
+        results.push({seq:idx+1,obdNo:r.no,priority:pr,result:await lockLocationsForOBD(r.id,r.no)});
+    }
     logAction('Picking','ASSIGN',rows.length+' OBDs assigned to '+userName+' with location locks (sequence wise)');
     showToast(rows.length+' OBDs assigned!','success');
     var sh='<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>OBD</th><th>Priority</th><th>Lock Result</th></tr></thead><tbody>';
@@ -3959,33 +4144,34 @@ function doPickingAssign(){
     sh+='</tbody></table></div>';
     showModal('<i class="bx bx-lock"></i> Location Lock Summary',sh,'lg','<button class="btn btn-glass" onclick="closeModal();renderPickingAssign()"><i class="bx bx-check"></i> OK</button>');
 }
-function topUpAssign(assignId){
+async function topUpAssign(assignId){
     var a=DB.find('picking_assignments',assignId);if(!a)return;
-    var r=lockLocationsForOBD(a.obdId,a.obdNo);
+    var r=await lockLocationsForOBD(a.obdId,a.obdNo);
     var short=sumBy(r.details,function(d){return d.short;});
     showToast(short?'Still remaining: '+short+' qty short':'Fully locked!',short?'warning':'success');
     renderPickingAssign();
 }
-function topUpAll(){
+async function topUpAll(){
     var as=DB.filter('picking_assignments',function(a){return a.status==='Assigned'&&a.type!=='pickandload';});
     as.sort(function(a,b){return ((b.priority==='Urgent')-(a.priority==='Urgent'))||((a.seq||999)-(b.seq||999))||String(a.assignedAt).localeCompare(String(b.assignedAt));});
     var fixed=0;
-    as.forEach(function(a){
+    for(var ai=0;ai<as.length;ai++){
+        var a=as[ai];
         var before=sumBy(DB.filter('location_locks',function(l){return l.obdId===a.obdId&&isActiveLock(l);}),function(l){return l.lockedQty;});
-        lockLocationsForOBD(a.obdId,a.obdNo);
+        await lockLocationsForOBD(a.obdId,a.obdNo);
         var after=sumBy(DB.filter('location_locks',function(l){return l.obdId===a.obdId&&isActiveLock(l);}),function(l){return l.lockedQty;});
         fixed+=after-before;
-    });
+    }
     showToast(fixed+' qty newly locked','success');renderPickingAssign();
 }
-function makeUrgentAssign(assignId){
+async function makeUrgentAssign(assignId){
     var a=DB.find('picking_assignments',assignId);if(!a)return;
     if(!confirm('Is OBD ko URGENT banayein? Zarurat padi to dusri (non-urgent, unpicked) OBD ke locks isko mil jayenge.'))return;
     DB.update('picking_assignments',assignId,{priority:'Urgent',seq:0});
     DB.update('obd_data',a.obdId,{priority:'Urgent'});
     DB.filter('location_locks',function(l){return l.obdId===a.obdId&&isActiveLock(l);}).forEach(function(l){DB.update('location_locks',l.id,{priority:'Urgent'});});
     var obd=DB.find('obd_data',a.obdId);
-    lockLocationsForOBD(a.obdId,a.obdNo);
+    await lockLocationsForOBD(a.obdId,a.obdNo);
     var stolen=stealLocksForUrgent(obd);
     logAction('Picking','URGENT',a.obdNo+' marked urgent, '+stolen+' qty re-allocated');
     showToast(a.obdNo+' urgent! '+stolen+' qty re-allocated','success');renderPickingAssign();
@@ -4136,7 +4322,7 @@ function openNotFound(lockId){
     h+='<div class="form-group"><label>What should be sent to the Admin?</label><label class="pk-radio"><input type="radio" name="nfAct" value="newloc" checked> Request new location + send report</label><label class="pk-radio"><input type="radio" name="nfAct" value="report"> Send report only (stock exists in system but was not found)</label></div>';
     showModal('Material Not Found',h,'sm','<button class="btn btn-glass" onclick="openPickingOBD(\''+l.obdId+'\')"><i class="bx bx-arrow-back"></i> Back</button><button class="btn btn-warning" onclick="submitNotFound(\''+lockId+'\')"><i class="bx bx-send"></i> Send to Admin</button>');
 }
-function submitNotFound(lockId){
+async function submitNotFound(lockId){
     var pd=window._pickData;if(!pd)return;
     var l=DB.find('location_locks',lockId);if(!l||l.status!=='Locked'){showToast('Lock not found','error');return;}
     var rem=l.lockedQty-l.pickedQty;
@@ -4153,7 +4339,7 @@ function submitNotFound(lockId){
         if(found>0)DB.update('location_locks',lockId,{pickedQty:l.pickedQty+found,pickedBy:APP.currentUser.name,pickedAt:nowISO()});
         openPickingOBD(pd.obdId);return;
     }
-    var report=buildLocReport(l.rack,l.ean,l.obdNo);
+    var report=await buildLocReport(l.rack,l.ean,l.obdNo);
     var newPicked=l.pickedQty+found;
     if(newPicked>0)DB.update('location_locks',lockId,{lockedQty:newPicked,pickedQty:newPicked,pickedBy:APP.currentUser.name,pickedAt:nowISO()});
     else DB.update('location_locks',lockId,{status:'Released',releaseReason:'Not found at location',releasedAt:nowISO()});
@@ -4170,7 +4356,7 @@ function requestLocationForMaterial(matIdx){
     var h='<div class="pk-info"><b>'+esc(m.material)+'</b> · EAN '+esc(m.ean)+'<br>OBD qty: <b>'+m.qty+'</b></div><div class="form-group"><label>Reason / Note</label><textarea id="rlReason" class="form-input" placeholder="Why could the stock not be found?"></textarea></div>';
     showModal('Request Location',h,'sm','<button class="btn btn-glass" onclick="openPickingOBD(\''+pd.obdId+'\')"><i class="bx bx-arrow-back"></i> Back</button><button class="btn btn-warning" onclick="submitLocationRequest('+matIdx+')"><i class="bx bx-send"></i> Send to Admin</button>');
 }
-function submitLocationRequest(matIdx){
+async function submitLocationRequest(matIdx){
     var pd=window._pickData;if(!pd)return;
     var m=pd.materials[matIdx];
     var locks=DB.filter('location_locks',function(l){return l.obdId===pd.obdId&&l.ean===m.ean&&isActiveLock(l);});
@@ -4178,7 +4364,8 @@ function submitLocationRequest(matIdx){
     if(missing<=0){showToast('Fully locked','info');openPickingOBD(pd.obdId);return;}
     if(DB.filter('location_requests',function(r){return r.obdId===pd.obdId&&r.ean===m.ean&&r.status==='Pending'&&r.source==='NO_STOCK';}).length){showToast('A request has already been sent','warning');openPickingOBD(pd.obdId);return;}
     var note=document.getElementById('rlReason').value.trim();
-    var req=DB.add('location_requests',{reqNo:nextReqNo(),type:'NEW_LOCATION',source:'NO_STOCK',obdId:pd.obdId,obdNo:pd.obdNo,material:m.material,ean:m.ean,rack:'—',holdLockId:'',missingQty:missing,foundQty:0,reason:'Stock could not be locked',note:note,requestedBy:APP.currentUser.id,requestedByName:APP.currentUser.name,requestedAt:nowISO(),status:'Pending',report:buildEanReport(m.ean,pd.obdNo),assigned:[]});
+    var _eanRep=await buildEanReport(m.ean,pd.obdNo);
+    var req=DB.add('location_requests',{reqNo:nextReqNo(),type:'NEW_LOCATION',source:'NO_STOCK',obdId:pd.obdId,obdNo:pd.obdNo,material:m.material,ean:m.ean,rack:'—',holdLockId:'',missingQty:missing,foundQty:0,reason:'Stock could not be locked',note:note,requestedBy:APP.currentUser.id,requestedByName:APP.currentUser.name,requestedAt:nowISO(),status:'Pending',report:_eanRep,assigned:[]});
     notifyLocRequest(req);
     logAction('Picking','LOC_REQUEST',req.reqNo+' '+m.material+' no stock (OBD '+pd.obdNo+')');
     showToast('Request admin ko bhej di','success');openPickingOBD(pd.obdId);
@@ -4206,7 +4393,7 @@ function renderLocRequests(){
 }
 function locNotifOpen(id){document.getElementById('notifPanel').classList.remove('open');if(!isMgrUser()){showToast('Admin / Manager access only','error');return;}openLocRequest(id);}
 function pickerNotifOpen(obdId){document.getElementById('notifPanel').classList.remove('open');navTo('picking','start-picking');setTimeout(function(){openPickingOBD(obdId);},300);}
-function openLocRequest(reqId){
+async function openLocRequest(reqId){
     var r=DB.find('location_requests',reqId);if(!r)return;
     var isP=r.status==='Pending'&&isMgrUser();
     var h='<div class="pk-info"><b>'+esc(r.reqNo)+'</b> · OBD <b>'+esc(r.obdNo)+'</b> · '+esc(r.material)+' ('+esc(r.ean)+')<br>Rack: <b>'+esc(r.rack)+'</b> · Missing qty: <b>'+(r.missingQty||0)+'</b>'+(r.foundQty?' · Found: '+r.foundQty:'')+'<br>By: '+esc(r.requestedByName)+' · '+fmtDT(r.requestedAt)+'<br>Reason: <span style="color:var(--warning)">'+esc(r.reason)+'</span>'+(r.note?' — '+esc(r.note):'')+'<br>Type: '+(r.type==='NEW_LOCATION'?'New location requested':'Report only')+' · Status: <b>'+esc(r.status)+'</b></div>';
@@ -4214,7 +4401,8 @@ function openLocRequest(reqId){
     if(r.assigned&&r.assigned.length)h+='<div style="margin-top:10px;font-size:12px"><b>Assigned:</b> '+r.assigned.map(function(a){return esc(a.rack)+' ('+a.qty+')';}).join(', ')+'</div>';
     if(isP){
         var obd=DB.find('obd_data',r.obdId);
-        var av=getLocAvailability(r.ean,null).filter(function(a){return String(a.rack).toUpperCase()!==String(r.rack).toUpperCase();});
+        var _sctx=await ensureStockCtx();   // ★
+        var av=getLocAvailability(r.ean,null,_sctx).filter(function(a){return String(a.rack).toUpperCase()!==String(r.rack).toUpperCase();});
         var free=av.filter(function(a){return a.available>0;});
         free.sort(function(a,b){return rackDist(r.rack,a.rack)-rackDist(r.rack,b.rack);});
         window._lrFree=free;
@@ -4243,19 +4431,20 @@ function lrAutoFill(missing){
     var free=window._lrFree||[],rem=missing;
     free.forEach(function(a,i){var q=Math.min(a.available,Math.max(rem,0));var el=document.getElementById('lrq_'+i);if(el)el.value=q;rem-=q;});
 }
-function adjustLocStock(rack,ean,qty,reqNo){
+async function adjustLocStock(rack,ean,qty,reqNo){
     if(!rack||rack==='—'||qty<=0)return 0;
-    var r=deductStock(rack,ean,qty);
+    var r=await deductStock(rack,ean,qty);
     logAction('Stock','ADJUST','Admin adjust -'+r.deducted+' at '+rack+' (EAN '+ean+') via '+reqNo);
     return r.deducted;
 }
 function finishLocRequest(r,status,note,assigned){
     DB.update('location_requests',r.id,{status:status,closedNote:note||'',resolvedBy:APP.currentUser.name,resolvedAt:nowISO(),assigned:assigned});
 }
-function assignLocRequest(reqId){
+async function assignLocRequest(reqId){
     var r=DB.find('location_requests',reqId);if(!r||r.status!=='Pending')return;
     var obd=DB.find('obd_data',r.obdId);if(!obd){showToast('OBD not found','error');return;}
-    var fresh=getLocAvailability(r.ean,null),assignedNow=[],sum=0;
+    var _sctx2=await ensureStockCtx();   // ★
+    var fresh=getLocAvailability(r.ean,null,_sctx2),assignedNow=[],sum=0;
     var adj=document.getElementById('lrAdjust')&&document.getElementById('lrAdjust').checked,note=(document.getElementById('lrNote')||{}).value||'';
     var chosen=[];
     (window._lrFree||[]).forEach(function(a,i){
@@ -4275,7 +4464,7 @@ function assignLocRequest(reqId){
         if(hold.lockedQty-sum<=0)DB.update('location_locks',hold.id,{status:'Released',releaseReason:'Resolved '+r.reqNo,releasedAt:nowISO()});
         else DB.update('location_locks',hold.id,{lockedQty:hold.lockedQty-sum});
     }
-    if(adj)adjustLocStock(r.rack,r.ean,sum,r.reqNo);
+    if(adj)await adjustLocStock(r.rack,r.ean,sum,r.reqNo);
     var all=(r.assigned||[]).concat(assignedNow);
     if(left<=0)finishLocRequest(r,'Resolved',note,all);
     else DB.update('location_requests',r.id,{missingQty:left,assigned:all,adminNote:note});
@@ -4327,7 +4516,7 @@ function restoreStock(rack,ean,qty,sources,meta){
 }
 
 // ---------- Submit (confirm) picking ----------
-function submitPicking(){
+async function submitPicking(){
     var pd=window._pickData;if(!pd)return;
     var obd=DB.find('obd_data',pd.obdId);if(!obd)return;
     var locks=DB.filter('location_locks',function(l){return l.obdId===pd.obdId&&isActiveLock(l);});
@@ -4338,18 +4527,23 @@ function submitPicking(){
     var holds=locks.filter(function(l){return l.status==='Hold';}).length;
     if(!allPicked&&!confirm((holds?holds+' location request(s) are pending with the admin. ':'')+'Some materials were not fully picked. Submit with short quantity?'))return;
     var details=[];
-    mats.forEach(function(m){
+    for(var mi=0;mi<mats.length;mi++){
+        var m=mats[mi];
         var byRack={},locs=[];
         locks.filter(function(l){return l.ean===m.ean&&l.pickedQty>0;}).forEach(function(l){
             var R=String(l.rack).toUpperCase();
             if(!byRack[R]){byRack[R]={rack:l.rack,qty:0,ean:m.ean,material:m.material,source:l.source||'',invMatId:l.invMatId||''};locs.push(byRack[R]);}
             byRack[R].qty+=l.pickedQty;
         });
-        locs.forEach(function(lc){if(lc.source==='GR'){var gim=DB.find('invoice_materials',lc.invMatId);if(gim)DB.update('invoice_materials',gim.id,{crossdockedQty:(gim.crossdockedQty||0)+lc.qty});lc.sources=[];return;}var r=deductStock(lc.rack,lc.ean,lc.qty);lc.sources=r.sources;if(r.deducted<lc.qty)lc.stockShort=lc.qty-r.deducted;});
+        for(var li=0;li<locs.length;li++){
+            var lc=locs[li];
+            if(lc.source==='GR'){var gim=DB.find('invoice_materials',lc.invMatId);if(gim)DB.update('invoice_materials',gim.id,{crossdockedQty:(gim.crossdockedQty||0)+lc.qty});lc.sources=[];continue;}
+            var r=await deductStock(lc.rack,lc.ean,lc.qty);lc.sources=r.sources;if(r.deducted<lc.qty)lc.stockShort=lc.qty-r.deducted;
+        }
         var picked=sumBy(locs,function(x){return x.qty;}),rs=[];
         DB.filter('location_requests',function(r){return r.obdId===pd.obdId&&r.ean===m.ean;}).forEach(function(r){var t=r.reason+(r.note?' — '+r.note:'');if(rs.indexOf(t)<0)rs.push(t);});
         details.push({material:m.material,ean:m.ean,requiredQty:m.qty,pickedQty:picked,locations:routeSort(locs,function(x){return x.rack;}),short:m.qty-picked,shortReason:rs.join(' | ')});
-    });
+    }
     DB.add('picking_done',{obdId:pd.obdId,obdNo:pd.obdNo,pickedBy:APP.currentUser.id,pickedByName:APP.currentUser.name,pickedAt:nowISO(),details:details,status:'Done',priority:obd.priority||'Normal'});
     DB.update('obd_data',pd.obdId,{status:'Picking Done'});
     DB.filter('picking_assignments',function(a){return a.obdId===pd.obdId&&a.status==='Assigned';}).forEach(function(a){DB.update('picking_assignments',a.id,{status:'Done'});});
@@ -4467,22 +4661,31 @@ function putawayMats(invoiceId){
     }).filter(function(m){return m.qty>0;});
 }
 // same date + same rack + same material => merged into one row
-function addPutawayStock(rec){
+async function addPutawayStock(rec){
     var R=rkey(rec.rack),d=rec.date||today();
     var entry={action:'PUTAWAY',user:rec.user,userId:APP.currentUser?APP.currentUser.id:'',dateTime:rec.dateTime||nowISO(),qty:rec.quantity,grnNo:rec.grnNo||'',invoiceNo:rec.invoiceNo||'',packing:rec.packing||'',box:rec.box||''};
-    var ex=DB.filter('location_master',function(l){return l.action==='PUTAWAY'&&l.ean===rec.ean&&rkey(l.rack)===R&&l.date===d&&l.quantity>0;})[0];
-    if(!ex)return DB.add('location_master',rec);
+    // ★ Same rack+ean+date wali existing PUTAWAY row server se dhundo (merge ke liye)
+    var res=await sbSearch('location_master',{eq:{ean:rec.ean,rack:R,action:'PUTAWAY',date:d},limit:1});
+    var ex=res.rows.filter(function(l){return (parseInt(l.quantity)||0)>0;})[0];
+    if(!ex){
+        var added=DB.add('location_master',rec);
+        _stockCtxTs=0; _sbFullPullTs['location_master']=0;
+        return added;
+    }
     var entries=(ex.entries&&ex.entries.length)?ex.entries.slice():[{action:ex.action,user:ex.user,userId:ex.userId||'',dateTime:ex.dateTime,qty:ex.quantity,grnNo:ex.grnNo||'',invoiceNo:ex.invoiceNo||'',packing:ex.packing||'',box:ex.box||''}];
     entries.push(entry);
     var box=ex.box||'';if(rec.box&&box.indexOf(rec.box)<0)box=box?box+', '+rec.box:rec.box;
     var pk=ex.packing||'';if(rec.packing&&pk.indexOf(rec.packing)<0)pk=pk?pk+', '+rec.packing:rec.packing;
-    return DB.update('location_master',ex.id,{quantity:ex.quantity+rec.quantity,entries:entries,box:box,packing:pk});
+    var upd=await sbUpdate('location_master',ex.id,{quantity:(parseInt(ex.quantity)||0)+rec.quantity,entries:entries,box:box,packing:pk});
+    _stockCtxTs=0; _sbFullPullTs['location_master']=0;
+    return upd;
 }
 function recRows(l){
     if(l.entries&&l.entries.length)return l.entries.map(function(e){return{rack:l.rack,action:e.action||'-',user:e.user||'-',dateTime:e.dateTime||l.date||'',qty:e.qty,grnNo:e.grnNo||'',invoiceNo:e.invoiceNo||''};});
     return [{rack:l.rack,action:l.action||'-',user:l.user||'-',dateTime:l.dateTime||l.date||'',qty:l.quantity,grnNo:l.grnNo||'',invoiceNo:l.invoiceNo||''}];
 }
-function buildLocReport(rack,ean,obdNo){
+async function buildLocReport(rack,ean,obdNo){
+    await sbPullFull('location_master',120000);
     var R=rkey(rack),recs=[];
     DB.filter('location_master',function(l){return l.ean===ean&&rkey(l.rack)===R&&l.quantity>0;}).forEach(function(l){recs=recs.concat(recRows(l));});
     var picks=[];
@@ -4492,18 +4695,22 @@ function buildLocReport(rack,ean,obdNo){
     var others=DB.filter('location_locks',function(k){return isActiveLock(k)&&k.ean===ean&&rkey(k.rack)===R&&k.obdNo!==obdNo;}).map(function(k){return{obdNo:k.obdNo,qty:k.lockedQty};});
     return{rack:rack,ean:ean,systemQty:sumBy(recs,function(r){return r.qty;}),records:recs,recentPicks:picks.slice(-10),otherLocks:others,generatedAt:nowISO()};
 }
-function buildEanReport(ean,obdNo){
+async function buildEanReport(ean,obdNo){
+    await sbPullFull('location_master',120000);
     var recs=[];
     DB.filter('location_master',function(l){return l.ean===ean&&l.quantity>0;}).forEach(function(l){recs=recs.concat(recRows(l));});
     var others=DB.filter('location_locks',function(k){return isActiveLock(k)&&k.ean===ean&&k.obdNo!==obdNo;}).map(function(k){return{obdNo:k.obdNo,rack:k.rack,qty:k.lockedQty};});
     return{rack:'—',ean:ean,systemQty:sumBy(recs,function(r){return r.qty;}),records:recs,recentPicks:[],otherLocks:others,generatedAt:nowISO(),eanWide:true};
 }
-function deductStock(rack,ean,qty){
+async function deductStock(rack,ean,qty){
     var R=rkey(rack),rem=qty,src=[];
-    DB.filter('location_master',function(l){return l.ean===ean&&rkey(l.rack)===R&&l.quantity>0;})
-      .sort(function(a,b){return String(a.dateTime||a.date).localeCompare(String(b.dateTime||b.date));})
-      .forEach(function(r){
-        if(rem<=0)return;
+    // ★ Server se us rack+ean ki rows fetch karo (memory full load ki zaroorat nahi)
+    var res=await sbSearch('location_master',{eq:{ean:ean,rack:rack},limit:100});
+    var rows=res.rows.filter(function(l){return (parseInt(l.quantity)||0)>0;})
+      .sort(function(a,b){return String(a.dateTime||a.date).localeCompare(String(b.dateTime||b.date));});
+    for(var i=0;i<rows.length;i++){
+        var r=rows[i];
+        if(rem<=0)break;
         var d=Math.min(r.quantity,rem),nq=r.quantity-d;
         if(r.entries&&r.entries.length){
             var need=d,ne=[];
@@ -4514,13 +4721,14 @@ function deductStock(rack,ean,qty){
                 need-=t;
                 if(e.qty-t>0){var c=JSON.parse(JSON.stringify(e));c.qty=e.qty-t;ne.push(c);}
             });
-            if(nq<=0)DB.remove('location_master',r.id);else DB.update('location_master',r.id,{quantity:nq,entries:ne});
+            if(nq<=0)await sbRemove('location_master',r.id);else await sbUpdate('location_master',r.id,{quantity:nq,entries:ne});
         }else{
             src.push({action:r.action||'',user:r.user||'',userId:r.userId||'',dateTime:r.dateTime||'',date:r.date||'',grnNo:r.grnNo||'',invoiceNo:r.invoiceNo||'',packing:r.packing||'',box:r.box||'',description:r.description||'',material:r.material||'',qty:d});
-            if(nq<=0)DB.remove('location_master',r.id);else DB.update('location_master',r.id,{quantity:nq});
+            if(nq<=0)await sbRemove('location_master',r.id);else await sbUpdate('location_master',r.id,{quantity:nq});
         }
         rem-=d;
-      });
+    }
+    _stockCtxTs=0; _sbFullPullTs['location_master']=0;   // caches invalidate — next pull fresh
     return{sources:src,deducted:qty-rem};
 }
 // Bin master: occupancy (rack normalised, qty>0, distinct materials)
@@ -4535,7 +4743,8 @@ function buildOccMap(){
     });
     return occ;
 }
-function showBinMaterials(binName){
+async function showBinMaterials(binName){
+    await sbPullFull('location_master',120000);   // bin ka stock server se (2 min cache)
     var locs=DB.filter('location_master',function(l){return rkey(l.rack)===rkey(binName)&&l.quantity>0;});
     var totalQty=sumBy(locs,function(l){return l.quantity;}),distinct={};
     locs.forEach(function(l){distinct[l.ean||l.material]=1;});
@@ -5329,31 +5538,42 @@ function renderPWLLoadingScan(){
     renderPWLScanTable();
 }
 
-function doPWLScan(){
+async function doPWLScan(){
     var inp=document.getElementById('pwlScanInput');if(!inp)return;
     var val=inp.value.trim();inp.value='';if(!val)return;
     var pd=window._pwlData;if(!pd)return;var uv=val.toUpperCase();
     var found=null;for(var i=0;i<pd.expected.length;i++){var e=pd.expected[i];if(e.ean&&e.ean.toUpperCase()===uv&&e.scannedQty<e.requiredQty){found=e;break;}}
-    var mm=DB.filter('material_master',function(m){return m.ean&&m.ean.toUpperCase()===uv;});
+    var mm=await sbFindOne('material_master','ean',uv);   // ★ direct Supabase search
+    var mname=mm?(mm.material||''):'';
+    var mdesc=mm?(mm.description||''):'';
     if(found){
         found.scannedQty++;
-        pd.scannedItems.push({ean:found.ean,material:found.material,description:mm.length?mm[0].description:'',qty:1,inOBD:true,obdNo:found.obdNo,scannedAt:new Date().toISOString()});
+        pd.scannedItems.push({ean:found.ean,material:found.material,description:mdesc,qty:1,inOBD:true,obdNo:found.obdNo,scannedAt:new Date().toISOString()});
         showToast(found.material+' — Match ✓','success');
     }else{
-        pd.scannedItems.push({ean:uv,material:mm.length?mm[0].material:val,description:mm.length?mm[0].description:'',qty:1,inOBD:false,obdNo:'—',scannedAt:new Date().toISOString()});
-        showToast((mm.length?mm[0].material:val)+' — Not in OBD ✗','warning');
+        pd.scannedItems.push({ean:uv,material:mname||val,description:mdesc,qty:1,inOBD:false,obdNo:'—',scannedAt:new Date().toISOString()});
+        showToast((mname||val)+' — Not in OBD ✗','warning');
     }
     renderPWLScanTable();setTimeout(function(){var i=document.getElementById('pwlScanInput');if(i)i.focus();},100);
 }
 
 function showPWLManualEntry(){
     var h='<div class="form-row">';
-    h+='<div class="form-group"><label>EAN</label><input type="text" id="pwlManEan" class="form-input" placeholder="EAN" style="font-family:var(--font-display)" onblur="var e=this.value.trim().toUpperCase();if(e.length>5){var mm=DB.filter(\'material_master\',function(m){return m.ean&&m.ean.toUpperCase()===e;});if(mm.length){if(!document.getElementById(\'pwlManMat\').value)document.getElementById(\'pwlManMat\').value=mm[0].material||\'\';if(!document.getElementById(\'pwlManDesc\').value)document.getElementById(\'pwlManDesc\').value=mm[0].description||\'\';}}"></div>';
+    h+='<div class="form-group"><label>EAN</label><input type="text" id="pwlManEan" class="form-input" placeholder="EAN" style="font-family:var(--font-display)" onblur="pwlManEanBlur(this)"></div>';
     h+='<div class="form-group"><label>Material</label><input type="text" id="pwlManMat" class="form-input" placeholder="Material"></div>';
     h+='<div class="form-group"><label>Description</label><input type="text" id="pwlManDesc" class="form-input" placeholder="Description"></div>';
     h+='<div class="form-group"><label>Qty</label><input type="number" id="pwlManQty" class="form-input" value="1" min="1"></div>';
     h+='</div>';
     showModal('Manual Entry',h,'sm','<button class="btn btn-glass" onclick="closeModal();renderPWLLoadingScan()">Cancel</button><button class="btn btn-glass" onclick="addPWLManualItem()"><i class="bx bx-check"></i> Add</button>');
+}
+async function pwlManEanBlur(inp){
+    var e=(inp.value||'').trim().toUpperCase();
+    if(e.length<=5)return;
+    var mm=await sbFindOne('material_master','ean',e);   // ★ direct Supabase search
+    if(mm){
+        if(!document.getElementById('pwlManMat').value)document.getElementById('pwlManMat').value=mm.material||'';
+        if(!document.getElementById('pwlManDesc').value)document.getElementById('pwlManDesc').value=mm.description||'';
+    }
 }
 function addPWLManualItem(){
     var ean=(document.getElementById('pwlManEan').value||'').trim().toUpperCase();
@@ -5772,7 +5992,7 @@ function renderLoadingScanModal(){
 }
 
 // ★★★ FIXED: doLoadScan — auto fill material & description ★★★
-function doLoadScan(){
+async function doLoadScan(){
     var inp=document.getElementById('loadScanInput');if(!inp)return;
     var val=inp.value.trim();inp.value='';if(!val)return;
     var ld=window._loadScanData;if(!ld)return;
@@ -5785,10 +6005,10 @@ function doLoadScan(){
         if(e.ean&&e.ean.toUpperCase()===uv&&e.scannedQty<e.requiredQty){found=e;break;}
     }
 
-    // Get material master for auto-fill
-    var mm=DB.filter('material_master',function(m){return m.ean&&m.ean.toUpperCase()===uv;});
-    var matName=mm.length?(mm[0].material||''):'';
-    var matDesc=mm.length?(mm[0].description||''):'';
+    // Get material master for auto-fill (direct Supabase)
+    var mm=await sbFindOne('material_master','ean',uv);   // ★
+    var matName=mm?(mm.material||''):'';
+    var matDesc=mm?(mm.description||''):'';
 
     if(found){
         found.scannedQty++;
@@ -5831,13 +6051,13 @@ function showManualLoadEntry(){
         '<button class="btn btn-glass" onclick="addManualLoadItem()"><i class="bx bx-check"></i> Add</button>');
 }
 
-function autoFillManualLoad(){
+async function autoFillManualLoad(){
     var ean=(document.getElementById('manLoadEan').value||'').trim().toUpperCase();
     if(!ean||ean.length<5)return;
-    var mm=DB.filter('material_master',function(m){return m.ean&&m.ean.toUpperCase()===ean;});
-    if(mm.length){
-        if(!document.getElementById('manLoadMat').value)document.getElementById('manLoadMat').value=mm[0].material||'';
-        if(!document.getElementById('manLoadDesc').value)document.getElementById('manLoadDesc').value=mm[0].description||'';
+    var mm=await sbFindOne('material_master','ean',ean);   // ★ direct Supabase search
+    if(mm){
+        if(!document.getElementById('manLoadMat').value)document.getElementById('manLoadMat').value=mm.material||'';
+        if(!document.getElementById('manLoadDesc').value)document.getElementById('manLoadDesc').value=mm.description||'';
     }
 }
 
@@ -6420,36 +6640,121 @@ var ALL_ACTIONS = [
     {id:'canLoad',label:'Loading Start Button',mod:'Dispatch & Loading'},
     {id:'canAdmin',label:'Admin Panel Access',mod:'Users & Permissions'}
 ];
+// ==================== BUTTON PERMISSIONS (module-wise, every button) ====================
+// fns = onclick function names jo is permission se control honge (auto-enforcer inhe dhundta hai)
+var BTN_PERMS=[
+    // --- Goods Inward: Gate ---
+    {mod:'Gate Entry',id:'inb.gate.create',label:'Create Gate Check-In',fns:['submitSecGate']},
+    {mod:'Gate Entry',id:'inb.gate.reopen',label:'Re-open Vehicle',fns:['reopenGateVehicle']},
+    // --- Goods Inward: Invoices ---
+    {mod:'Inward Invoices',id:'inb.inv.upload',label:'Upload Invoice / Vehicle Excel',fns:['showUploadInvoice','saveSingleInvoice','addInvMatRow','showVehicleExcelUpload','processVehicleExcel']},
+    // --- Goods Inward: Unloading & GR ---
+    {mod:'Unloading',id:'inb.unload.assign',label:'Assign / Unassign Vehicle',fns:['showAssignUnloading','doAssignUnloading','unassignVehicle']},
+    {mod:'Unloading',id:'inb.unload.start',label:'Start Unloading',fns:['startUnload']},
+    {mod:'Unloading',id:'inb.unload.partial',label:'Partial Unload Controls',fns:['resumePartialUnload','discardPartialUnload','savePartialLoad']},
+    {mod:'Unloading',id:'inb.grn.post',label:'Post Vehicle (GR)',fns:['postVehicle']},
+    {mod:'Unloading',id:'inb.grn.approve',label:'Approve / Reject GR Posting',fns:['doRejectFromNotif']},
+    {mod:'Unloading',id:'inb.report',label:'Inbound Reports & Export',fns:['showInboundReport','showUnloadReport','exportInboundExcel','exportInboundReportExcel','exportInboundReportPDF','downloadUnloadReportPDF']},
+    // --- Putaway ---
+    {mod:'Putaway',id:'put.add',label:'Add to Putaway List',fns:['addToPutawayList','removePutawayItem','resetPutawayScan']},
+    {mod:'Putaway',id:'put.save',label:'Confirm Putaway (Save)',fns:['doPutaway','savePutawayScanList','savePutawayFromGRN']},
+    {mod:'Putaway',id:'put.gr',label:'Putaway from GR Area',fns:['openGRPick','pickFromGR','removeGRPick']},
+    {mod:'Putaway',id:'put.clear',label:'Clear Putaway List',fns:['clearPutawayList']},
+    // --- PIV ---
+    {mod:'PIV (Stock Count)',id:'piv.add',label:'Add PIV Count',fns:['showAddPIV']},
+    {mod:'PIV (Stock Count)',id:'piv.save',label:'Save PIV Count',fns:['savePIV']},
+    {mod:'PIV (Stock Count)',id:'piv.delete',label:'Delete PIV Record',fns:['deletePivRow']},
+    // --- Stock Overview ---
+    {mod:'Stock Overview',id:'loc.upload',label:'Bulk Upload Stock',fns:['showLocBulkUpload','processLocBulkUpload','downloadLocTemplate']},
+    {mod:'Stock Overview',id:'loc.report',label:'Stock Report & PDF',fns:['showLocReport','downloadLocReportPDF']},
+    {mod:'Stock Overview',id:'loc.export',label:'Export Stock Excel',fns:[]},
+    {mod:'Stock Overview',id:'loc.delete',label:'Delete Stock Row',fns:['deleteLocRow']},
+    // --- Bins & Racks ---
+    {mod:'Bins & Racks',id:'rack.add',label:'Add Bin',fns:['showAddRack','saveRack']},
+    {mod:'Bins & Racks',id:'rack.upload',label:'Bulk Upload Bins',fns:['showBulkBinUpload','processBulkBinUpload','downloadBinTemplate']},
+    {mod:'Bins & Racks',id:'rack.delete',label:'Delete Bin',fns:['deleteRack']},
+    // --- Products ---
+    {mod:'Products',id:'mat.add',label:'Add Product',fns:['showAddMaterial','saveMaterial']},
+    {mod:'Products',id:'mat.edit',label:'Edit Product',fns:['editMaterial','updateMaterial']},
+    {mod:'Products',id:'mat.delete',label:'Delete Product',fns:['deleteMaterial']},
+    {mod:'Products',id:'mat.upload',label:'Bulk Upload Products',fns:['showBulkUploadMaterial','showBulkUpload','processBulkFile','executeBulkUpload','downloadMaterialTemplate']},
+    {mod:'Products',id:'mat.export',label:'Export Products Excel',fns:[]},
+    // --- Order Picking ---
+    {mod:'Order Picking',id:'pick.obd.upload',label:'Upload OBD File',fns:['processOBDUpload']},
+    {mod:'Order Picking',id:'pick.assign',label:'Assign / Unassign Picking',fns:['doPickingAssign','unassignPicking','pqMove']},
+    {mod:'Order Picking',id:'pick.urgent',label:'Urgent / Top-Up Controls',fns:['pqToggleUrgent','makeUrgentAssign','topUpAssign','topUpAll']},
+    {mod:'Order Picking',id:'pick.confirm',label:'Confirm & Submit Picking',fns:['submitPicking','doPickFromLock']},
+    {mod:'Order Picking',id:'pick.notfound',label:'Not-Found Request',fns:['openNotFound','submitNotFound','requestLocationForMaterial']},
+    {mod:'Order Picking',id:'pick.short',label:'Mark Material Short',fns:['markLocShort']},
+    {mod:'Order Picking',id:'pick.locreq',label:'Assign Location Requests (Admin)',fns:['openLocRequest','assignLocRequest','submitLocationRequest']},
+    {mod:'Order Picking',id:'pick.reverse',label:'Reverse Picking',fns:['openReverseModal','doReversePicking']},
+    {mod:'Order Picking',id:'pick.list',label:'Download Pick List',fns:['downloadPickList']},
+    {mod:'Order Picking',id:'pick.report',label:'Picking Reports & Export',fns:['exportCrossdock','exportPickingDoneExcel','exportPickingDonePDF']},
+    // --- Pick & Load (Combined) ---
+    {mod:'Pick & Load',id:'pick.pwl.assign',label:'PWL: Assign',fns:['openPWLSetup','doPWLAssign','unassignPWL']},
+    {mod:'Pick & Load',id:'pick.pwl.execute',label:'PWL: Pick (Execute)',fns:['openPWLPicking','resumePWLPicking','continuePWL','doPWLPick','savePWLPartialPick','removePWLScanItem','openPWLManualEntry','addPWLManualItem','showPWLPickLocs']},
+    {mod:'Pick & Load',id:'pick.pwl.load',label:'PWL: Load & Submit',fns:['goToPWLLoading','submitPWLLoading','savePWLPartialLoad']},
+    {mod:'Pick & Load',id:'pick.pwl.approve',label:'PWL: Request Approval',fns:['requestPWLApproval']},
+    // --- Dispatch & Loading ---
+    {mod:'Loading',id:'load.assign',label:'Assign / Unassign Loading',fns:['doLoadingAssign','unassignLoading']},
+    {mod:'Loading',id:'load.execute',label:'Execute Loading',fns:['startMultiLoading','continueLoading','removeLoadScanItem','submitFinalLoad']},
+    {mod:'Loading',id:'load.manual',label:'Manual Load Entry',fns:['showManualLoadEntry','addManualLoadItem']},
+    {mod:'Loading',id:'load.approve',label:'Approve / Reject Loading',fns:['approveLoading','rejectLoading','requestLoadApproval']},
+    {mod:'Loading',id:'load.gateout',label:'Gate Out / Dispatch Vehicle',fns:['gateOutVehicle']},
+    {mod:'Loading',id:'load.report',label:'Loading Reports & Export',fns:['showLoadingReport','exportLoadingExcel','exportLoadingPDF']},
+    {mod:'Loading',id:'load.register',label:'Loading Register Export',fns:['exportLoadingRegister','exportLoadingRegisterPDF']},
+    {mod:'Loading',id:'load.mismatch',label:'Qty Difference / SE Report & Export',fns:['showSEReport','exportMismatchExcel','exportMismatchPDF']},
+    // --- Reports ---
+    {mod:'Reports',id:'rep.run',label:'Run / Generate Reports',fns:['showGlobalReport','generateGlobalReport','runReport','showExportAll']},
+    {mod:'Reports',id:'rep.export',label:'Export Reports (Excel/PDF)',fns:['exportGlobalExcel','exportGlobalPDF','exportReportExcel','exportReportPDF']},
+    // --- Users & Permissions ---
+    {mod:'User Admin',id:'adm.user.add',label:'Add User',fns:['showAddUser','saveUser']},
+    {mod:'User Admin',id:'adm.user.edit',label:'Edit User & Permissions',fns:['editUser','updateUser']},
+    {mod:'User Admin',id:'adm.user.delete',label:'Delete User',fns:['deleteUser']},
+    // --- Settings ---
+    {mod:'Settings',id:'set.manage',label:'Change Settings / Customize',fns:['setAccentColor','showFrontCustomize']},
+    {mod:'Settings',id:'set.wipe',label:'Danger: Clear All Data / Reseed',fns:['clearAllData','reseedData']},
+    // --- History & Logs ---
+    {mod:'Logs',id:'aud.export',label:'Export Audit Log',fns:['exportAuditExcel']},
+    {mod:'Logs',id:'wt.export',label:'Export Work Log',fns:['exportWorkTimeExcel','exportWorkTimePDF']}
+];
+// --- AUTO BUTTON ENFORCER: onclick function name se permission check ---
+var _FN_PERM={};
+BTN_PERMS.forEach(function(p){p.fns.forEach(function(f){_FN_PERM[f]=p.id;});});
+var _EXPORT_ARG_PERM={'location_master':'loc.export','material_master':'mat.export'};
+function enforceBtnPerms(){
+    if(!APP.currentUser||APP.currentUser.role==='Super Admin')return;
+    try{
+        var btns=document.querySelectorAll('button[onclick], a[onclick], [onclick].btn');
+        for(var i=0;i<btns.length;i++){
+            var b=btns[i];
+            var oc=b.getAttribute('onclick')||'';
+            var m=oc.match(/^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/);
+            if(!m)continue;
+            var fn=m[1];
+            if(fn==='exportTableExcel'){
+                var t=oc.match(/exportTableExcel\(\s*['"]([^'"]+)['"]/);
+                if(t){var ep=_EXPORT_ARG_PERM[t[1]];if(ep&&!canBtn(ep))b.style.display='none';}
+                continue;
+            }
+            var pid=_FN_PERM[fn];
+            if(pid&&!canBtn(pid))b.style.display='none';
+        }
+    }catch(e){}
+}
+try{
+    var _permMO=new MutationObserver(function(){enforceBtnPerms();});
+    _permMO.observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:['onclick','style']});
+}catch(e){}
 
 var ROLE_DEFAULTS = {
-    'Admin':{
-        modules:['all'],
-        actions:{canSecurityEntry:false,canUploadInvoice:true,canAssignVehicle:true,canStartUnloading:true,canPostVehicle:true,canApprove:true,canViewReports:true,canPutaway:true,canPIV:true,canPick:true,canLoad:true,canAdmin:true}
-    },
-    'Manager':{
-        modules:['dashboard','inbound','pending-vehicle','posting-pending','inbound-record','unloading-stock','reports','audit','picking','loading','user-time'],
-        actions:{canSecurityEntry:false,canUploadInvoice:true,canAssignVehicle:true,canStartUnloading:false,canPostVehicle:false,canApprove:true,canViewReports:true,canPutaway:false,canPIV:false,canPick:true,canLoad:true,canAdmin:false}
-    },
-    'DEO':{
-        modules:['inbound','pending-vehicle'],
-        actions:{canSecurityEntry:false,canUploadInvoice:true,canAssignVehicle:true,canStartUnloading:false,canPostVehicle:false,canApprove:false,canViewReports:false,canPutaway:false,canPIV:false,canPick:false,canLoad:false,canAdmin:false}
-    },
-    'Security':{
-        modules:['inbound','security-gate'],
-        actions:{canSecurityEntry:true,canUploadInvoice:false,canAssignVehicle:false,canStartUnloading:false,canPostVehicle:false,canApprove:false,canViewReports:false,canPutaway:false,canPIV:false,canPick:false,canLoad:false,canAdmin:false}
-    },
-    'Unloader':{
-        modules:['inbound','unloading-screen'],
-        actions:{canSecurityEntry:false,canUploadInvoice:false,canAssignVehicle:false,canStartUnloading:true,canPostVehicle:false,canApprove:false,canViewReports:false,canPutaway:false,canPIV:false,canPick:false,canLoad:false,canAdmin:false}
-    },
-    'Picker':{
-        modules:['picking'],
-        actions:{canSecurityEntry:false,canUploadInvoice:false,canAssignVehicle:false,canStartUnloading:false,canPostVehicle:false,canApprove:false,canViewReports:false,canPutaway:false,canPIV:false,canPick:true,canLoad:false,canAdmin:false}
-    },
-    'Loader':{
-        modules:['loading'],
-        actions:{canSecurityEntry:false,canUploadInvoice:false,canAssignVehicle:false,canStartUnloading:false,canPostVehicle:false,canApprove:false,canViewReports:false,canPutaway:false,canPIV:false,canPick:false,canLoad:true,canAdmin:false}
-    }
+    'Admin':{modules:['all'],actions:{}},
+    'Manager':{modules:['dashboard','inbound','pending-vehicle','posting-pending','inbound-record','unloading-stock','reports','audit','picking','loading','user-time'],actions:{'inb.report':true,'inb.grn.approve':true,'inb.unload.assign':true,'load.assign':true,'load.execute':true,'load.approve':true,'load.report':true,'load.register':true,'load.mismatch':true,'pick.assign':true,'pick.confirm':true,'pick.report':true,'pick.list':true,'rep.run':true,'rep.export':true,'aud.export':true,'wt.export':true}},
+    'DEO':{modules:['inbound','pending-vehicle'],actions:{'inb.inv.upload':true,'inb.unload.assign':true}},
+    'Security':{modules:['inbound','loading'],actions:{'inb.gate.create':true,'inb.gate.reopen':true,'load.gateout':true}},
+    'Unloader':{modules:['inbound'],actions:{'inb.unload.start':true,'inb.unload.partial':true,'inb.grn.post':true}},
+    'Picker':{modules:['picking'],actions:{'pick.confirm':true,'pick.notfound':true,'pick.short':true,'pick.list':true,'pick.pwl.execute':true}},
+    'Loader':{modules:['loading'],actions:{'load.execute':true,'load.manual':true}}
 };
 
 // --- Main Admin Page ---
@@ -6504,26 +6809,21 @@ function renderAdmin(){
 // --- Permission Builder HTML ---
 function buildPermHTML(prefix,isSuperAdmin,currentPerms){
     var cp=currentPerms||{modules:[],actions:{}};
+    cp=upgPerms(cp);
     var cMods=cp.modules||[];
     var cActs=cp.actions||{};
     var isAll=cMods.indexOf('all')>-1;
     var disabled=isSuperAdmin?'disabled':'';
-
     var h='';
 
     // === MODULE VISIBILITY ===
     h+='<div style="margin-bottom:16px">';
-    h+='<div class="card-title" style="margin-bottom:8px"><i class="bx bx-layout" style="color:var(--accent)"></i> Module Visibility <span style="font-size:10px;color:var(--text-muted);font-weight:normal">(controls what appears in the sidebar)</span></div>';
-
-    // ALL toggle
+    h+='<div class="card-title" style="margin-bottom:8px"><i class="bx bx-layout" style="color:var(--accent)"></i> Module Visibility <span style="font-size:10px;color:var(--text-muted);font-weight:normal">(Which menus appear in the sidebar)</span></div>';
     h+='<div style="margin-bottom:8px"><label class="perm-item" style="border-color:var(--accent);background:var(--accent-dim);cursor:pointer"><input type="checkbox" id="'+prefix+'_allMods" '+(isAll?'checked':'')+' '+disabled+' onchange="toggleAllMods(\''+prefix+'\')"> <strong style="color:var(--accent)">ALL MODULES</strong></label></div>';
-
-    // Grouped modules
     var groups={};
     ALL_MODULES.forEach(function(m){if(!groups[m.group])groups[m.group]=[];groups[m.group].push(m);});
-
     for(var gk in groups){
-        h+='<div style="font-size:10px;color:var(--text-muted);letter-spacing:1px;margin:10px 0 4px;padding-left:4px;border-left:2px solid var(--border);padding-left:8px">'+gk.toUpperCase()+'</div>';
+        h+='<div style="font-size:10px;color:var(--text-muted);letter-spacing:1px;margin:10px 0 4px;padding-left:8px;border-left:2px solid var(--border)">'+gk.toUpperCase()+'</div>';
         h+='<div class="perm-grid">';
         groups[gk].forEach(function(m){
             var chk=isAll||cMods.indexOf(m.id)>-1;
@@ -6533,18 +6833,44 @@ function buildPermHTML(prefix,isSuperAdmin,currentPerms){
     }
     h+='</div>';
 
-    // === BUTTON / ACTION ACCESS ===
+    // === BUTTON ACCESS (module-wise, every button) ===
     h+='<div>';
-    h+='<div class="card-title" style="margin-bottom:8px"><i class="bx bx-shield" style="color:var(--warning)"></i> Button Access <span style="font-size:10px;color:var(--text-muted);font-weight:normal">(Konse buttons click kar sake)</span></div>';
-    h+='<div class="perm-grid">';
-    ALL_ACTIONS.forEach(function(a){
-        var chk=isAll||cActs[a.id]===true;
-        h+='<label class="perm-item"><input type="checkbox" class="'+prefix+'_actCb" value="'+a.id+'" '+(chk?'checked':'')+' '+disabled+' '+(isAll?'disabled':'')+'> '+a.label+' <span style="font-size:9px;color:var(--text-muted)">('+a.mod+')</span></label>';
+    h+='<div class="card-title" style="margin-bottom:8px"><i class="bx bx-shield" style="color:var(--warning)"></i> Button Access <span style="font-size:10px;color:var(--text-muted);font-weight:normal">(Which buttons the user can click — module-wise)</span></div>';
+    h+='<div class="search-box" style="margin-bottom:10px"><i class="bx bx-search"></i><input type="text" id="'+prefix+'_permSearch" placeholder="Search button — delete, upload, approve..." oninput="filterPermList(\''+prefix+'\')"></div>';
+    h+='<div style="margin-bottom:10px"><label class="perm-item" style="border-color:#E9730C;background:#FFF8D6;cursor:pointer"><input type="checkbox" onchange="toggleAllBtns(\''+prefix+'\',this.checked)"> <strong style="color:#E9730C">ALL BUTTONS</strong></label></div>';
+    var mods=[];var seen={};
+    BTN_PERMS.forEach(function(p){if(!seen[p.mod]){seen[p.mod]=true;mods.push(p.mod);}});
+    mods.forEach(function(m,gi){
+        h+='<div style="margin:10px 0 4px;display:flex;align-items:center;gap:8px;border-left:2px solid var(--warning);padding-left:8px">';
+        h+='<input type="checkbox" onchange="togglePermGroup(\''+prefix+'\',\''+gi+'\',this.checked)" title="Grant ALL buttons of this module"> <span style="font-size:10px;color:var(--text-muted);letter-spacing:1px;font-weight:700">'+m.toUpperCase()+'</span></div>';
+        h+='<div class="perm-grid" data-pgrp="'+gi+'">';
+        BTN_PERMS.filter(function(p){return p.mod===m;}).forEach(function(p){
+            var chk=isAll||cActs[p.id]===true;
+            h+='<label class="perm-item" style="font-size:11px" data-plabel="'+esc((p.label+' '+p.id).toLowerCase())+'"><input type="checkbox" class="'+prefix+'_actCb" value="'+p.id+'" '+(chk?'checked':'')+' '+disabled+' '+(isAll?'disabled':'')+'> '+p.label+'</label>';
+        });
+        h+='</div>';
     });
     h+='</div>';
-    h+='</div>';
-
     return h;
+}
+
+function toggleAllBtns(prefix,on){
+    var actCbs=document.querySelectorAll('.'+prefix+'_actCb');
+    for(var i=0;i<actCbs.length;i++){actCbs[i].checked=on;actCbs[i].disabled=on;}
+}
+function togglePermGroup(prefix,gi,on){
+    var box=document.querySelector('.perm-grid[data-pgrp="'+gi+'"]');
+    if(!box)return;
+    var cbs=box.querySelectorAll('.'+prefix+'_actCb');
+    for(var i=0;i<cbs.length;i++){if(!cbs[i].disabled)cbs[i].checked=on;}
+}
+function filterPermList(prefix){
+    var q=(document.getElementById(prefix+'_permSearch').value||'').trim().toLowerCase();
+    var labels=document.querySelectorAll('#modalContainer label.perm-item[data-plabel]');
+    for(var i=0;i<labels.length;i++){
+        var l=labels[i];
+        l.style.display=(!q||l.getAttribute('data-plabel').indexOf(q)>-1)?'':'none';
+    }
 }
 
 function toggleAllMods(prefix){
@@ -6561,7 +6887,7 @@ function readPermHTML(prefix){
     var actions={};
     if(isAll){
         modules=['all'];
-        ALL_ACTIONS.forEach(function(a){actions[a.id]=true;});
+        BTN_PERMS.forEach(function(p){actions[p.id]=true;});
     } else {
         var modCbs=document.querySelectorAll('.'+prefix+'_modCb');
         for(var i=0;i<modCbs.length;i++){if(modCbs[i].checked)modules.push(modCbs[i].value);}
@@ -6727,7 +7053,8 @@ function clearAllData(){
     setTimeout(function(){location.reload();},1500);
 }
 function reseedData(){seedData();showToast('Sample data re-seeded!','success');renderSettings();}
-function showExportAll(){
+async function showExportAll(){
+    await sbPullFull('location_master');await sbPullFull('material_master');   // master tables bhi backup me aayengi
     var tables=['users','vehicles','invoices','invoice_materials','location_master','material_master','rack_master','obd_data','picking_done','loaded_vehicles','grn_records','short_reports','unloading_records','audit_log'];
     var wb=XLSX.utils.book_new();
     tables.forEach(function(t){
@@ -6747,13 +7074,14 @@ function showGlobalReport(){
     h+='<div id="grResult" style="margin-top:16px"></div>';
     showModal('Global Report',h,'xl','<button class="btn btn-glass" onclick="closeModal()">Close</button>');
 }
-function getGlobalData(){
+async function getGlobalData(){
     var from=document.getElementById('grFrom').value;
     var to=document.getElementById('grTo').value;
     var data={vehicles:0,posted:0,pending:0,putaway:0,piv:0,picked:0,loaded:0,shorts:0};
     var vehs=DB.get('vehicles').filter(function(v){return v.reportedAt&&v.reportedAt.split('T')[0]>=from&&v.reportedAt.split('T')[0]<=to;});
     data.vehicles=vehs.length;
     vehs.forEach(function(v){if(v.status==='Posted'||v.status==='Unloaded')data.posted++;else data.pending++;});
+    await sbPullFull('location_master',120000);   // ★ server se on-demand (2 min cache)
     var locs=DB.get('location_master').filter(function(l){return l.date>=from&&l.date<=to;});
     locs.forEach(function(l){if(l.action==='PUTAWAY')data.putaway++;else if(l.action==='PIV')data.piv++;});
     data.picked=DB.get('picking_done').filter(function(p){return p.pickedAt&&p.pickedAt.split('T')[0]>=from&&p.pickedAt.split('T')[0]<=to;}).length;
@@ -6761,8 +7089,8 @@ function getGlobalData(){
     data.shorts=DB.get('short_reports').filter(function(s){return s.createdAt&&s.createdAt.split('T')[0]>=from&&s.createdAt.split('T')[0]<=to;}).length;
     return data;
 }
-function generateGlobalReport(){
-    var d=getGlobalData();
+async function generateGlobalReport(){
+    var d=await getGlobalData();
     var h='<div class="kpi-grid">';
     h+=kpi('bxs-truck',d.vehicles,'Total Vehicles','accent');
     h+=kpi('bxs-check-circle',d.posted,'Posted','success');
@@ -6775,12 +7103,12 @@ function generateGlobalReport(){
     h+='</div>';
     document.getElementById('grResult').innerHTML=h;
 }
-function exportGlobalExcel(){
-    var d=getGlobalData();var rows=[['Metric','Value'],['Total Vehicles',d.vehicles],['Posted',d.posted],['Pending',d.pending],['Putaway',d.putaway],['PIV',d.piv],['Picked',d.picked],['Loaded',d.loaded],['Shorts',d.shorts]];
+async function exportGlobalExcel(){
+    var d=await getGlobalData();var rows=[['Metric','Value'],['Total Vehicles',d.vehicles],['Posted',d.posted],['Pending',d.pending],['Putaway',d.putaway],['PIV',d.piv],['Picked',d.picked],['Loaded',d.loaded],['Shorts',d.shorts]];
     var ws=XLSX.utils.aoa_to_sheet(rows);var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Global');XLSX.writeFile(wb,'Global_Report_'+today()+'.xlsx');showToast('Excel downloaded!','success');
 }
-function exportGlobalPDF(){
-    var d=getGlobalData();var rows=[['Total Vehicles',d.vehicles],['Posted',d.posted],['Pending',d.pending],['Putaway',d.putaway],['PIV',d.piv],['Picked',d.picked],['Loaded',d.loaded],['Shorts',d.shorts]];
+async function exportGlobalPDF(){
+    var d=await getGlobalData();var rows=[['Total Vehicles',d.vehicles],['Posted',d.posted],['Pending',d.pending],['Putaway',d.putaway],['PIV',d.piv],['Picked',d.picked],['Loaded',d.loaded],['Shorts',d.shorts]];
     var pdf=new jspdf.jsPDF();pdf.setFontSize(16);pdf.text('Global Warehouse Report',14,20);pdf.setFontSize(9);pdf.text('VIP INDUSTRIES LIMITED MD20 | '+fmtDT(new Date()),14,28);
     pdf.autoTable({startY:34,head:[['Metric','Value']],body:rows,theme:'grid',headStyles:{fillColor:[0,180,120]}});
     pdf.save('Global_Report_'+today()+'.pdf');showToast('PDF downloaded!','success');
@@ -7020,7 +7348,8 @@ function deleteWorkLog(){
 }
 
 // ==================== EXPORT UTILITY ====================
-function exportTableExcel(tableKey,fileName){
+async function exportTableExcel(tableKey,fileName){
+    await sbPullFull(tableKey);   // 60k rows on-demand — export ke waqt hi fetch hoti hain
     var data=DB.get(tableKey);if(!data.length){showToast('No data','error');return;}
     var rows=[];var keys=Object.keys(data[0]);
     rows.push(keys);
@@ -7109,14 +7438,16 @@ function initBottomNav(){
 function initGlobalSearch(){
     var input=document.getElementById('searchInput');
     if(!input)return;
-    input.addEventListener('keydown',function(e){
+    input.addEventListener('keydown',async function(e){
         if(e.key==='Enter'){
             var q=input.value.trim().toLowerCase();if(!q)return;
-            // Search across all tables
+            // Search across all tables (Material + Location direct Supabase se)
             var results=[];
             DB.get('vehicles').forEach(function(v){if((v.vehicleNo||'').toLowerCase().indexOf(q)>-1||(v.lrNo||'').toLowerCase().indexOf(q)>-1)results.push({type:'Vehicle',label:v.vehicleNo,sub:v.lrNo||'',nav:'inbound',subNav:'inbound-record'});});
-            DB.get('material_master').forEach(function(m){if((m.material||'').toLowerCase().indexOf(q)>-1||(m.ean||'').toLowerCase().indexOf(q)>-1)results.push({type:'Material',label:m.material,sub:m.ean||'',nav:'material'});});
-            DB.get('location_master').forEach(function(l){if((l.rack||'').toLowerCase().indexOf(q)>-1||(l.material||'').toLowerCase().indexOf(q)>-1)results.push({type:'Location',label:l.rack+' - '+l.material,sub:'Qty: '+l.quantity,nav:'location'});});
+            var mres=await sbSearch('material_master',{search:q,cols:['material','ean'],limit:5});
+            mres.rows.forEach(function(m){results.push({type:'Material',label:m.material,sub:m.ean||'',nav:'material'});});
+            var lres=await sbSearch('location_master',{search:q,cols:['rack','material'],limit:5});
+            lres.rows.forEach(function(l){results.push({type:'Location',label:l.rack+' - '+l.material,sub:'Qty: '+l.quantity,nav:'location'});});
             DB.get('obd_data').forEach(function(o){if((o.obdNo||'').toLowerCase().indexOf(q)>-1)results.push({type:'OBD',label:o.obdNo,sub:(o.materials||[]).length+' materials',nav:'picking',subNav:'obd-upload'});});
             DB.get('grn_records').forEach(function(g){if((g.grnNo||'').toLowerCase().indexOf(q)>-1||(g.invoiceNo||'').toLowerCase().indexOf(q)>-1)results.push({type:'GRN',label:g.grnNo,sub:g.invoiceNo,nav:'inbound',subNav:'unloading-stock'});});
             if(!results.length){showToast('No results found for "'+q+'"','warning');return;}
@@ -7455,7 +7786,7 @@ function clearReportFilters(){
     renderReportFilter();
 }
 
-function runReport(){
+async function runReport(){
     var from=document.getElementById('rptFrom').value;
     var to=document.getElementById('rptTo').value;
     if(!from||!to){showToast('Both Date From and Date To are required','error');return;}
@@ -7470,6 +7801,7 @@ function runReport(){
         });
     }
     RSTATE.from=from;RSTATE.to=to;RSTATE.filters=filters;
+    await sbPullFull('location_master',120000);   // ★ stock/putaway reports ke liye on-demand
     LAST_REPORT=buildReportData(RSTATE.type,from,to,filters);
     RSTATE.view='result';
     renderSAPReportView();

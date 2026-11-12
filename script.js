@@ -26,7 +26,7 @@ try {
     console.warn('Supabase init error:', e);
 }
 
-var ALL_TABLES = ['users','location_master','material_master','rack_master','vehicles','invoices','invoice_materials','picking_reports','audit_log','notifications','difference_reports','obd_data','picking_assignments','loading_assignments','loading_data','user_sessions','grn_records','short_reports','unloading_records','loaded_vehicles','picking_done','loading_users','user_work_log','partial_unloads','location_locks','loading_approvals','short_excess_reports'];
+var ALL_TABLES = ['users','location_master','material_master','rack_master','vehicles','invoices','invoice_materials','picking_reports','audit_log','notifications','difference_reports','obd_data','picking_assignments','loading_assignments','loading_data','user_sessions','grn_records','short_reports','unloading_records','loaded_vehicles','picking_done','loading_users','user_work_log','partial_unloads','location_locks','loading_approvals','short_excess_reports','location_requests'];
 
 // Immediate Push with Retry
 async function pushServer(key, val) {
@@ -364,7 +364,11 @@ function renderNotifPanel(){
         h+='</div>';
 
         // Action buttons for approval notifications
-        if(hasDataId&&(isApproval||isPLApproval)){
+        if(hasDataId&&nt.navSection==='locreq'){
+            h+='<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)"><button class="btn btn-glass btn-sm" style="width:100%;justify-content:center" onclick="event.stopPropagation();locNotifOpen(\''+nt.dataId+'\')"><i class="bx bx-map-pin"></i> Review / Assign Location</button></div>';
+        }else if(hasDataId&&nt.navSection==='locreq-picker'){
+            h+='<div style="margin-top:10px"><button class="btn btn-glass btn-sm" style="width:100%;justify-content:center" onclick="event.stopPropagation();pickerNotifOpen(\''+nt.dataId+'\')"><i class="bx bx-box"></i> Open Picking</button></div>';
+        }else if(hasDataId&&(isApproval||isPLApproval)){
             h+='<div style="display:flex;gap:6px;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">';
             h+='<button class="btn btn-glass btn-sm" style="flex:1;justify-content:center;background:rgba(46,213,115,0.15);border-color:var(--success);color:var(--success);font-weight:600" onclick="event.stopPropagation();approveFromNotif(\''+nt.dataId+'\')"><i class="bx bx-check"></i> Approve</button>';
             h+='<button class="btn btn-glass btn-sm" style="flex:1;justify-content:center;background:rgba(255,71,87,0.15);border-color:var(--danger);color:var(--danger);font-weight:600" onclick="event.stopPropagation();rejectFromNotif(\''+nt.dataId+'\')"><i class="bx bx-x"></i> Reject</button>';
@@ -624,7 +628,8 @@ function renderSidebar(){
             {id:'picking-assign',label:'Assign Warehouse Tasks'},
             {id:'start-picking',label:'Confirm Picking'},
             {id:'picking-done',label:'Confirmed Tasks'},
-            {id:'picking-with-loading',label:'Pick & Load'}
+            {id:'picking-with-loading',label:'Pick & Load'},
+            {id:'loc-requests',label:'Location Requests'}
         ]},
         {id:'loading',icon:'bxs-truck',label:'Outbound — Loading',subs:[
             {id:'loading-assign',label:'Assign Loading'},
@@ -712,6 +717,7 @@ var subNames={
     'start-picking':'Confirm Picking Task',
     'picking-done':'Confirmed Picking Tasks',
     'picking-with-loading':'Pick & Load (Combined)',
+    'loc-requests':'Location Requests (Admin)',
     'loading-assign':'Assign Loading Tasks',
     'start-loading':'Execute Loading',
     'loading-done':'Goods Issue Records',
@@ -3309,6 +3315,10 @@ function updateMaterial(id){
 function deleteMaterial(id){if(!confirm('Delete?'))return;DB.remove('material_master',id);showToast('Deleted','success');renderMaterialMaster();}
 
 // ==================== PICKING ====================
+// =====================================================================
+//  OUTBOUND PICKING v2  (lock + nearby allocation + not-found requests
+//  + admin location assign + reverse picking)       — by Claude
+// =====================================================================
 function renderPicking(sub){
     switch(sub){
         case 'obd-upload':renderOBDUpload();break;
@@ -3316,13 +3326,215 @@ function renderPicking(sub){
         case 'start-picking':renderStartPicking();break;
         case 'picking-done':renderPickingDone();break;
         case 'picking-with-loading':renderPickingWithLoading();break;
+        case 'loc-requests':renderLocRequests();break;
         default:renderOBDUpload();
     }
 }
 
-// --- OBD Upload (UNCHANGED) ---
+// ---------- small helpers ----------
+function isAdminUser(){var u=APP.currentUser;return !!u&&(u.role==='Admin'||u.role==='Super Admin');}
+function isMgrUser(){var u=APP.currentUser;return !!u&&(u.role==='Admin'||u.role==='Super Admin'||u.role==='Manager');}
+function nowISO(){return new Date().toISOString();}
+function sumBy(arr,fn){var s=0;arr.forEach(function(x){s+=(fn(x)||0);});return s;}
+function isActiveLock(l){return l.status==='Locked'||l.status==='Hold';}
+function groupMats(obd){
+    var map={},order=[];
+    (obd.materials||[]).forEach(function(m){
+        var k=m.ean||('M:'+m.material);
+        if(!map[k]){map[k]={material:m.material,ean:m.ean,qty:0};order.push(k);}
+        map[k].qty+=m.qty;
+    });
+    return order.map(function(k){return map[k];});
+}
+
+// ---------- rack distance / walking route ----------
+// "A-01-03" -> [1,1,3]   "RACK-012" -> [RACK,12]
+function rackKey(r){
+    var parts=String(r||'').toUpperCase().split(/[^A-Z0-9]+/).filter(Boolean),k=[];
+    parts.forEach(function(p){
+        (p.match(/[A-Z]+|\d+/g)||[]).forEach(function(t){
+            if(/^\d+$/.test(t))k.push(parseInt(t,10));
+            else{var n=0;for(var i=0;i<t.length;i++)n=n*26+(t.charCodeAt(i)-64);k.push(n);}
+        });
+    });
+    return k;
+}
+function rackDist(a,b){
+    var x=rackKey(a),y=rackKey(b);
+    if(!x.length||!y.length)return 1e6;
+    var W=[10000,1000,100,10,1],n=Math.max(x.length,y.length),d=0;
+    for(var i=0;i<n;i++)d+=Math.abs((x[i]||0)-(y[i]||0))*(W[i]!==undefined?W[i]:1);
+    return d;
+}
+function cmpRack(a,b){
+    var x=rackKey(a),y=rackKey(b),n=Math.max(x.length,y.length);
+    for(var i=0;i<n;i++){var d=(x[i]||0)-(y[i]||0);if(d)return d;}
+    return String(a).localeCompare(String(b));
+}
+// nearest-neighbour walking order
+function routeSort(items,getRack){
+    if(items.length<2)return items.slice();
+    var left=items.slice().sort(function(a,b){return cmpRack(getRack(a),getRack(b));});
+    var res=[left.shift()];
+    while(left.length){
+        var last=getRack(res[res.length-1]),bi=0,bd=Infinity;
+        for(var i=0;i<left.length;i++){var d=rackDist(last,getRack(left[i]));if(d<bd){bd=d;bi=i;}}
+        res.push(left.splice(bi,1)[0]);
+    }
+    return res;
+}
+
+// ---------- stock availability (stock minus other OBD locks) ----------
+function makeAvailCtx(){
+    var lm={},lk={};
+    DB.get('location_master').forEach(function(l){if(l.ean&&l.quantity>0)(lm[l.ean]=lm[l.ean]||[]).push(l);});
+    DB.get('location_locks').forEach(function(k){if(k.ean&&isActiveLock(k))(lk[k.ean]=lk[k.ean]||[]).push(k);});
+    return{lm:lm,lk:lk};
+}
+function getLocAvailability(ean,excludeObdId,ctx){
+    if(!ean)return [];
+    ctx=ctx||makeAvailCtx();
+    var map={};
+    (ctx.lm[ean]||[]).forEach(function(l){
+        var R=String(l.rack||'').toUpperCase();
+        if(!map[R])map[R]={rack:l.rack,locationId:l.id,stock:0,locked:0,lockedBy:[],oldest:Infinity};
+        var o=map[R];o.stock+=l.quantity;
+        var t=new Date(l.dateTime||l.date||0).getTime()||0;if(t<o.oldest)o.oldest=t;
+    });
+    (ctx.lk[ean]||[]).forEach(function(k){
+        if(excludeObdId&&k.obdId===excludeObdId)return;
+        var o=map[String(k.rack||'').toUpperCase()];if(!o)return;
+        o.locked+=k.lockedQty;o.lockedBy.push({obdNo:k.obdNo,qty:k.lockedQty,picked:k.pickedQty||0,lockId:k.id});
+    });
+    var out=[];
+    for(var r in map){map[r].available=Math.max(0,map[r].stock-map[r].locked);out.push(map[r]);}
+    return out;
+}
+
+// ---------- nearby allocation algorithm ----------
+// 1) one location that can fill everything (nearest to anchor, else best-fit, FIFO tie-break)
+// 2) else start at nearest/largest location and keep adding nearest neighbours
+function allocateMaterial(ean,need,excludeObdId,anchor,ctx){
+    var avail=getLocAvailability(ean,excludeObdId,ctx).filter(function(a){return a.available>0;});
+    var total=sumBy(avail,function(a){return a.available;});
+    var take=Math.min(need,total),picks=[];
+    if(take<=0)return{picks:[],locked:0,short:need,anchor:anchor};
+    function dist(a){return anchor?rackDist(anchor,a.rack):0;}
+    var fits=avail.filter(function(a){return a.available>=take;});
+    if(fits.length){
+        fits.sort(function(a,b){return (dist(a)-dist(b))||(a.available-b.available)||(a.oldest-b.oldest)||0;});
+        picks.push({loc:fits[0],qty:take});
+    }else{
+        var pool=avail.slice(),rem=take,seed;
+        if(anchor)pool.sort(function(a,b){return (dist(a)-dist(b))||(b.available-a.available);});
+        else pool.sort(function(a,b){return (b.available-a.available)||(a.oldest-b.oldest)||0;});
+        seed=pool.shift();
+        var q=Math.min(seed.available,rem);picks.push({loc:seed,qty:q});rem-=q;
+        var last=seed.rack;
+        while(rem>0&&pool.length){
+            var cand=pool.filter(function(a){return a.available>=rem;});
+            var from=cand.length?cand:pool;
+            from.sort(function(a,b){return (rackDist(last,a.rack)-rackDist(last,b.rack))||(b.available-a.available);});
+            var nx=from[0];pool.splice(pool.indexOf(nx),1);
+            var q2=Math.min(nx.available,rem);picks.push({loc:nx,qty:q2});rem-=q2;last=nx.rack;
+        }
+    }
+    return{picks:picks,locked:take,short:need-take,anchor:picks[picks.length-1].loc.rack};
+}
+// same OBD + material + rack ke duplicate locks ko ek row me merge karta hai
+function mergeDuplicateLocks(obdId){
+    var seen={},merged=0;
+    DB.filter('location_locks',function(l){return l.obdId===obdId&&l.status==='Locked';}).forEach(function(l){
+        var k=l.ean+'|'+String(l.rack||'').toUpperCase(),f=seen[k];
+        if(!f){seen[k]=l;return;}
+        f.lockedQty+=l.lockedQty;f.pickedQty=(f.pickedQty||0)+(l.pickedQty||0);
+        DB.update('location_locks',f.id,{lockedQty:f.lockedQty,pickedQty:f.pickedQty});
+        DB.update('location_locks',l.id,{status:'Released',releaseReason:'Merged into '+f.id,releasedAt:nowISO()});
+        merged++;
+    });
+    return merged;
+}
+function addLock(obd,mat,loc,qty,extra){
+    var ex=DB.filter('location_locks',function(l){return l.obdId===obd.id&&l.ean===mat.ean&&l.status==='Locked'&&String(l.rack||'').toUpperCase()===String(loc.rack||'').toUpperCase();})[0];
+    if(ex){return DB.update('location_locks',ex.id,{lockedQty:ex.lockedQty+qty});}
+    var l={obdId:obd.id,obdNo:obd.obdNo,material:mat.material,ean:mat.ean,locationId:loc.locationId,rack:loc.rack,lockedQty:qty,pickedQty:0,status:'Locked',priority:obd.priority||'Normal'};
+    if(extra)for(var k in extra)l[k]=extra[k];
+    return DB.add('location_locks',l);
+}
+
+// ---------- LOCK LOCATIONS for an OBD (same return shape as before) ----------
+function lockLocationsForOBD(obdId,obdNo){
+    var obd=DB.find('obd_data',obdId);
+    var res={totalMaterials:0,fullyLocked:0,partialLocked:0,noStock:0,details:[]};
+    if(!obd)return res;
+    var mats=groupMats(obd),anchor=null;res.totalMaterials=mats.length;
+    mats.forEach(function(m){
+        if(m.qty<=0)return;
+        var own=DB.filter('location_locks',function(l){return l.obdId===obdId&&l.ean===m.ean&&isActiveLock(l);});
+        var have=sumBy(own,function(l){return l.lockedQty;}),locked=0,need=m.qty-have;
+        if(need>0&&m.ean){
+            var al=allocateMaterial(m.ean,need,null,anchor,null);
+            al.picks.forEach(function(pk){addLock(obd,m,pk.loc,pk.qty);});
+            locked=al.locked;if(al.picks.length)anchor=al.anchor;
+        }else if(own.length)anchor=own[own.length-1].rack;
+        var total=have+locked;
+        if(total===0)res.noStock++;else if(total<m.qty)res.partialLocked++;else res.fullyLocked++;
+        res.details.push({material:m.material,ean:m.ean,needed:m.qty,locked:total,short:m.qty-total});
+    });
+    return res;
+}
+function releaseLocksForOBD(obdId){
+    var locks=DB.filter('location_locks',function(l){return l.obdId===obdId&&isActiveLock(l);});
+    locks.forEach(function(l){DB.update('location_locks',l.id,{status:'Released',releasedAt:nowISO()});});
+    DB.filter('location_requests',function(r){return r.obdId===obdId&&r.status==='Pending';}).forEach(function(r){
+        DB.update('location_requests',r.id,{status:'Cancelled',closedNote:'OBD unassigned / released',closedAt:nowISO()});
+    });
+    return locks.length;
+}
+// urgent OBD: take unpicked locks from non-urgent OBDs
+function stealLocksForUrgent(obd){
+    var affected={},total=0;
+    groupMats(obd).forEach(function(m){
+        if(!m.ean)return;
+        var have=sumBy(DB.filter('location_locks',function(l){return l.obdId===obd.id&&l.ean===m.ean&&isActiveLock(l);}),function(l){return l.lockedQty;});
+        var need=m.qty-have;if(need<=0)return;
+        var donors=DB.filter('location_locks',function(l){return l.ean===m.ean&&l.status==='Locked'&&l.obdId!==obd.id&&(l.pickedQty||0)===0&&l.priority!=='Urgent';});
+        donors.sort(function(a,b){return String(b.createdAt).localeCompare(String(a.createdAt));});
+        donors.forEach(function(d){
+            if(need<=0)return;
+            var take=Math.min(d.lockedQty,need);
+            if(take>=d.lockedQty)DB.update('location_locks',d.id,{status:'Released',releaseReason:'Reallocated to urgent '+obd.obdNo});
+            else DB.update('location_locks',d.id,{lockedQty:d.lockedQty-take});
+            addLock(obd,m,{locationId:d.locationId,rack:d.rack},take,{stolenFrom:d.obdNo});
+            need-=take;total+=take;affected[d.obdNo]=(affected[d.obdNo]||0)+take;
+        });
+    });
+    for(var no in affected)addNotif('Urgent '+obd.obdNo+' ne '+no+' se '+affected[no]+' qty lock le liya. '+no+' ko Re-check Locks chahiye.','warning');
+    return total;
+}
+
+// ---------- stock info per OBD (used by OBD list / detail) ----------
+function obdStockInfo(obd,ctx){
+    ctx=ctx||makeAvailCtx();
+    var rows=[],ok=true,any=false;
+    groupMats(obd).forEach(function(m){
+        var av=getLocAvailability(m.ean,obd.id,ctx);
+        var stock=sumBy(av,function(a){return a.stock;}),free=sumBy(av,function(a){return a.available;});
+        var st=free>=m.qty?'OK':(free>0?'Partial':'None');
+        if(st!=='OK')ok=false;if(free>0)any=true;
+        av.sort(function(a,b){return cmpRack(a.rack,b.rack);});
+        rows.push({material:m.material,ean:m.ean,required:m.qty,stock:stock,free:free,lockedOthers:stock-free,status:st,locs:av});
+    });
+    return{rows:rows,allOk:ok,anyStock:any};
+}
+function stockBadge(info){
+    if(info.allOk)return '<span class="badge badge-success">Stock OK</span>';
+    return info.anyStock?'<span class="badge badge-warning">Partial Stock</span>':'<span class="badge badge-danger">No Stock</span>';
+}
+
+// ---------- Create Outbound Delivery (OBD upload + stock view) ----------
 function renderOBDUpload(){
-    var obds=DB.get('obd_data').reverse();
+    var obds=DB.get('obd_data').slice().reverse(),ctx=makeAvailCtx();
     var h='<div class="section-header"><h2><i class="bx bx-upload"></i> OBD Upload</h2></div>';
     h+='<div class="card"><div class="card-title"><i class="bx bx-file"></i> Upload OBD (Bulk Excel)</div>';
     h+='<label class="btn btn-glass" style="cursor:pointer;margin-bottom:12px"><i class="bx bx-upload"></i> Choose OBD File<input type="file" id="obdFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="document.getElementById(\'obdFName\').innerText=this.files[0].name"></label>';
@@ -3330,14 +3542,34 @@ function renderOBDUpload(){
     h+='<button class="btn btn-glass" onclick="processOBDUpload()"><i class="bx bx-check-double"></i> Upload OBDs</button>';
     h+='<div style="background:var(--bg-secondary);padding:10px;border-radius:var(--radius-sm);font-size:11px;color:var(--text-muted);border:1px dashed var(--warning);margin-top:10px"><strong style="color:var(--warning)">Excel Format:</strong><br>OBD No | Material | EAN | Qty | Customer</div>';
     h+='</div>';
-    h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-list-ul"></i> Uploaded OBDs ('+obds.length+')</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Materials</th><th>Total Qty</th><th>Status</th></tr></thead><tbody>';
-    if(!obds.length)h+='<tr><td colspan="4" style="text-align:center;color:var(--text-muted);padding:20px">No OBDs</td></tr>';
+    h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-list-ul"></i> Uploaded OBDs ('+obds.length+') <span style="font-size:10px;color:var(--text-muted);font-weight:normal">— OBD par click karo: material-wise stock dikhega</span></div><div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Customer</th><th>Materials</th><th>Total Qty</th><th>Warehouse Stock</th><th>Status</th></tr></thead><tbody>';
+    if(!obds.length)h+='<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:20px">No OBDs</td></tr>';
     else obds.forEach(function(o){
-        var totalQty=0;(o.materials||[]).forEach(function(m){totalQty+=m.qty;});
-        h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(o.obdNo)+'</td><td><span class="badge badge-info">'+(o.materials||[]).length+'</span></td><td><strong>'+totalQty+'</strong></td><td><span class="badge '+(o.status==='Picking Done'?'badge-success':(o.status==='Assigned'?'badge-warning':'badge-accent'))+'">'+esc(o.status||'Pending')+'</span></td></tr>';
+        var totalQty=sumBy(o.materials||[],function(m){return m.qty;});
+        var sb=(o.status==='Pending')?stockBadge(obdStockInfo(o,ctx)):'<span style="color:var(--text-muted)">—</span>';
+        h+='<tr style="cursor:pointer" onclick="showOBDStockDetail(\''+o.id+'\')"><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(o.obdNo)+(o.priority==='Urgent'?' <span class="badge badge-danger">URGENT</span>':'')+'</td><td>'+esc(o.customer||'-')+'</td><td><span class="badge badge-info">'+(o.materials||[]).length+'</span></td><td><strong>'+totalQty+'</strong></td><td>'+sb+'</td><td><span class="badge '+(o.status==='Picking Done'?'badge-success':(o.status==='Assigned'?'badge-warning':'badge-accent'))+'">'+esc(o.status||'Pending')+'</span></td></tr>';
     });
     h+='</tbody></table></div></div>';
     setHtml(h);
+}
+function showOBDStockDetail(obdId){
+    var obd=DB.find('obd_data',obdId);if(!obd)return;
+    var info=obdStockInfo(obd);
+    var h='<div style="margin-bottom:12px;display:flex;gap:10px;flex-wrap:wrap;align-items:center"><strong style="color:var(--accent);font-family:var(--font-display)">'+esc(obd.obdNo)+'</strong><span>'+esc(obd.customer||'')+'</span>'+stockBadge(info)+'<span class="badge badge-accent">'+esc(obd.status||'Pending')+'</span></div>';
+    h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>EAN</th><th>OBD Qty</th><th>Total Stock</th><th>Locked (other OBD)</th><th>Free</th><th>Status</th></tr></thead><tbody>';
+    info.rows.forEach(function(r){
+        h+='<tr class="'+(r.status==='OK'?'scan-row-green':'scan-row-red')+'"><td>'+esc(r.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(r.ean)+'</td><td><strong>'+r.required+'</strong></td><td>'+r.stock+'</td><td>'+r.lockedOthers+'</td><td><strong>'+r.free+'</strong></td><td>'+(r.status==='OK'?'<span class="badge badge-success">OK</span>':(r.status==='Partial'?'<span class="badge badge-warning">Short '+(r.required-r.free)+'</span>':'<span class="badge badge-danger">No Stock</span>'))+'</td></tr>';
+        if(r.locs.length){
+            h+='<tr><td colspan="7" style="font-size:11px;color:var(--text-muted);padding:4px 12px 10px">';
+            r.locs.forEach(function(a){
+                var lb=a.lockedBy.map(function(x){return x.obdNo+':'+x.qty;}).join(', ');
+                h+='<span class="lr-chip'+(a.available>0?'':' off')+'"><i class="bx bx-map-pin"></i> '+esc(a.rack)+' · stock '+a.stock+(a.locked?' · locked '+a.locked+' ('+esc(lb)+')':'')+' · <b>free '+a.available+'</b></span> ';
+            });
+            h+='</td></tr>';
+        }
+    });
+    h+='</tbody></table></div>';
+    showModal('OBD Stock — '+esc(obd.obdNo),h,'xl','<button class="btn btn-glass" onclick="closeModal()">Close</button>');
 }
 function processOBDUpload(){
     var fi=document.getElementById('obdFile');if(!fi||!fi.files[0]){showToast('Select file','error');return;}
@@ -3369,457 +3601,639 @@ function processOBDUpload(){
     reader.readAsArrayBuffer(fi.files[0]);
 }
 
-// ========== LOCATION LOCK SYSTEM ==========
-// Lock locations for an OBD when assigned
-function lockLocationsForOBD(obdId,obdNo){
-    var obd=DB.find('obd_data',obdId);
-    if(!obd)return{totalMaterials:0,fullyLocked:0,partialLocked:0,noStock:0,details:[]};
-    var fullyLocked=0,partialLocked=0,noStock=0,details=[];
-
-    obd.materials.forEach(function(mat){
-        var needed=mat.qty;
-        if(needed<=0)return;
-
-        // Get all ACTIVE locks for this EAN from OTHER OBDs
-        var existingLocks=DB.filter('location_locks',function(l){
-            return l.ean===mat.ean&&l.status==='Locked'&&l.obdId!==obdId;
-        });
-
-        // Get locations with stock
-        var locs=DB.filter('location_master',function(l){
-            return l.ean===mat.ean&&l.quantity>0;
-        });
-
-        // Calculate available per location (stock minus other OBDs' locks)
-        var locAvail=[];
-        locs.forEach(function(loc){
-            var lockedHere=0;
-            existingLocks.forEach(function(el){if(el.locationId===loc.id)lockedHere+=el.lockedQty;});
-            var avail=loc.quantity-lockedHere;
-            if(avail>0)locAvail.push({locationId:loc.id,rack:loc.rack,available:avail});
-        });
-
-        // Sort: fullest first
-        locAvail.sort(function(a,b){return b.available-a.available;});
-
-        // Lock across locations
-        var stillNeeded=needed;
-        var totalLockedForMat=0;
-
-        locAvail.forEach(function(la){
-            if(stillNeeded<=0)return;
-            var lockQty=Math.min(la.available,stillNeeded);
-            DB.add('location_locks',{
-                obdId:obdId,obdNo:obdNo,
-                material:mat.material,ean:mat.ean,
-                locationId:la.locationId,rack:la.rack,
-                lockedQty:lockQty,pickedQty:0,
-                status:'Locked'
-            });
-            totalLockedForMat+=lockQty;
-            stillNeeded-=lockQty;
-        });
-
-        if(totalLockedForMat===0)noStock++;
-        else if(totalLockedForMat<needed)partialLocked++;
-        else fullyLocked++;
-
-        details.push({material:mat.material,ean:mat.ean,needed:needed,locked:totalLockedForMat,short:needed-totalLockedForMat});
-    });
-
-    return{totalMaterials:obd.materials.length,fullyLocked:fullyLocked,partialLocked:partialLocked,noStock:noStock,details:details};
-}
-
-// Release all locks for an OBD (on unassign)
-function releaseLocksForOBD(obdId){
-    var locks=DB.filter('location_locks',function(l){return l.obdId===obdId&&l.status==='Locked';});
-    locks.forEach(function(l){DB.update('location_locks',l.id,{status:'Released'});});
-    return locks.length;
-}
-
-// --- Picking Assign (MODIFIED: auto locks locations) ---
+// ---------- Picking Assign (priority queue + auto lock) ----------
 function renderPickingAssign(){
-   var plAssignedIds={};DB.filter('picking_assignments',function(a){return a.type==='pickandload'&&a.status==='Assigned';}).forEach(function(a){(a.obdIds||[]).forEach(function(id){plAssignedIds[id]=1;});});
-var obds=DB.get('obd_data').filter(function(o){return o.status==='Pending'&&!plAssignedIds[o.id];});
-    var assigned=DB.filter('picking_assignments',function(a){return a.status==='Assigned';});
-    var h='<div class="section-header"><h2><i class="bx bx-user-plus"></i> Picking Assign</h2></div>';
-
+    var plIds={};
+    DB.filter('picking_assignments',function(a){return a.type==='pickandload'&&a.status==='Assigned';}).forEach(function(a){(a.obdIds||[]).forEach(function(id){plIds[id]=1;});});
+    var obds=DB.get('obd_data').filter(function(o){return o.status==='Pending'&&!plIds[o.id];});
+    var assigned=DB.filter('picking_assignments',function(a){return a.status==='Assigned'&&a.type!=='pickandload';});
+    assigned.sort(function(a,b){return ((b.priority==='Urgent')-(a.priority==='Urgent'))||((a.seq||999)-(b.seq||999))||String(a.assignedAt).localeCompare(String(b.assignedAt));});
+    var users=DB.get('users')||[];
+    var h='<div class="section-header"><h2><i class="bx bx-user-plus"></i> Picking Assign</h2>';
+    if(assigned.length)h+='<button class="btn btn-glass" onclick="topUpAll()"><i class="bx bx-refresh"></i> Re-check Locks (all)</button>';
+    h+='</div>';
     h+='<div class="card"><div class="card-title"><i class="bx bx-list-ul"></i> Unassigned OBDs ('+obds.length+')</div>';
     if(!obds.length)h+='<div style="color:var(--text-muted);padding:16px;text-align:center">All OBDs assigned</div>';
     else{
         h+='<div class="form-group" style="margin-bottom:12px"><label>Assign To User <span class="req">*</span></label>';
         h+='<select id="pickAssignUser" class="form-input" style="max-width:300px"><option value="">-- Select User --</option>';
-        var users=DB.get('users')||[];
         if(!users.length)h+='<option value="__manual__">-- Type Manually --</option>';
         else users.forEach(function(u){h+='<option value="'+esc(u.id)+'">'+esc(u.name||u.username)+(u.role?' ('+esc(u.role)+')':'')+'</option>';});
         h+='</select></div>';
         h+='<div id="manualUserWrap" style="display:none;margin-bottom:12px"><div class="form-group"><label>Enter User Name</label><input type="text" id="pickAssignUserManual" class="form-input" style="max-width:300px" placeholder="Type user name..."></div></div>';
-
-        h+='<div class="chk-list" id="obdChkList">';
-        obds.forEach(function(o){
-            var totalQ=0;(o.materials||[]).forEach(function(m){totalQ+=m.qty;});
-            h+='<label class="chk-list-item"><input type="checkbox" class="obd-chk" value="'+o.id+'" data-no="'+esc(o.obdNo)+'"><span><strong style="color:var(--accent);font-family:var(--font-display);font-size:11px">'+esc(o.obdNo)+'</strong> — '+(o.materials||[]).length+' mats, '+totalQ+' qty</span></label>';
+        h+='<div class="pq-toolbar"><label><input type="checkbox" onchange="pqToggleAll(this.checked)"> Select all</label><span class="pq-hint">▲▼ se sequence badlo — upar wali OBD ko pehle best/nearby locations milenge. ★ = Urgent (sabse pehle).</span></div>';
+        h+='<div id="pqList" class="pq-list">';
+        var ctx=makeAvailCtx();
+        obds.forEach(function(o,i){
+            var tq=sumBy(o.materials||[],function(m){return m.qty;});
+            h+='<div class="pq-row" data-id="'+o.id+'" data-no="'+esc(o.obdNo)+'">';
+            h+='<input type="checkbox" class="obd-chk" value="'+o.id+'" data-no="'+esc(o.obdNo)+'">';
+            h+='<span class="pq-seq">'+(i+1)+'</span>';
+            h+='<div class="pq-main"><strong>'+esc(o.obdNo)+'</strong><small>'+(o.materials||[]).length+' mats · '+tq+' qty'+(o.customer?' · '+esc(o.customer):'')+'</small></div>';
+            h+=stockBadge(obdStockInfo(o,ctx));
+            h+='<button type="button" class="pq-btn pq-star" title="Urgent" onclick="pqToggleUrgent(this)">★</button>';
+            h+='<button type="button" class="pq-btn" onclick="pqMove(this,-1)">▲</button><button type="button" class="pq-btn" onclick="pqMove(this,1)">▼</button>';
+            h+='<button type="button" class="pq-btn" title="Stock detail" onclick="showOBDStockDetail(\''+o.id+'\')"><i class="bx bx-show"></i></button>';
+            h+='</div>';
         });
         h+='</div>';
-        h+='<div class="form-actions"><button class="btn btn-glass" onclick="doPickingAssign()"><i class="bx bx-check-double"></i> Assign & Lock Locations</button></div>';
+        h+='<div class="form-actions"><button class="btn btn-glass" onclick="doPickingAssign()"><i class="bx bx-check-double"></i> Assign & Lock Locations (in this order)</button></div>';
     }
     h+='</div>';
-
     if(assigned.length){
-        h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-user-check"></i> Assigned ('+assigned.length+')</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Assigned To</th><th>Lock Status</th><th>Materials</th><th>Actions</th></tr></thead><tbody>';
-        assigned.forEach(function(a){
+        h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-user-check"></i> Assigned ('+assigned.length+')</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>OBD No</th><th>Assigned To</th><th>Lock Status</th><th>Picked</th><th>Actions</th></tr></thead><tbody>';
+        assigned.forEach(function(a,i){
             var obd=DB.find('obd_data',a.obdId);
-            // Check lock status
-            var locks=DB.filter('location_locks',function(l){return l.obdId===a.obdId&&l.status==='Locked';});
-            var totalLocked=0,totalPicked=0;
-            locks.forEach(function(l){totalLocked+=l.lockedQty;totalPicked+=l.pickedQty;});
-            var totalQ=0;if(obd)(obd.materials||[]).forEach(function(m){totalQ+=m.qty;});
-            var lockBadge=totalLocked>=totalQ?'<span class="badge badge-success">Fully Locked</span>':(totalLocked>0?'<span class="badge badge-warning">Partial ('+totalLocked+'/'+totalQ+')</span>':'<span class="badge badge-danger">No Stock</span>');
-
-            h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(obd?obd.obdNo:'-')+'</td><td>'+esc(a.assignedToName)+'</td><td>'+lockBadge+'</td><td><span class="badge badge-info">'+(obd?obd.materials.length:0)+'</span></td><td><button class="btn btn-danger btn-sm" onclick="unassignPicking(\''+a.id+'\')"><i class="bx bx-user-minus"></i> Unassign</button></td></tr>';
+            var locks=DB.filter('location_locks',function(l){return l.obdId===a.obdId&&isActiveLock(l);});
+            var tl=sumBy(locks,function(l){return l.lockedQty;}),tp=sumBy(locks,function(l){return l.pickedQty;});
+            var tq=obd?sumBy(obd.materials||[],function(m){return m.qty;}):0;
+            var hold=locks.filter(function(l){return l.status==='Hold';}).length;
+            var lb=tl>=tq?'<span class="badge badge-success">Fully Locked</span>':(tl>0?'<span class="badge badge-warning">Partial ('+tl+'/'+tq+')</span>':'<span class="badge badge-danger">No Stock</span>');
+            if(hold)lb+=' <span class="badge badge-info">'+hold+' on hold</span>';
+            h+='<tr><td>'+(i+1)+'</td><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(a.obdNo||(obd?obd.obdNo:'-'))+(a.priority==='Urgent'?' <span class="badge badge-danger">URGENT</span>':'')+'</td><td>'+esc(a.assignedToName)+'</td><td>'+lb+'</td><td>'+tp+'</td><td style="display:flex;gap:4px;flex-wrap:wrap">';
+            h+='<button class="btn btn-glass btn-sm" onclick="showOBDStockDetail(\''+a.obdId+'\')"><i class="bx bx-show"></i></button>';
+            if(tl<tq)h+='<button class="btn btn-info btn-sm" onclick="topUpAssign(\''+a.id+'\')"><i class="bx bx-refresh"></i> Re-check</button>';
+            if(a.priority!=='Urgent'&&tp===0)h+='<button class="btn btn-warning btn-sm" onclick="makeUrgentAssign(\''+a.id+'\')">★ Urgent</button>';
+            h+='<button class="btn btn-danger btn-sm" onclick="unassignPicking(\''+a.id+'\')"><i class="bx bx-user-minus"></i></button></td></tr>';
         });
         h+='</tbody></table></div></div>';
     }
     setHtml(h);
-
     var sel=document.getElementById('pickAssignUser');
     if(sel){
         sel.onchange=function(){document.getElementById('manualUserWrap').style.display=(this.value==='__manual__'?'block':'none');};
         if(!users.length)document.getElementById('manualUserWrap').style.display='block';
     }
 }
+function pqRenum(){var i=0;document.querySelectorAll('#pqList .pq-row').forEach(function(r){r.querySelector('.pq-seq').textContent=++i;});}
+function pqMove(btn,dir){
+    var row=btn.closest('.pq-row'),p=row.parentNode;
+    if(dir<0&&row.previousElementSibling)p.insertBefore(row,row.previousElementSibling);
+    else if(dir>0&&row.nextElementSibling)p.insertBefore(row.nextElementSibling,row);
+    pqRenum();
+}
+function pqToggleUrgent(btn){
+    var row=btn.closest('.pq-row');row.classList.toggle('urgent');
+    if(row.classList.contains('urgent'))row.parentNode.insertBefore(row,row.parentNode.firstChild);
+    pqRenum();
+}
+function pqToggleAll(c){document.querySelectorAll('#pqList .obd-chk').forEach(function(x){x.checked=c;});}
 
 function doPickingAssign(){
     var sel=document.getElementById('pickAssignUser');
     var manualInp=document.getElementById('pickAssignUserManual');
     var userId='',userName='';
     if(sel.value==='__manual__'){userName=manualInp?manualInp.value.trim():'';userId=userName;}
-    else if(sel.value){userId=sel.value;userName=sel.options[sel.selectedIndex].text;var rpIdx=userName.lastIndexOf(' (');if(rpIdx>-1)userName=userName.substring(0,rpIdx);}
+    else if(sel.value){userId=sel.value;userName=sel.options[sel.selectedIndex].text;var rp=userName.lastIndexOf(' (');if(rp>-1)userName=userName.substring(0,rp);}
     if(!userId||!userName){showToast('Select a user','error');return;}
-    var checks=document.querySelectorAll('.obd-chk:checked');
-    if(!checks.length){showToast('Select at least one OBD','error');return;}
-
-    var count=0,lockResults=[];
-    checks.forEach(function(chk){
-        var obdId=chk.value,obdNo=chk.getAttribute('data-no');
-        DB.add('picking_assignments',{obdId:obdId,obdNo:obdNo,assignedTo:userId,assignedToName:userName,status:'Assigned',assignedAt:new Date().toISOString()});
-        DB.update('obd_data',obdId,{status:'Assigned'});
-        // AUTO LOCK LOCATIONS
-        var lockResult=lockLocationsForOBD(obdId,obdNo);
-        lockResults.push({obdNo:obdNo,result:lockResult});
-        count++;
+    var rows=[];
+    document.querySelectorAll('#pqList .pq-row').forEach(function(r,i){
+        var c=r.querySelector('.obd-chk');
+        if(c&&c.checked)rows.push({id:c.value,no:r.getAttribute('data-no'),urgent:r.classList.contains('urgent'),i:i});
     });
-
-    logAction('Picking','ASSIGN',count+' OBDs assigned to '+userName+' with location locks');
-    showToast(count+' OBDs assigned!','success');
-
-    // Show lock summary if any shortage
-    var hasShort=lockResults.some(function(lr){return lr.result.partialLocked>0||lr.result.noStock>0;});
-    if(hasShort){
-        var sh='<div style="padding:16px"><div style="font-size:16px;font-weight:700;margin-bottom:12px"><i class="bx bx-lock" style="color:var(--warning)"></i> Location Lock Summary</div>';
-        lockResults.forEach(function(lr){
-            if(lr.result.partialLocked===0&&lr.result.noStock===0)return;
-            sh+='<div style="margin-bottom:12px;padding:10px;background:var(--bg-secondary);border-radius:8px;border-left:3px solid var(--warning)">';
-            sh+='<div style="font-weight:700;color:var(--accent);margin-bottom:6px">'+esc(lr.obdNo)+'</div>';
-            lr.result.details.forEach(function(d){
-                if(d.short>0)sh+='<div style="font-size:12px;color:var(--text-muted);padding:2px 0"><span style="color:var(--danger)">⚠</span> '+esc(d.material)+': Need <strong>'+d.needed+'</strong>, Locked <strong>'+d.locked+'</strong>, <strong style="color:var(--danger)">Short '+d.short+'</strong></div>';
-            });
-            sh+='</div>';
-        });
-        sh+='</div>';
-        showModal('Location Lock Warning',sh,'lg','<button class="btn btn-glass" onclick="closeModal();renderPickingAssign()"><i class="bx bx-check"></i> OK</button>');
-    }else{renderPickingAssign();}
+    if(!rows.length){showToast('Select at least one OBD','error');return;}
+    rows.sort(function(a,b){return ((b.urgent?1:0)-(a.urgent?1:0))||(a.i-b.i);});
+    var results=[];
+    rows.forEach(function(r,idx){
+        var pr=r.urgent?'Urgent':'Normal';
+        DB.add('picking_assignments',{obdId:r.id,obdNo:r.no,assignedTo:userId,assignedToName:userName,status:'Assigned',assignedAt:nowISO(),priority:pr,seq:idx+1});
+        DB.update('obd_data',r.id,{status:'Assigned',priority:pr});
+        results.push({seq:idx+1,obdNo:r.no,priority:pr,result:lockLocationsForOBD(r.id,r.no)});
+    });
+    logAction('Picking','ASSIGN',rows.length+' OBDs assigned to '+userName+' with location locks (sequence wise)');
+    showToast(rows.length+' OBDs assigned!','success');
+    var sh='<div class="table-wrapper"><table class="data-table"><thead><tr><th>#</th><th>OBD</th><th>Priority</th><th>Lock Result</th></tr></thead><tbody>';
+    results.forEach(function(lr){
+        var r=lr.result,txt;
+        if(r.noStock===0&&r.partialLocked===0)txt='<span class="badge badge-success">Fully locked</span>';
+        else{
+            txt=r.details.filter(function(d){return d.short>0;}).map(function(d){return '<div style="font-size:11px">⚠ '+esc(d.material)+': need '+d.needed+', locked '+d.locked+', <b style="color:var(--danger)">short '+d.short+'</b></div>';}).join('');
+        }
+        sh+='<tr><td>'+lr.seq+'</td><td style="color:var(--accent);font-family:var(--font-display);font-size:11px">'+esc(lr.obdNo)+'</td><td>'+(lr.priority==='Urgent'?'<span class="badge badge-danger">URGENT</span>':'Normal')+'</td><td>'+txt+'</td></tr>';
+    });
+    sh+='</tbody></table></div>';
+    showModal('<i class="bx bx-lock"></i> Location Lock Summary',sh,'lg','<button class="btn btn-glass" onclick="closeModal();renderPickingAssign()"><i class="bx bx-check"></i> OK</button>');
 }
-
+function topUpAssign(assignId){
+    var a=DB.find('picking_assignments',assignId);if(!a)return;
+    var r=lockLocationsForOBD(a.obdId,a.obdNo);
+    var short=sumBy(r.details,function(d){return d.short;});
+    showToast(short?'Abhi bhi '+short+' qty short':'Fully locked ho gaya!',short?'warning':'success');
+    renderPickingAssign();
+}
+function topUpAll(){
+    var as=DB.filter('picking_assignments',function(a){return a.status==='Assigned'&&a.type!=='pickandload';});
+    as.sort(function(a,b){return ((b.priority==='Urgent')-(a.priority==='Urgent'))||((a.seq||999)-(b.seq||999))||String(a.assignedAt).localeCompare(String(b.assignedAt));});
+    var fixed=0;
+    as.forEach(function(a){
+        var before=sumBy(DB.filter('location_locks',function(l){return l.obdId===a.obdId&&isActiveLock(l);}),function(l){return l.lockedQty;});
+        lockLocationsForOBD(a.obdId,a.obdNo);
+        var after=sumBy(DB.filter('location_locks',function(l){return l.obdId===a.obdId&&isActiveLock(l);}),function(l){return l.lockedQty;});
+        fixed+=after-before;
+    });
+    showToast(fixed+' qty naya lock hua','success');renderPickingAssign();
+}
+function makeUrgentAssign(assignId){
+    var a=DB.find('picking_assignments',assignId);if(!a)return;
+    if(!confirm('Is OBD ko URGENT banayein? Zarurat padi to dusri (non-urgent, unpicked) OBD ke locks isko mil jayenge.'))return;
+    DB.update('picking_assignments',assignId,{priority:'Urgent',seq:0});
+    DB.update('obd_data',a.obdId,{priority:'Urgent'});
+    DB.filter('location_locks',function(l){return l.obdId===a.obdId&&isActiveLock(l);}).forEach(function(l){DB.update('location_locks',l.id,{priority:'Urgent'});});
+    var obd=DB.find('obd_data',a.obdId);
+    lockLocationsForOBD(a.obdId,a.obdNo);
+    var stolen=stealLocksForUrgent(obd);
+    logAction('Picking','URGENT',a.obdNo+' marked urgent, '+stolen+' qty re-allocated');
+    showToast(a.obdNo+' urgent! '+stolen+' qty re-allocated','success');renderPickingAssign();
+}
 function unassignPicking(assignId){
     if(!confirm('Unassign?'))return;
     var a=DB.find('picking_assignments',assignId);if(!a)return;
     DB.update('picking_assignments',assignId,{status:'Unassigned'});
-    DB.update('obd_data',a.obdId,{status:'Pending'});
-    // RELEASE ALL LOCKS
+    DB.update('obd_data',a.obdId,{status:'Pending',priority:'Normal'});
     var released=releaseLocksForOBD(a.obdId);
     logAction('Picking','UNASSIGN','OBD '+a.obdNo+' unassigned, '+released+' locks released');
     showToast('Unassigned, '+released+' locks released','success');renderPickingAssign();
 }
 
-// --- Start Picking (COMPLETELY MODIFIED: uses locked locations) ---
+// ---------- Picker: My Picking ----------
 function renderStartPicking(){
     if(!APP.currentUser)return;
-    var myAssign=DB.filter('picking_assignments',function(a){return a.assignedTo===APP.currentUser.id&&a.status==='Assigned'&&a.type!=='pickandload';});
-
+    var my=DB.filter('picking_assignments',function(a){return a.assignedTo===APP.currentUser.id&&a.status==='Assigned'&&a.type!=='pickandload';});
+    my.sort(function(a,b){return ((b.priority==='Urgent')-(a.priority==='Urgent'))||((a.seq||999)-(b.seq||999));});
     var h='<div class="section-header"><h2><i class="bx bx-box"></i> My Picking</h2></div>';
-    if(!myAssign.length){
-        var allAssigned=DB.filter('picking_assignments',function(a){return a.status==='Assigned';});
-        h+='<div class="card"><div class="empty-state"><i class="bx bx-inbox"></i><p>No OBDs assigned to you</p></div>';
-        if(allAssigned.length>0){
-            h+='<div style="margin-top:12px;padding:10px;background:var(--bg-secondary);border-radius:8px;font-size:11px;color:var(--text-muted);text-align:left">';
-            h+='<div><strong>Debug:</strong> Your ID: <code style="background:var(--bg-primary);padding:1px 4px;border-radius:3px">'+esc(APP.currentUser.id)+'</code> | Name: <code style="background:var(--bg-primary);padding:1px 4px;border-radius:3px">'+esc(APP.currentUser.name)+'</code></div>';
-            h+='<div style="margin-top:4px">Assigned to:</div>';
-            allAssigned.slice(0,3).forEach(function(a){h+='<div style="padding:1px 0">→ <code style="background:var(--bg-primary);padding:1px 4px;border-radius:3px">'+esc(a.assignedTo)+'</code> | '+esc(a.assignedToName)+' | '+esc(a.obdNo)+'</div>';});
-            h+='</div>';
-        }
-        h+='</div>';setHtml(h);return;
+    if(!my.length){
+        h+='<div class="card"><div class="empty-state"><i class="bx bx-inbox"></i><p>No OBDs assigned to you</p></div></div>';
+        setHtml(h);return;
     }
-
-    h+='<div class="card"><div class="card-title"><i class="bx bx-list-ul"></i> Your OBDs ('+myAssign.length+')</div>';
-    myAssign.forEach(function(a){
+    h+='<div class="card"><div class="card-title"><i class="bx bx-list-ul"></i> Your OBDs ('+my.length+')</div>';
+    my.forEach(function(a){
         var obd=DB.find('obd_data',a.obdId);if(!obd)return;
-        var totalQ=0;(obd.materials||[]).forEach(function(m){totalQ+=m.qty;});
-        // Lock stats
-        var locks=DB.filter('location_locks',function(l){return l.obdId===a.obdId&&l.status==='Locked';});
-        var totalLocked=0,totalPicked=0;
-        locks.forEach(function(l){totalLocked+=l.lockedQty;totalPicked+=l.pickedQty;});
-        var lockBadge,totalPct=totalQ>0?Math.round((totalPicked/totalQ)*100):0;
-        if(totalPicked>=totalQ)lockBadge='<span class="badge badge-success">Done</span>';
-        else if(totalPicked>0)lockBadge='<span class="badge badge-warning">Picking '+totalPct+'%</span>';
-        else if(totalLocked>=totalQ)lockBadge='<span class="badge badge-accent">Ready to Pick</span>';
-        else if(totalLocked>0)lockBadge='<span class="badge badge-warning">Partial Lock</span>';
-        else lockBadge='<span class="badge badge-danger">No Stock</span>';
-
-        h+='<div class="inv-list-item" onclick="openPickingOBD(\''+a.obdId+'\')">';
-        h+='<div class="ili-left">';
-        h+='<span class="ili-invno">'+esc(obd.obdNo)+'</span>';
-        h+='<span class="ili-info">'+(obd.materials||[]).length+' materials | '+totalQ+' total qty</span>';
-        h+='<span class="ili-info" style="font-size:10px;color:var(--text-muted)"><i class="bx bx-lock"></i> Locked: '+totalLocked+' | Picked: '+totalPicked+'/'+totalQ+'</span>';
-        h+='</div>'+lockBadge+'</div>';
+        var tq=sumBy(obd.materials||[],function(m){return m.qty;});
+        var locks=DB.filter('location_locks',function(l){return l.obdId===a.obdId&&isActiveLock(l);});
+        var tl=sumBy(locks,function(l){return l.lockedQty;}),tp=sumBy(locks,function(l){return l.pickedQty;});
+        var hold=locks.filter(function(l){return l.status==='Hold';}).length;
+        var pct=tq>0?Math.round(tp/tq*100):0,badge;
+        if(tp>=tq)badge='<span class="badge badge-success">Ready to Submit</span>';
+        else if(tp>0)badge='<span class="badge badge-warning">Picking '+pct+'%</span>';
+        else if(tl>=tq)badge='<span class="badge badge-accent">Ready to Pick</span>';
+        else if(tl>0)badge='<span class="badge badge-warning">Partial Lock</span>';
+        else badge='<span class="badge badge-danger">No Stock</span>';
+        h+='<div class="inv-list-item" onclick="openPickingOBD(\''+a.obdId+'\')"><div class="ili-left">';
+        h+='<span class="ili-invno">'+esc(obd.obdNo)+(a.priority==='Urgent'?' <span class="badge badge-danger">URGENT</span>':'')+'</span>';
+        h+='<span class="ili-info">'+(obd.materials||[]).length+' materials | '+tq+' total qty</span>';
+        h+='<div class="pk-bar"><div style="width:'+pct+'%"></div></div>';
+        h+='<span class="ili-info" style="font-size:10px"><i class="bx bx-lock"></i> Locked '+tl+' | Picked '+tp+'/'+tq+(hold?' | <span style="color:var(--warning)">'+hold+' waiting admin</span>':'')+'</span>';
+        h+='</div>'+badge+'</div>';
     });
     h+='</div>';setHtml(h);
 }
 
 function openPickingOBD(obdId){
     var obd=DB.find('obd_data',obdId);if(!obd)return;
-    window._pickData={obdId:obdId,obdNo:obd.obdNo,materials:JSON.parse(JSON.stringify(obd.materials))};
+    mergeDuplicateLocks(obdId);
+    var mats=groupMats(obd);
+    window._pickData={obdId:obdId,obdNo:obd.obdNo,materials:mats};
+    var locks=DB.filter('location_locks',function(l){return l.obdId===obdId&&isActiveLock(l);});
+    var need=sumBy(mats,function(m){return m.qty;}),picked=sumBy(locks,function(l){return l.pickedQty;});
+    var pct=need?Math.round(picked/need*100):0;
+    var h='<div class="pk-head"><div><strong style="color:var(--accent);font-family:var(--font-display)">'+esc(obd.obdNo)+'</strong>'+(obd.priority==='Urgent'?' <span class="badge badge-danger">URGENT</span>':'')+'<div style="font-size:11px;color:var(--text-muted)">'+esc(obd.customer||'')+'</div></div>';
+    h+='<div class="pk-prog"><div class="pk-bar big"><div style="width:'+pct+'%"></div></div><span>'+picked+' / '+need+' picked ('+pct+'%)</span></div></div>';
 
-    // Read all locks for this OBD from DB
-    var allLocks=DB.filter('location_locks',function(l){return l.obdId===obdId&&l.status==='Locked';});
-
-    var h='<div style="margin-bottom:12px"><strong style="color:var(--accent);font-family:var(--font-display)">'+esc(obd.obdNo)+'</strong></div>';
-    h+='<div class="card-title"><i class="bx bx-package"></i> Materials — Click to pick from locked locations</div>';
-    h+='<div class="mat-cards-grid" id="pickMatCards">';
-
-    obd.materials.forEach(function(m,idx){
-        var matLocks=allLocks.filter(function(l){return l.ean===m.ean;});
-        var totalLocked=0,totalPicked=0;
-        matLocks.forEach(function(l){totalLocked+=l.lockedQty;totalPicked+=l.pickedQty;});
-        var allDone=totalPicked>=m.qty;
-        var partial=totalPicked>0&&!allDone;
-        var noLock=totalLocked===0;
-
-        var cardStyle='';
-        if(allDone)cardStyle='background:var(--success-dim);border-color:var(--success)';
-        else if(noLock)cardStyle='background:rgba(255,71,87,0.08);border-color:var(--danger)';
-        else if(partial)cardStyle='background:rgba(255,165,2,0.08);border-color:var(--warning)';
-
-        var statusHTML='';
-        if(allDone)statusHTML='<span class="status-dot green"></span> Picked '+totalPicked;
-        else if(partial)statusHTML='<span class="status-dot yellow"></span> Partial '+totalPicked+'/'+m.qty;
-        else if(noLock)statusHTML='<span class="status-dot red"></span> No Stock Locked';
-        else statusHTML='<span class="status-dot green"></span> Ready ('+totalLocked+' locked)';
-
-        h+='<div class="mat-card" style="'+cardStyle+'" onclick="showPickLocations('+idx+')">';
-        h+='<div class="mc-name"><i class="bx bx-box" style="color:var(--accent)"></i> '+esc(m.material)+'</div>';
-        h+='<div class="mc-ean">'+esc(m.ean)+'</div>';
-        h+='<div class="mc-qty">Need: <strong>'+m.qty+'</strong> | Locked: <strong style="color:'+(noLock?'var(--danger)':'var(--success)')+'">'+totalLocked+'</strong></div>';
-        h+='<div class="mc-status">'+statusHTML+'</div>';
-        h+='</div>';
-    });
-    h+='</div>';
-    h+='<div class="form-actions"><button class="btn btn-glass" onclick="submitPicking()"><i class="bx bx-check-double"></i> Submit Picking</button></div>';
-    showModal('Picking — '+obd.obdNo,h,'xl','<button class="btn btn-glass" onclick="closeModal()">Cancel</button>');
-}
-
-function showPickLocations(matIdx){
-    var pd=window._pickData;if(!pd)return;
-    var mat=pd.materials[matIdx];
-
-    // Get ONLY locked locations for this material in this OBD
-    var matLocks=DB.filter('location_locks',function(l){
-        return l.obdId===pd.obdId&&l.ean===mat.ean&&l.status==='Locked';
-    });
-
-    if(!matLocks.length){
-        var h='<div style="text-align:center;padding:20px">';
-        h+='<i class="bx bx-map-pin" style="font-size:40px;color:var(--danger);opacity:.5"></i>';
-        h+='<p style="color:var(--text-muted);margin:10px 0">No stock was available for <strong>'+esc(mat.material)+'</strong> when OBD was assigned.</p>';
-        h+='<p style="color:var(--danger);font-weight:700">Needed: '+mat.qty+' | Locked: 0</p>';
-        h+='<div class="form-group" style="text-align:left;margin-top:12px"><label>Reason / Note</label><textarea id="pickNoLocReason" class="form-input" placeholder="Why material not available?"></textarea></div>';
-        h+='</div>';
-        showModal('No Location Locked',h,'sm',
-            '<button class="btn btn-glass" onclick="closeModal();openPickingOBD(\''+pd.obdId+'\')"><i class="bx bx-arrow-back"></i> Back</button>'+
-            '<button class="btn btn-glass" onclick="requestAdminLocation('+matIdx+')"><i class="bx bx-send"></i> Request Admin</button>');
-        return;
-    }
-
-    var totalPicked=0;
-    matLocks.forEach(function(l){totalPicked+=l.pickedQty;});
-    var remaining=mat.qty-totalPicked;
-
-    var h='<div style="margin-bottom:12px;padding:10px;background:var(--bg-secondary);border-radius:8px">';
-    h+='<strong>'+esc(mat.material)+'</strong> | EAN: <span style="font-family:var(--font-display)">'+esc(mat.ean)+'</span><br>';
-    h+='<span style="color:var(--accent)">Need: '+mat.qty+'</span> | ';
-    h+='<span style="color:var(--success)">Picked: '+totalPicked+'</span> | ';
-    h+='<span style="color:var(--warning)">Remaining: '+remaining+'</span>';
-    h+='</div>';
-
-    h+='<div class="loc-cards-grid">';
-    matLocks.forEach(function(lock,idx){
-        var canPick=lock.lockedQty-lock.pickedQty;
-        var isDone=lock.pickedQty>=lock.lockedQty;
-
-        h+='<div class="loc-card '+(isDone?'lc-picked':'')+'">';
-        h+='<div class="lc-rack"><i class="bx bx-lock"></i> '+esc(lock.rack)+'</div>';
-        h+='<div class="lc-avail">Locked: <strong>'+lock.lockedQty+'</strong> | Picked: <strong>'+lock.pickedQty+'</strong></div>';
-
-        if(canPick>0&&remaining>0){
-            var maxPick=Math.min(canPick,remaining);
-            h+='<div style="font-size:10px;color:var(--text-muted);margin:6px 0">Max pick: '+maxPick+'</div>';
-            h+='<input type="number" id="pickQty_'+idx+'" value="'+maxPick+'" min="1" max="'+maxPick+'" placeholder="Qty">';
-            h+='<button class="btn btn-glass btn-sm" style="width:100%;margin-top:6px;justify-content:center" onclick="doPickFromLock(\''+lock.id+'\','+matIdx+','+idx+')"><i class="bx bx-check"></i> Pick</button>';
-        }else if(isDone){
-            h+='<div style="text-align:center;color:var(--success);font-size:11px;margin-top:6px"><i class="bx bx-check-circle"></i> Fully Picked</div>';
-        }else{
-            h+='<div style="text-align:center;color:var(--text-muted);font-size:11px;margin-top:6px">Done</div>';
+    var openLocks=routeSort(locks.filter(function(l){return l.status==='Locked';}),function(l){return l.rack;});
+    h+='<div class="card-title" style="margin-top:12px"><i class="bx bx-walk"></i> Pick Route (is order me chalo)</div>';
+    if(!openLocks.length)h+='<div style="color:var(--text-muted);padding:10px;font-size:12px">Koi locked location nahi hai.</div>';
+    openLocks.forEach(function(l,i){
+        var rem=l.lockedQty-l.pickedQty,done=rem<=0;
+        var m=mats.filter(function(x){return x.ean===l.ean;})[0]||{qty:0};
+        var matRem=m.qty-sumBy(locks.filter(function(x){return x.ean===l.ean;}),function(x){return x.pickedQty;});
+        var max=Math.min(rem,matRem);
+        h+='<div class="pk-line'+(done?' done':'')+'"><div class="pk-seq">'+(i+1)+'</div>';
+        h+='<div class="pk-rack"><i class="bx bx-map-pin"></i> '+esc(l.rack)+'</div>';
+        h+='<div class="pk-mat"><b>'+esc(l.material)+'</b><small>'+esc(l.ean)+(l.viaRequest?' · admin assigned':'')+'</small></div>';
+        if(done)h+='<div class="pk-act"><span class="badge badge-success"><i class="bx bx-check-circle"></i> Picked '+l.pickedQty+'</span></div>';
+        else if(max<=0)h+='<div class="pk-act"><span class="badge badge-info">Material complete</span></div>';
+        else{
+            h+='<div class="pk-qty">Pick <b>'+max+'</b>'+(l.pickedQty?'<small>('+l.pickedQty+' done)</small>':'')+'</div>';
+            h+='<div class="pk-act"><input type="number" id="pq_'+l.id+'" value="'+max+'" min="1" max="'+max+'"><button class="btn btn-glass btn-sm" onclick="doPickFromLock(\''+l.id+'\')"><i class="bx bx-check"></i> Pick</button><button class="btn btn-warning btn-sm" title="Material nahi mila" onclick="openNotFound(\''+l.id+'\')"><i class="bx bx-error"></i> Not Found</button></div>';
         }
         h+='</div>';
     });
-    h+='</div>';
-
-    showModal('Pick — '+mat.material,h,'lg',
-        '<button class="btn btn-glass" onclick="closeModal();openPickingOBD(\''+pd.obdId+'\')"><i class="bx bx-arrow-back"></i> Back</button>');
+    var holds=locks.filter(function(l){return l.status==='Hold';});
+    if(holds.length){
+        h+='<div class="card-title" style="margin-top:14px"><i class="bx bx-time"></i> Waiting for Admin</div>';
+        holds.forEach(function(l){
+            h+='<div class="pk-line hold"><div class="pk-rack"><i class="bx bx-lock"></i> '+esc(l.rack)+'</div><div class="pk-mat"><b>'+esc(l.material)+'</b><small>'+esc(l.holdReason||'')+'</small></div><div class="pk-qty">Qty <b>'+l.lockedQty+'</b></div><div class="pk-act"><span class="badge badge-warning">Request sent</span></div></div>';
+        });
+    }
+    h+='<div class="card-title" style="margin-top:14px"><i class="bx bx-package"></i> Materials</div><div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>Need</th><th>Locked</th><th>Picked</th><th>Status</th><th></th></tr></thead><tbody>';
+    mats.forEach(function(m,idx){
+        var ml=locks.filter(function(l){return l.ean===m.ean;});
+        var tl=sumBy(ml,function(l){return l.lockedQty;}),tp=sumBy(ml,function(l){return l.pickedQty;});
+        var pend=DB.filter('location_requests',function(r){return r.obdId===obdId&&r.ean===m.ean&&r.status==='Pending';}).length;
+        var st=tp>=m.qty?'<span class="badge badge-success">Done</span>':(tp>0?'<span class="badge badge-warning">Partial</span>':(tl===0?'<span class="badge badge-danger">No stock locked</span>':'<span class="badge badge-accent">Ready</span>'));
+        var act='';
+        if(tl<m.qty&&tp<m.qty)act=pend?'<span class="badge badge-info">Request pending</span>':'<button class="btn btn-warning btn-sm" onclick="requestLocationForMaterial('+idx+')"><i class="bx bx-send"></i> Request Location</button>';
+        h+='<tr><td>'+esc(m.material)+'<br><small style="color:var(--text-muted)">'+esc(m.ean)+'</small></td><td>'+m.qty+'</td><td>'+tl+'</td><td>'+tp+'</td><td>'+st+'</td><td>'+act+'</td></tr>';
+    });
+    h+='</tbody></table></div>';
+    showModal('Picking — '+esc(obd.obdNo),h,'xl','<button class="btn btn-glass" onclick="closeModal();renderStartPicking()">Close</button><button class="btn btn-info" onclick="downloadPickList()"><i class="bx bx-file"></i> Pick List PDF</button><button class="btn btn-glass" onclick="submitPicking()"><i class="bx bx-check-double"></i> Submit Picking</button>');
 }
-
-function doPickFromLock(lockId,matIdx,displayIdx){
+function doPickFromLock(lockId){
     var pd=window._pickData;if(!pd)return;
-    var mat=pd.materials[matIdx];
-
     var lock=DB.find('location_locks',lockId);
     if(!lock||lock.status!=='Locked'){showToast('Lock not found','error');return;}
-
-    var qtyInput=document.getElementById('pickQty_'+displayIdx);
-    var qty=parseInt(qtyInput?qtyInput.value:0)||0;
+    var el=document.getElementById('pq_'+lockId),qty=parseInt(el?el.value:0)||0;
     if(qty<=0){showToast('Enter quantity','error');return;}
-
-    var canPick=lock.lockedQty-lock.pickedQty;
-    if(qty>canPick){showToast('Max '+canPick+' allowed (locked qty)','error');return;}
-
-    // Check total against material requirement
-    var allMatLocks=DB.filter('location_locks',function(l){return l.obdId===pd.obdId&&l.ean===mat.ean&&l.status==='Locked';});
-    var totalPickedSoFar=0;
-    allMatLocks.forEach(function(l){totalPickedSoFar+=l.pickedQty;});
-    if(totalPickedSoFar+qty>mat.qty){showToast('Cannot exceed required qty '+mat.qty,'error');return;}
-
-    // Update lock
-    DB.update('location_locks',lockId,{pickedQty:lock.pickedQty+qty});
+    var rem=lock.lockedQty-lock.pickedQty;
+    if(qty>rem){showToast('Max '+rem+' allowed (locked qty)','error');return;}
+    var mat=pd.materials.filter(function(m){return m.ean===lock.ean;})[0];
+    var tp=sumBy(DB.filter('location_locks',function(l){return l.obdId===pd.obdId&&l.ean===lock.ean&&isActiveLock(l);}),function(l){return l.pickedQty;});
+    if(mat&&tp+qty>mat.qty){showToast('Cannot exceed required qty '+mat.qty,'error');return;}
+    DB.update('location_locks',lockId,{pickedQty:lock.pickedQty+qty,pickedBy:APP.currentUser.name,pickedAt:nowISO()});
     showToast('Picked '+qty+' from '+lock.rack,'success');
-    closeModal();openPickingOBD(pd.obdId);
+    openPickingOBD(pd.obdId);
 }
 
-function requestAdminLocation(matIdx){
+// ---------- Not found at location -> request to admin (with auto report) ----------
+function buildLocReport(rack,ean,obdNo){
+    var R=String(rack||'').toUpperCase();
+    var recs=DB.filter('location_master',function(l){return l.ean===ean&&String(l.rack||'').toUpperCase()===R;}).map(function(l){
+        return{action:l.action||'-',user:l.user||'-',dateTime:l.dateTime||l.date||'',qty:l.quantity,grnNo:l.grnNo||'',invoiceNo:l.invoiceNo||''};
+    });
+    var picks=[];
+    DB.get('picking_done').forEach(function(p){(p.details||[]).forEach(function(d){(d.locations||[]).forEach(function(lc){
+        if(String(lc.rack).toUpperCase()===R&&lc.ean===ean)picks.push({obdNo:p.obdNo,by:p.pickedByName,at:p.pickedAt,qty:lc.qty,status:p.status});
+    });});});
+    var others=DB.filter('location_locks',function(k){return isActiveLock(k)&&k.ean===ean&&String(k.rack||'').toUpperCase()===R&&k.obdNo!==obdNo;}).map(function(k){return{obdNo:k.obdNo,qty:k.lockedQty};});
+    return{rack:rack,ean:ean,systemQty:sumBy(recs,function(r){return r.qty;}),records:recs,recentPicks:picks.slice(-10),otherLocks:others,generatedAt:nowISO()};
+}
+function buildEanReport(ean,obdNo){
+    var recs=DB.filter('location_master',function(l){return l.ean===ean&&l.quantity>0;}).map(function(l){
+        return{rack:l.rack,action:l.action||'-',user:l.user||'-',dateTime:l.dateTime||l.date||'',qty:l.quantity,grnNo:l.grnNo||'',invoiceNo:l.invoiceNo||''};
+    });
+    var others=DB.filter('location_locks',function(k){return isActiveLock(k)&&k.ean===ean&&k.obdNo!==obdNo;}).map(function(k){return{obdNo:k.obdNo,rack:k.rack,qty:k.lockedQty};});
+    return{rack:'—',ean:ean,systemQty:sumBy(recs,function(r){return r.qty;}),records:recs,recentPicks:[],otherLocks:others,generatedAt:nowISO(),eanWide:true};
+}
+function locReportHTML(rep){
+    if(!rep)return '<div style="color:var(--text-muted)">No report</div>';
+    var h='<div style="font-size:12px;margin-bottom:6px">System stock'+(rep.eanWide?' (all racks)':' at <b>'+esc(rep.rack)+'</b>')+': <b>'+rep.systemQty+'</b></div>';
+    h+='<div class="table-wrapper"><table class="data-table"><thead><tr>'+(rep.eanWide?'<th>Rack</th>':'')+'<th>Entry Type</th><th>Entered By</th><th>Date / Time</th><th>Qty</th><th>GRN / Invoice</th></tr></thead><tbody>';
+    if(!rep.records.length)h+='<tr><td colspan="6" style="text-align:center;color:var(--text-muted)">No stock record found</td></tr>';
+    rep.records.forEach(function(r){
+        h+='<tr>'+(rep.eanWide?'<td>'+esc(r.rack)+'</td>':'')+'<td><span class="badge '+(r.action==='PIV'?'badge-info':'badge-accent')+'">'+esc(r.action)+'</span></td><td>'+esc(r.user)+'</td><td style="font-size:11px">'+fmtDT(r.dateTime)+'</td><td><b>'+r.qty+'</b></td><td style="font-size:11px">'+esc(r.grnNo||r.invoiceNo||'-')+'</td></tr>';
+    });
+    h+='</tbody></table></div>';
+    if(rep.recentPicks&&rep.recentPicks.length){
+        h+='<div style="font-size:12px;margin:10px 0 4px"><b>Recent picks from this rack</b></div><div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD</th><th>Picked By</th><th>When</th><th>Qty</th><th>Status</th></tr></thead><tbody>';
+        rep.recentPicks.forEach(function(p){h+='<tr><td>'+esc(p.obdNo)+'</td><td>'+esc(p.by)+'</td><td style="font-size:11px">'+fmtDT(p.at)+'</td><td>'+p.qty+'</td><td>'+esc(p.status||'')+'</td></tr>';});
+        h+='</tbody></table></div>';
+    }
+    if(rep.otherLocks&&rep.otherLocks.length){
+        h+='<div style="font-size:12px;margin-top:8px"><b>Locked by other OBDs:</b> '+rep.otherLocks.map(function(o){return esc(o.obdNo)+(o.rack?' @'+esc(o.rack):'')+' ('+o.qty+')';}).join(', ')+'</div>';
+    }
+    return h;
+}
+function nextReqNo(){return 'LR-'+new Date().getFullYear()+'-'+String(DB.count('location_requests')+1).padStart(4,'0');}
+function notifyLocRequest(req){
+    addNotif('Location Request '+req.reqNo+': '+req.material+' ('+req.obdNo+') '+(req.rack&&req.rack!=='—'?'rack '+req.rack+' par nahi mila. ':'stock locked nahi hua. ')+'Missing '+req.missingQty+'. By '+req.requestedByName+'. Reason: '+req.reason,'warning',null,req.id,'locreq');
+}
+function openNotFound(lockId){
+    var l=DB.find('location_locks',lockId);if(!l)return;
+    var rem=l.lockedQty-l.pickedQty;
+    var h='<div class="pk-info"><b>'+esc(l.material)+'</b> · EAN '+esc(l.ean)+'<br>Rack: <b>'+esc(l.rack)+'</b> · System ke hisaab se pick karna tha: <b>'+rem+'</b></div>';
+    h+='<div class="form-group"><label>Physically kitna mila? (0 agar bilkul nahi mila)</label><input type="number" id="nfFound" class="form-input" value="0" min="0" max="'+rem+'"></div>';
+    h+='<div class="form-group"><label>Reason <span class="req">*</span></label><select id="nfReason" class="form-input"><option>Material location par nahi mila</option><option>Qty system se kam hai</option><option>Material damaged hai</option><option>Dusri jagah rakha mila</option><option>Other</option></select></div>';
+    h+='<div class="form-group"><label>Note</label><textarea id="nfNote" class="form-input" placeholder="Kuch aur detail..."></textarea></div>';
+    h+='<div class="form-group"><label>Admin ko kya bhejna hai?</label><label class="pk-radio"><input type="radio" name="nfAct" value="newloc" checked> New location maango + report bhejo</label><label class="pk-radio"><input type="radio" name="nfAct" value="report"> Sirf report bhejo (stock system me hai par mujhe nahi mila)</label></div>';
+    showModal('Material Not Found',h,'sm','<button class="btn btn-glass" onclick="openPickingOBD(\''+l.obdId+'\')"><i class="bx bx-arrow-back"></i> Back</button><button class="btn btn-warning" onclick="submitNotFound(\''+lockId+'\')"><i class="bx bx-send"></i> Send to Admin</button>');
+}
+function submitNotFound(lockId){
     var pd=window._pickData;if(!pd)return;
-    var mat=pd.materials[matIdx];
-    var reason=document.getElementById('pickNoLocReason').value.trim();
-    addNotif('Admin: No stock for '+mat.material+' (OBD: '+pd.obdNo+'). Need: '+mat.qty+'. Reason: '+(reason||'Not found'),'warning');
-    logAction('Picking','LOCATION_REQUEST','Material '+mat.material+' no stock. OBD: '+pd.obdNo);
-    showToast('Request sent to admin','success');
-    closeModal();openPickingOBD(pd.obdId);
+    var l=DB.find('location_locks',lockId);if(!l||l.status!=='Locked'){showToast('Lock not found','error');return;}
+    var rem=l.lockedQty-l.pickedQty;
+    var found=parseInt(document.getElementById('nfFound').value)||0;
+    if(found<0||found>rem){showToast('Found qty 0 se '+rem+' ke beech ho','error');return;}
+    var reason=document.getElementById('nfReason').value,note=document.getElementById('nfNote').value.trim();
+    if(reason==='Other'&&!note){showToast('Other ke liye note likhein','error');return;}
+    var actEl=document.querySelector('input[name="nfAct"]:checked'),act=actEl?actEl.value:'newloc';
+    var mat=pd.materials.filter(function(m){return m.ean===l.ean;})[0];
+    var tp=sumBy(DB.filter('location_locks',function(x){return x.obdId===pd.obdId&&x.ean===l.ean&&isActiveLock(x);}),function(x){return x.pickedQty;});
+    if(mat&&tp+found>mat.qty){showToast('Required qty se zyada nahi','error');return;}
+    var missing=rem-found;
+    if(missing<=0){
+        if(found>0)DB.update('location_locks',lockId,{pickedQty:l.pickedQty+found,pickedBy:APP.currentUser.name,pickedAt:nowISO()});
+        openPickingOBD(pd.obdId);return;
+    }
+    var report=buildLocReport(l.rack,l.ean,l.obdNo);
+    var newPicked=l.pickedQty+found;
+    if(newPicked>0)DB.update('location_locks',lockId,{lockedQty:newPicked,pickedQty:newPicked,pickedBy:APP.currentUser.name,pickedAt:nowISO()});
+    else DB.update('location_locks',lockId,{status:'Released',releaseReason:'Not found at location',releasedAt:nowISO()});
+    var hold=DB.add('location_locks',{obdId:l.obdId,obdNo:l.obdNo,material:l.material,ean:l.ean,locationId:l.locationId,rack:l.rack,lockedQty:missing,pickedQty:0,status:'Hold',holdReason:reason,priority:l.priority||'Normal'});
+    var req=DB.add('location_requests',{reqNo:nextReqNo(),type:act==='newloc'?'NEW_LOCATION':'REPORT_ONLY',source:'NOT_FOUND',obdId:l.obdId,obdNo:l.obdNo,material:l.material,ean:l.ean,rack:l.rack,holdLockId:hold.id,missingQty:missing,foundQty:found,reason:reason,note:note,requestedBy:APP.currentUser.id,requestedByName:APP.currentUser.name,requestedAt:nowISO(),status:'Pending',report:report,assigned:[]});
+    notifyLocRequest(req);
+    logAction('Picking','LOC_REQUEST',req.reqNo+' '+l.material+' not found at '+l.rack+' (OBD '+l.obdNo+')');
+    showToast('Admin ko request + report bhej di','success');
+    openPickingOBD(pd.obdId);
+}
+function requestLocationForMaterial(matIdx){
+    var pd=window._pickData;if(!pd)return;
+    var m=pd.materials[matIdx];
+    var h='<div class="pk-info"><b>'+esc(m.material)+'</b> · EAN '+esc(m.ean)+'<br>OBD qty: <b>'+m.qty+'</b></div><div class="form-group"><label>Reason / Note</label><textarea id="rlReason" class="form-input" placeholder="Stock kyu nahi mil raha?"></textarea></div>';
+    showModal('Request Location',h,'sm','<button class="btn btn-glass" onclick="openPickingOBD(\''+pd.obdId+'\')"><i class="bx bx-arrow-back"></i> Back</button><button class="btn btn-warning" onclick="submitLocationRequest('+matIdx+')"><i class="bx bx-send"></i> Send to Admin</button>');
+}
+function submitLocationRequest(matIdx){
+    var pd=window._pickData;if(!pd)return;
+    var m=pd.materials[matIdx];
+    var locks=DB.filter('location_locks',function(l){return l.obdId===pd.obdId&&l.ean===m.ean&&isActiveLock(l);});
+    var missing=m.qty-sumBy(locks,function(l){return l.lockedQty;});
+    if(missing<=0){showToast('Poora lock hai','info');openPickingOBD(pd.obdId);return;}
+    if(DB.filter('location_requests',function(r){return r.obdId===pd.obdId&&r.ean===m.ean&&r.status==='Pending'&&r.source==='NO_STOCK';}).length){showToast('Request pehle se bheji hui hai','warning');openPickingOBD(pd.obdId);return;}
+    var note=document.getElementById('rlReason').value.trim();
+    var req=DB.add('location_requests',{reqNo:nextReqNo(),type:'NEW_LOCATION',source:'NO_STOCK',obdId:pd.obdId,obdNo:pd.obdNo,material:m.material,ean:m.ean,rack:'—',holdLockId:'',missingQty:missing,foundQty:0,reason:'Stock locked nahi hua',note:note,requestedBy:APP.currentUser.id,requestedByName:APP.currentUser.name,requestedAt:nowISO(),status:'Pending',report:buildEanReport(m.ean,pd.obdNo),assigned:[]});
+    notifyLocRequest(req);
+    logAction('Picking','LOC_REQUEST',req.reqNo+' '+m.material+' no stock (OBD '+pd.obdNo+')');
+    showToast('Request admin ko bhej di','success');openPickingOBD(pd.obdId);
 }
 
+// ---------- Admin: Location Requests ----------
+function renderLocRequests(){
+    if(!isMgrUser()){setHtml('<div class="card"><div class="empty-state"><i class="bx bx-lock"></i><p>Sirf Admin / Manager</p></div></div>');return;}
+    var all=DB.get('location_requests').slice().reverse();
+    var pend=all.filter(function(r){return r.status==='Pending';}),hist=all.filter(function(r){return r.status!=='Pending';}).slice(0,50);
+    function tbl(list,isPend){
+        var t='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Req</th><th>OBD</th><th>Material</th><th>Rack</th><th>Missing</th><th>By</th><th>Reason</th><th>'+(isPend?'Action':'Status')+'</th></tr></thead><tbody>';
+        if(!list.length)t+='<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:16px">Nothing</td></tr>';
+        list.forEach(function(r){
+            t+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(r.reqNo)+'</td><td>'+esc(r.obdNo)+'</td><td>'+esc(r.material)+'</td><td>'+esc(r.rack)+'</td><td><b>'+r.missingQty+'</b></td><td>'+esc(r.requestedByName)+'<br><small style="color:var(--text-muted)">'+fmtDT(r.requestedAt)+'</small></td><td style="font-size:11px">'+esc(r.reason)+(r.note?'<br><small>'+esc(r.note)+'</small>':'')+'</td><td>';
+            t+=isPend?'<button class="btn btn-glass btn-sm" onclick="openLocRequest(\''+r.id+'\')"><i class="bx bx-show"></i> Review / Assign</button>':'<span class="badge '+(r.status==='Resolved'?'badge-success':'badge-info')+'">'+esc(r.status)+'</span> <button class="btn btn-glass btn-sm" onclick="openLocRequest(\''+r.id+'\')"><i class="bx bx-show"></i></button>';
+            t+='</td></tr>';
+        });
+        return t+'</tbody></table></div>';
+    }
+    var h='<div class="section-header"><h2><i class="bx bx-map-pin"></i> Location Requests</h2></div>';
+    h+='<div class="card"><div class="card-title"><i class="bx bx-error"></i> Pending ('+pend.length+')</div>'+tbl(pend,true)+'</div>';
+    h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-history"></i> History</div>'+tbl(hist,false)+'</div>';
+    setHtml(h);
+}
+function locNotifOpen(id){document.getElementById('notifPanel').classList.remove('open');if(!isMgrUser()){showToast('Sirf Admin/Manager','error');return;}openLocRequest(id);}
+function pickerNotifOpen(obdId){document.getElementById('notifPanel').classList.remove('open');navTo('picking','start-picking');setTimeout(function(){openPickingOBD(obdId);},300);}
+function openLocRequest(reqId){
+    var r=DB.find('location_requests',reqId);if(!r)return;
+    var isP=r.status==='Pending'&&isMgrUser();
+    var h='<div class="pk-info"><b>'+esc(r.reqNo)+'</b> · OBD <b>'+esc(r.obdNo)+'</b> · '+esc(r.material)+' ('+esc(r.ean)+')<br>Rack: <b>'+esc(r.rack)+'</b> · Missing qty: <b>'+r.missingQty+'</b>'+(r.foundQty?' · Found: '+r.foundQty:'')+'<br>By: '+esc(r.requestedByName)+' · '+fmtDT(r.requestedAt)+'<br>Reason: <span style="color:var(--warning)">'+esc(r.reason)+'</span>'+(r.note?' — '+esc(r.note):'')+'<br>Type: '+(r.type==='NEW_LOCATION'?'New location maanga hai':'Sirf report')+' · Status: <b>'+esc(r.status)+'</b></div>';
+    h+='<div class="card-title" style="margin-top:12px"><i class="bx bx-file"></i> Report — kisne kab stock add kiya</div>'+locReportHTML(r.report);
+    if(r.assigned&&r.assigned.length)h+='<div style="margin-top:10px;font-size:12px"><b>Assigned:</b> '+r.assigned.map(function(a){return esc(a.rack)+' ('+a.qty+')';}).join(', ')+'</div>';
+    if(isP){
+        var obd=DB.find('obd_data',r.obdId);
+        var av=getLocAvailability(r.ean,null).filter(function(a){return String(a.rack).toUpperCase()!==String(r.rack).toUpperCase();});
+        var free=av.filter(function(a){return a.available>0;});
+        free.sort(function(a,b){return rackDist(r.rack,a.rack)-rackDist(r.rack,b.rack);});
+        window._lrFree=free;
+        h+='<div class="card-title" style="margin-top:14px"><i class="bx bx-map"></i> Assign New Location (nearest pehle)</div>';
+        if(!free.length){
+            h+='<div class="pk-info" style="border-color:var(--danger)">Free stock available nahi hai.';
+            var lockedAll=av.filter(function(a){return a.locked>0;});
+            if(lockedAll.length)h+='<br>Stock hai par dusri OBD ko locked: '+lockedAll.map(function(a){return esc(a.rack)+' → '+a.lockedBy.map(function(x){return esc(x.obdNo)+':'+x.qty;}).join(', ');}).join(' | ');
+            h+='</div>';
+        }else{
+            h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Rack</th><th>Stock</th><th>Available</th><th>Distance</th><th>Assign Qty</th></tr></thead><tbody>';
+            free.forEach(function(a,i){
+                var d=rackDist(r.rack,a.rack);
+                h+='<tr><td><b>'+esc(a.rack)+'</b></td><td>'+a.stock+(a.locked?' <small>(locked '+a.locked+')</small>':'')+'</td><td><b>'+a.available+'</b></td><td>'+(d<=10?'<span class="badge badge-success">Near</span>':(d<=1000?'<span class="badge badge-warning">Same aisle area</span>':'<span class="badge badge-danger">Far</span>'))+'</td><td><input type="number" class="form-input lrq-qty" id="lrq_'+i+'" min="0" max="'+a.available+'" value="0" style="width:90px"></td></tr>';
+            });
+            h+='</tbody></table></div><button class="btn btn-info btn-sm" style="margin-top:6px" onclick="lrAutoFill('+r.missingQty+')"><i class="bx bx-magic-wand"></i> Auto-fill (nearest)</button>';
+        }
+        if(r.rack&&r.rack!=='—')h+='<div class="form-group" style="margin-top:12px"><label class="pk-radio"><input type="checkbox" id="lrAdjust"> Purane location ('+esc(r.rack)+') ka stock adjust karo (system se kam karo)</label></div>';
+        h+='<div class="form-group"><label>Admin Note</label><textarea id="lrNote" class="form-input" placeholder="Picker ko message / decision..."></textarea></div>';
+    }
+    var f='<button class="btn btn-glass" onclick="closeModal()">Close</button><button class="btn btn-info" onclick="downloadLocReportPDF(\''+r.id+'\')"><i class="bx bx-file"></i> Report PDF</button>';
+    if(isP)f+='<button class="btn btn-danger" onclick="markLocShort(\''+r.id+'\')"><i class="bx bx-x"></i> Mark Short</button><button class="btn btn-glass" onclick="assignLocRequest(\''+r.id+'\')"><i class="bx bx-check-double"></i> Assign / Resolve</button>';
+    showModal('Location Request — '+esc(r.reqNo),h,'xl',f);
+}
+function lrAutoFill(missing){
+    var free=window._lrFree||[],rem=missing;
+    free.forEach(function(a,i){var q=Math.min(a.available,Math.max(rem,0));var el=document.getElementById('lrq_'+i);if(el)el.value=q;rem-=q;});
+}
+function adjustLocStock(rack,ean,qty,reqNo){
+    if(!rack||rack==='—'||qty<=0)return 0;
+    var r=deductStock(rack,ean,qty);
+    logAction('Stock','ADJUST','Admin adjust -'+r.deducted+' at '+rack+' (EAN '+ean+') via '+reqNo);
+    return r.deducted;
+}
+function finishLocRequest(r,status,note,assigned){
+    DB.update('location_requests',r.id,{status:status,closedNote:note||'',resolvedBy:APP.currentUser.name,resolvedAt:nowISO(),assigned:assigned});
+}
+function assignLocRequest(reqId){
+    var r=DB.find('location_requests',reqId);if(!r||r.status!=='Pending')return;
+    var obd=DB.find('obd_data',r.obdId);if(!obd){showToast('OBD not found','error');return;}
+    var fresh=getLocAvailability(r.ean,null),assignedNow=[],sum=0;
+    var adj=document.getElementById('lrAdjust')&&document.getElementById('lrAdjust').checked,note=(document.getElementById('lrNote')||{}).value||'';
+    var chosen=[];
+    (window._lrFree||[]).forEach(function(a,i){
+        var el=document.getElementById('lrq_'+i),q=parseInt(el?el.value:0)||0;if(q<=0)return;
+        var f=fresh.filter(function(x){return String(x.rack).toUpperCase()===String(a.rack).toUpperCase();})[0];
+        if(!f||q>f.available){chosen=null;showToast(a.rack+': sirf '+(f?f.available:0)+' available','error');return;}
+        if(chosen)chosen.push({loc:f,qty:q});sum+=q;
+    });
+    if(!chosen)return;
+    if(!chosen.length){showToast('Koi qty daalein ya Mark Short karein','error');return;}
+    if(sum>r.missingQty){showToast('Missing qty '+r.missingQty+' se zyada assign nahi','error');return;}
+    var mat={material:r.material,ean:r.ean};
+    chosen.forEach(function(c){addLock(obd,mat,c.loc,c.qty,{viaRequest:r.reqNo});assignedNow.push({rack:c.loc.rack,qty:c.qty});});
+    var left=r.missingQty-sum;
+    var hold=r.holdLockId?DB.find('location_locks',r.holdLockId):null;
+    if(hold&&hold.status==='Hold'){
+        if(hold.lockedQty-sum<=0)DB.update('location_locks',hold.id,{status:'Released',releaseReason:'Resolved '+r.reqNo,releasedAt:nowISO()});
+        else DB.update('location_locks',hold.id,{lockedQty:hold.lockedQty-sum});
+    }
+    if(adj)adjustLocStock(r.rack,r.ean,sum,r.reqNo);
+    var all=(r.assigned||[]).concat(assignedNow);
+    if(left<=0)finishLocRequest(r,'Resolved',note,all);
+    else DB.update('location_requests',r.id,{missingQty:left,assigned:all,adminNote:note});
+    var txt=assignedNow.map(function(a){return a.rack+' ('+a.qty+')';}).join(', ');
+    addNotif('Naya location mila: '+r.material+' ('+r.obdNo+') → '+txt+(left>0?'. Abhi '+left+' qty baaki.':''),'success',r.requestedBy,r.obdId,'locreq-picker');
+    logAction('Picking','LOC_ASSIGN',r.reqNo+' → '+txt);
+    showToast('Location assign ho gayi','success');closeModal();
+    if(APP.currentSub==='loc-requests')renderLocRequests();
+}
+function markLocShort(reqId){
+    var r=DB.find('location_requests',reqId);if(!r||r.status!=='Pending')return;
+    if(!confirm('Is material ko SHORT mark karein? Picker short ke saath submit karega.'))return;
+    var adj=document.getElementById('lrAdjust')&&document.getElementById('lrAdjust').checked,note=(document.getElementById('lrNote')||{}).value||'';
+    var hold=r.holdLockId?DB.find('location_locks',r.holdLockId):null;
+    if(hold&&hold.status==='Hold')DB.update('location_locks',hold.id,{status:'Released',releaseReason:'Marked short '+r.reqNo,releasedAt:nowISO()});
+    if(adj)adjustLocStock(r.rack,r.ean,r.missingQty,r.reqNo);
+    finishLocRequest(r,'Closed-Short',note||'No stock — short',r.assigned||[]);
+    addNotif('Short mark hua: '+r.material+' ('+r.obdNo+'). Picking short ke saath submit karein.','warning',r.requestedBy,r.obdId,'locreq-picker');
+    logAction('Picking','LOC_SHORT',r.reqNo+' marked short');
+    showToast('Short mark kar diya','success');closeModal();
+    if(APP.currentSub==='loc-requests')renderLocRequests();
+}
+function downloadLocReportPDF(reqId){
+    var r=DB.find('location_requests',reqId);if(!r||!r.report)return;
+    var rep=r.report,pdf=new jspdf.jsPDF();
+    pdf.setFontSize(13);pdf.text('Location Request Report — '+r.reqNo,14,14);
+    pdf.setFontSize(9);pdf.text('OBD '+r.obdNo+' | '+r.material+' | EAN '+r.ean+' | Rack '+r.rack+' | Missing '+r.missingQty,14,21);
+    pdf.text('Reason: '+r.reason+(r.note?' - '+r.note:'')+' | By '+r.requestedByName+' | '+fmtDT(r.requestedAt),14,27);
+    pdf.autoTable({startY:32,head:[[rep.eanWide?'Rack':'Type','Entry','By','Date','Qty','GRN/Invoice']],body:rep.records.map(function(x){return [rep.eanWide?x.rack:'',x.action,x.user,fmtDT(x.dateTime),x.qty,x.grnNo||x.invoiceNo||'-'];}),styles:{fontSize:8}});
+    pdf.save('LocReport_'+r.reqNo+'.pdf');
+}
+function downloadPickList(){
+    var pd=window._pickData;if(!pd)return;
+    var locks=routeSort(DB.filter('location_locks',function(l){return l.obdId===pd.obdId&&l.status==='Locked';}),function(l){return l.rack;});
+    var pdf=new jspdf.jsPDF();pdf.setFontSize(13);pdf.text('Pick List — '+pd.obdNo,14,14);pdf.setFontSize(8);pdf.text('Route order | '+fmtDT(new Date()),14,20);
+    pdf.autoTable({startY:25,head:[['#','Rack','Material','EAN','Qty','Done']],body:locks.map(function(l,i){return [i+1,l.rack,l.material,l.ean,l.lockedQty,l.pickedQty];}),styles:{fontSize:8}});
+    pdf.save('PickList_'+pd.obdNo+'.pdf');
+}
+
+// ---------- stock deduct / restore ----------
+function deductStock(rack,ean,qty){
+    var R=String(rack||'').toUpperCase(),rem=qty,src=[];
+    DB.filter('location_master',function(l){return l.ean===ean&&String(l.rack||'').toUpperCase()===R&&l.quantity>0;})
+      .sort(function(a,b){return String(a.dateTime||a.date).localeCompare(String(b.dateTime||b.date));})
+      .forEach(function(r){
+        if(rem<=0)return;
+        var d=Math.min(r.quantity,rem),nq=r.quantity-d;
+        src.push({action:r.action||'',user:r.user||'',userId:r.userId||'',dateTime:r.dateTime||'',date:r.date||'',grnNo:r.grnNo||'',invoiceNo:r.invoiceNo||'',packing:r.packing||'',box:r.box||'',description:r.description||'',material:r.material||'',qty:d});
+        if(nq<=0)DB.remove('location_master',r.id);else DB.update('location_master',r.id,{quantity:nq});
+        rem-=d;
+      });
+    return{sources:src,deducted:qty-rem};
+}
+function restoreStock(rack,ean,qty,sources,meta){
+    var left=qty;
+    (sources||[]).forEach(function(s){
+        if(left<=0)return;var q=Math.min(s.qty,left);
+        DB.add('location_master',{date:s.date||today(),rack:rack,ean:ean,material:s.material||meta.material,description:s.description||meta.material,quantity:q,packing:s.packing||'',box:s.box||'',action:s.action||'REVERSE_PICK',user:s.user||'',userId:s.userId||'',dateTime:s.dateTime||nowISO(),grnNo:s.grnNo||'',invoiceNo:s.invoiceNo||'',restoredFrom:meta.obdNo,restoredAt:nowISO()});
+        left-=q;
+    });
+    if(left>0)DB.add('location_master',{date:today(),rack:rack,ean:ean,material:meta.material,description:meta.material,quantity:left,packing:'',box:'',action:'REVERSE_PICK',user:APP.currentUser?APP.currentUser.name:'',dateTime:nowISO(),restoredFrom:meta.obdNo});
+}
+
+// ---------- Submit (confirm) picking ----------
 function submitPicking(){
     var pd=window._pickData;if(!pd)return;
-
-    // Get all locks for this OBD
-    var allLocks=DB.filter('location_locks',function(l){return l.obdId===pd.obdId&&l.status==='Locked';});
-
-    // Check all picked?
-    var allPicked=true;
-    pd.materials.forEach(function(m){
-        var tp=0;allLocks.filter(function(l){return l.ean===m.ean;}).forEach(function(l){tp+=l.pickedQty;});
-        if(tp<m.qty)allPicked=false;
-    });
-    if(!allPicked&&!confirm('Some materials not fully picked. Submit anyway?'))return;
-
-    // Build details from locks
-    var pickingDetails=[];
-    pd.materials.forEach(function(m){
-        var matLocks=allLocks.filter(function(l){return l.ean===m.ean;});
-        var totalPicked=0,locations=[];
-        matLocks.forEach(function(l){
-            totalPicked+=l.pickedQty;
-            if(l.pickedQty>0)locations.push({rack:l.rack,qty:l.pickedQty,ean:l.ean,material:l.material});
+    var obd=DB.find('obd_data',pd.obdId);if(!obd)return;
+    var locks=DB.filter('location_locks',function(l){return l.obdId===pd.obdId&&isActiveLock(l);});
+    var mats=groupMats(obd);
+    var totalPicked=sumBy(locks,function(l){return l.pickedQty;});
+    if(totalPicked<=0){showToast('Kuch bhi pick nahi hua','error');return;}
+    var allPicked=mats.every(function(m){return sumBy(locks.filter(function(l){return l.ean===m.ean;}),function(l){return l.pickedQty;})>=m.qty;});
+    var holds=locks.filter(function(l){return l.status==='Hold';}).length;
+    if(!allPicked&&!confirm((holds?holds+' location request admin ke paas pending hai. ':'')+'Kuch material poora pick nahi hua. Short ke saath submit karein?'))return;
+    var details=[];
+    mats.forEach(function(m){
+        var byRack={},locs=[];
+        locks.filter(function(l){return l.ean===m.ean&&l.pickedQty>0;}).forEach(function(l){
+            var R=String(l.rack).toUpperCase();
+            if(!byRack[R]){byRack[R]={rack:l.rack,qty:0,ean:m.ean,material:m.material};locs.push(byRack[R]);}
+            byRack[R].qty+=l.pickedQty;
         });
-        pickingDetails.push({material:m.material,ean:m.ean,requiredQty:m.qty,pickedQty:totalPicked,locations:locations,short:m.qty-totalPicked});
+        locs.forEach(function(lc){var r=deductStock(lc.rack,lc.ean,lc.qty);lc.sources=r.sources;if(r.deducted<lc.qty)lc.stockShort=lc.qty-r.deducted;});
+        var picked=sumBy(locs,function(x){return x.qty;}),rs=[];
+        DB.filter('location_requests',function(r){return r.obdId===pd.obdId&&r.ean===m.ean;}).forEach(function(r){var t=r.reason+(r.note?' — '+r.note:'');if(rs.indexOf(t)<0)rs.push(t);});
+        details.push({material:m.material,ean:m.ean,requiredQty:m.qty,pickedQty:picked,locations:routeSort(locs,function(x){return x.rack;}),short:m.qty-picked,shortReason:rs.join(' | ')});
     });
-
-    // Save picking done
-    DB.add('picking_done',{obdId:pd.obdId,obdNo:pd.obdNo,pickedBy:APP.currentUser.id,pickedByName:APP.currentUser.name,pickedAt:new Date().toISOString(),details:pickingDetails,status:'Done'});
+    DB.add('picking_done',{obdId:pd.obdId,obdNo:pd.obdNo,pickedBy:APP.currentUser.id,pickedByName:APP.currentUser.name,pickedAt:nowISO(),details:details,status:'Done',priority:obd.priority||'Normal'});
     DB.update('obd_data',pd.obdId,{status:'Picking Done'});
-
-    // Update assignments
-    var assign=DB.filter('picking_assignments',function(a){return a.obdId===pd.obdId&&a.status==='Assigned';});
-    assign.forEach(function(a){DB.update('picking_assignments',a.id,{status:'Done'});});
-
-    // ★ DEDUCT FROM LOCATION MASTER ★
-    pickingDetails.forEach(function(d){
-        d.locations.forEach(function(loc){
-            var locRecords=DB.filter('location_master',function(l){return l.rack===loc.rack&&l.ean===loc.ean&&l.quantity>0;});
-            var remaining=loc.qty;
-            locRecords.forEach(function(lr){
-                if(remaining<=0)return;
-                var deduct=Math.min(lr.quantity,remaining);
-                DB.update('location_master',lr.id,{quantity:lr.quantity-deduct});
-                remaining-=deduct;
-            });
-            // Delete 0 qty records
-            var zeroLocs=DB.filter('location_master',function(l){return l.rack===loc.rack&&l.ean===loc.ean&&l.quantity<=0;});
-            zeroLocs.forEach(function(zl){DB.remove('location_master',zl.id);});
-        });
-    });
-
-    // ★ RELEASE ALL LOCKS ★
-    allLocks.forEach(function(l){DB.update('location_locks',l.id,{status:'Released'});});
-
-    // Short report if any
-    var shorts=pickingDetails.filter(function(d){return d.short>0;});
-    if(shorts.length>0){
-        DB.add('short_reports',{shortNo:DB.shortNo(),vehicleNo:pd.obdNo,lrNo:'OBD',unloadNo:pd.obdNo,items:shorts.map(function(s){return{invoiceNo:pd.obdNo,material:s.material,ean:s.ean,expected:s.requiredQty,scanned:s.pickedQty,short:s.short};}),posted:false,createdAt:new Date().toISOString()});
-    }
-
-    // Picking report
-    var reportRows=[];
-    pickingDetails.forEach(function(d){d.locations.forEach(function(loc){reportRows.push({obdNo:pd.obdNo,material:d.material,ean:d.ean,rack:loc.rack,qty:loc.qty,pickedBy:APP.currentUser.name,pickedAt:new Date().toISOString()});});});
-    DB.add('picking_reports',{reportNo:'PR-'+Date.now().toString(36).toUpperCase(),obdNo:pd.obdNo,rows:reportRows,createdAt:new Date().toISOString()});
-
+    DB.filter('picking_assignments',function(a){return a.obdId===pd.obdId&&a.status==='Assigned';}).forEach(function(a){DB.update('picking_assignments',a.id,{status:'Done'});});
+    locks.forEach(function(l){DB.update('location_locks',l.id,{status:'Released',releasedAt:nowISO()});});
+    DB.filter('location_requests',function(r){return r.obdId===pd.obdId&&r.status==='Pending';}).forEach(function(r){DB.update('location_requests',r.id,{status:'Closed-Short',closedNote:'Picking submitted short',resolvedAt:nowISO()});});
+    var shorts=details.filter(function(d){return d.short>0;});
+    if(shorts.length)DB.add('short_reports',{shortNo:DB.shortNo(),vehicleNo:pd.obdNo,lrNo:'OBD',unloadNo:pd.obdNo,items:shorts.map(function(s){return{invoiceNo:pd.obdNo,material:s.material,ean:s.ean,expected:s.requiredQty,scanned:s.pickedQty,short:s.short};}),posted:false,createdAt:nowISO()});
+    var rows=[];
+    details.forEach(function(d){d.locations.forEach(function(loc){rows.push({obdNo:pd.obdNo,material:d.material,ean:d.ean,rack:loc.rack,qty:loc.qty,pickedBy:APP.currentUser.name,pickedAt:nowISO()});});});
+    DB.add('picking_reports',{reportNo:'PR-'+Date.now().toString(36).toUpperCase(),obdNo:pd.obdNo,rows:rows,createdAt:nowISO()});
     logAction('Picking','DONE','OBD '+pd.obdNo+' picked by '+APP.currentUser.name);
-    addNotif('OBD '+pd.obdNo+' picking completed by '+APP.currentUser.name,'success');
+    addNotif('OBD '+pd.obdNo+' picking completed by '+APP.currentUser.name+(shorts.length?' ('+shorts.length+' short)':''),shorts.length?'warning':'success');
     showToast('Picking completed for '+pd.obdNo,'success');
     closeModal();renderStartPicking();
 }
 
-// --- Picking Done (UNCHANGED) ---
+// ---------- Confirmed tasks + reverse picking ----------
 function renderPickingDone(){
-    var done=DB.get('picking_done').reverse();
+    var done=DB.get('picking_done').slice().reverse();
     var h='<div class="section-header"><h2><i class="bx bx-check-circle"></i> Picking Done ('+done.length+')</h2>';
     h+='<div style="display:flex;gap:6px"><button class="btn btn-glass" onclick="exportPickingDoneExcel()"><i class="bx bx-download"></i> Excel</button><button class="btn btn-glass" onclick="exportPickingDonePDF()"><i class="bx bx-file"></i> PDF</button></div></div>';
-    h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Materials</th><th>Picked By</th><th>Time</th><th>Short</th><th>Actions</th></tr></thead><tbody>';
-    if(!done.length)h+='<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:24px">No picking done yet</td></tr>';
+    h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Materials</th><th>Picked By</th><th>Time</th><th>Short</th><th>Status</th><th>Actions</th></tr></thead><tbody>';
+    if(!done.length)h+='<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:24px">No picking done yet</td></tr>';
     else done.forEach(function(d){
-        var shortCount=0;(d.details||[]).forEach(function(det){if(det.short>0)shortCount++;});
-        h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(d.obdNo)+'</td><td><span class="badge badge-info">'+(d.details||[]).length+'</span></td><td>'+esc(d.pickedByName)+'</td><td style="font-size:11px;color:var(--text-muted)">'+fmtDT(d.pickedAt)+'</td><td>'+(shortCount?'<span class="badge badge-danger">'+shortCount+' short</span>':'<span class="badge badge-success">Complete</span>')+'</td><td><button class="btn btn-glass btn-sm" onclick="viewPickingDoneDetail(\''+d.id+'\')"><i class="bx bx-eye"></i></button></td></tr>';
+        var sc=0;(d.details||[]).forEach(function(det){if(det.short>0)sc++;});
+        h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(d.obdNo)+'</td><td><span class="badge badge-info">'+(d.details||[]).length+'</span></td><td>'+esc(d.pickedByName)+'</td><td style="font-size:11px;color:var(--text-muted)">'+fmtDT(d.pickedAt)+'</td><td>'+(sc?'<span class="badge badge-danger">'+sc+' short</span>':'<span class="badge badge-success">Complete</span>')+'</td><td>'+(d.status==='Reversed'?'<span class="badge badge-warning">Reversed</span>':'<span class="badge badge-success">Done</span>')+'</td><td style="display:flex;gap:4px"><button class="btn btn-glass btn-sm" onclick="viewPickingDoneDetail(\''+d.id+'\')"><i class="bx bx-eye"></i></button>'+(d.status==='Done'?'<button class="btn btn-warning btn-sm" onclick="openReverseModal(\''+d.id+'\')"><i class="bx bx-undo"></i> Reverse</button>':'')+'</td></tr>';
     });
     h+='</tbody></table></div>';
     setHtml(h);
 }
 function viewPickingDoneDetail(id){
     var d=DB.find('picking_done',id);if(!d)return;
-    var h='<div style="margin-bottom:12px"><strong>OBD:</strong> <span style="color:var(--accent)">'+esc(d.obdNo)+'</span> | <strong>By:</strong> '+esc(d.pickedByName)+' | <strong>Time:</strong> '+fmtDT(d.pickedAt)+'</div>';
+    var h='<div style="margin-bottom:12px"><strong>OBD:</strong> <span style="color:var(--accent)">'+esc(d.obdNo)+'</span> | <strong>By:</strong> '+esc(d.pickedByName)+' | <strong>Time:</strong> '+fmtDT(d.pickedAt)+(d.status==='Reversed'?' | <span class="badge badge-warning">Reversed by '+esc(d.reversedByName||'')+' — '+esc(d.reverseReason||'')+'</span>':'')+'</div>';
     h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>EAN</th><th>Required</th><th>Picked</th><th>Short</th><th>Locations</th></tr></thead><tbody>';
     (d.details||[]).forEach(function(det){
         var locStr=(det.locations||[]).map(function(l){return l.rack+':'+l.qty;}).join(', ');
-        h+='<tr class="'+(det.short>0?'scan-row-red':'scan-row-green')+'"><td>'+esc(det.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(det.ean)+'</td><td>'+det.requiredQty+'</td><td><strong>'+det.pickedQty+'</strong></td><td class="'+(det.short>0?'qty-mismatch':'qty-match')+'">'+(det.short>0?'-'+det.short:'0')+'</td><td style="font-size:11px">'+esc(locStr)+'</td></tr>';
+        h+='<tr class="'+(det.short>0?'scan-row-red':'scan-row-green')+'"><td>'+esc(det.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(det.ean)+'</td><td>'+det.requiredQty+'</td><td><strong>'+det.pickedQty+'</strong></td><td class="'+(det.short>0?'qty-mismatch':'qty-match')+'">'+(det.short>0?'-'+det.short:'0')+'</td><td style="font-size:11px">'+esc(locStr)+(det.shortReason?'<br><span style="color:var(--warning)">'+esc(det.shortReason)+'</span>':'')+'</td></tr>';
     });
     h+='</tbody></table></div>';
-    showModal('Picking Detail — '+d.obdNo,h,'lg','<button class="btn btn-glass" onclick="closeModal()">Close</button>');
+    showModal('Picking Detail — '+esc(d.obdNo),h,'lg','<button class="btn btn-glass" onclick="closeModal()">Close</button>');
 }
+function reverseBlocker(d){
+    var inLoaded=DB.filter('loaded_vehicles',function(l){return (l.obdIds||[]).indexOf(d.id)>-1;}).length;
+    if(inLoaded)return 'Is OBD ki loading shuru/ho chuki hai — reverse nahi ho sakta';
+    var inAssign=DB.filter('loading_assignments',function(a){return a.status==='Assigned'&&(a.obdIds||[]).indexOf(d.id)>-1;}).length;
+    if(inAssign)return 'Loading assign hai — pehle Loading Assign se Unassign karein';
+    var inAppr=DB.filter('loading_approvals',function(a){return a.status==='Pending'&&(a.obdIds||[]).indexOf(d.id)>-1;}).length;
+    if(inAppr)return 'Loading approval pending hai';
+    return '';
+}
+function openReverseModal(id){
+    var d=DB.find('picking_done',id);if(!d||d.status!=='Done')return;
+    var blk=reverseBlocker(d);if(blk){showToast(blk,'error');return;}
+    var h='<div class="pk-info">OBD <b>'+esc(d.obdNo)+'</b> · Picked by '+esc(d.pickedByName)+' · '+fmtDT(d.pickedAt)+'<br>Reverse karne par ye stock wapas jayega:</div>';
+    h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>Rack</th><th>Qty</th></tr></thead><tbody>';
+    (d.details||[]).forEach(function(det){(det.locations||[]).forEach(function(l){h+='<tr><td>'+esc(det.material)+'</td><td>'+esc(l.rack)+'</td><td><b>+'+l.qty+'</b></td></tr>';});});
+    h+='</tbody></table></div>';
+    h+='<div class="form-group" style="margin-top:10px"><label>Reverse Reason <span class="req">*</span></label><textarea id="rvReason" class="form-input"></textarea></div>';
+    if(!isAdminUser())h+='<div class="pk-info" style="border-color:var(--warning)"><b>Admin authorization zaruri hai</b><div class="form-group" style="margin-top:6px"><label>Admin Username</label><input id="rvUser" class="form-input" autocomplete="off"></div><div class="form-group"><label>Admin Password</label><input id="rvPass" type="password" class="form-input" autocomplete="new-password"></div></div>';
+    showModal('Reverse Picking — '+esc(d.obdNo),h,'lg','<button class="btn btn-glass" onclick="closeModal()">Cancel</button><button class="btn btn-warning" onclick="doReversePicking(\''+id+'\')"><i class="bx bx-undo"></i> Reverse & Restore Stock</button>');
+}
+function doReversePicking(id){
+    var d=DB.find('picking_done',id);if(!d||d.status!=='Done')return;
+    var blk=reverseBlocker(d);if(blk){showToast(blk,'error');return;}
+    var reason=(document.getElementById('rvReason')||{}).value||'';
+    if(!reason.trim()){showToast('Reason likhein','error');return;}
+    var authBy=null;
+    if(isAdminUser())authBy=APP.currentUser;
+    else{
+        var un=((document.getElementById('rvUser')||{}).value||'').trim().toLowerCase(),pw=(document.getElementById('rvPass')||{}).value||'';
+        authBy=DB.get('users').filter(function(u){return (u.role==='Admin'||u.role==='Super Admin')&&String(u.username||'').toLowerCase()===un&&u.password===pw;})[0];
+        if(!authBy){showToast('Admin username/password galat hai','error');return;}
+    }
+    (d.details||[]).forEach(function(det){
+        (det.locations||[]).forEach(function(l){restoreStock(l.rack,l.ean||det.ean,l.qty,l.sources,{material:det.material,obdNo:d.obdNo});});
+    });
+    DB.update('picking_done',id,{status:'Reversed',reversedBy:authBy.id,reversedByName:authBy.name,reversedAt:nowISO(),reverseReason:reason,reverseRequestedBy:APP.currentUser.name});
+    DB.update('obd_data',d.obdId,{status:'Pending',priority:'Normal'});
+    DB.filter('picking_reports',function(r){return r.obdNo===d.obdNo;}).forEach(function(r){DB.update('picking_reports',r.id,{reversed:true});});
+    DB.filter('short_reports',function(s){return s.lrNo==='OBD'&&s.unloadNo===d.obdNo&&!s.posted;}).forEach(function(s){DB.remove('short_reports',s.id);});
+    logAction('Picking','REVERSE','OBD '+d.obdNo+' reversed. Auth: '+authBy.name+'. Reason: '+reason);
+    addNotif('Picking reversed: '+d.obdNo+' (auth '+authBy.name+'). Stock wapas add hua.','warning');
+    showToast('Reversed — stock restore ho gaya','success');
+    closeModal();renderPickingDone();
+}
+
+// ---------- Loading Assign: OBD detail (OBD qty vs picked qty) ----------
+function showLoadAssignDetail(pdId){
+    var d=DB.find('picking_done',pdId);if(!d)return;
+    var to=0,tp=0;
+    var h='<div style="margin-bottom:10px"><b style="color:var(--accent)">'+esc(d.obdNo)+'</b> · Picked by '+esc(d.pickedByName)+' · '+fmtDT(d.pickedAt)+'</div>';
+    h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>EAN</th><th>OBD Qty</th><th>Picked Qty</th><th>Diff</th><th>Short Reason</th></tr></thead><tbody>';
+    (d.details||[]).forEach(function(x){
+        to+=x.requiredQty;tp+=x.pickedQty;
+        h+='<tr class="'+(x.short>0?'scan-row-red':'scan-row-green')+'"><td>'+esc(x.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(x.ean)+'</td><td>'+x.requiredQty+'</td><td><b>'+x.pickedQty+'</b></td><td class="'+(x.short>0?'qty-mismatch':'qty-match')+'">'+(x.short>0?'-'+x.short:'0')+'</td><td style="font-size:11px">'+esc(x.shortReason||'')+'</td></tr>';
+    });
+    h+='<tr><td colspan="2"><b>Total</b></td><td><b>'+to+'</b></td><td><b>'+tp+'</b></td><td colspan="2"></td></tr></tbody></table></div>';
+    showModal('OBD Detail — '+esc(d.obdNo),h,'lg','<button class="btn btn-glass" onclick="closeModal()">Close</button>');
+}
+
 function exportPickingDoneExcel(){
     var done=DB.get('picking_done');var rows=[['OBD No','Material','EAN','Required','Picked','Short','Picked By','Time']];
     done.forEach(function(d){(d.details||[]).forEach(function(det){rows.push([d.obdNo||d.obnNo,det.material,det.ean,det.requiredQty,det.pickedQty,det.short,det.pickedByName,fmtDT(d.pickedAt)]);});});
@@ -4356,7 +4770,7 @@ function renderLoadingAssign(){
             else if(partialOBDIds[o.id])statusBadge=' <span class="badge badge-accent" style="font-size:9px">Partial: '+esc(partialOBDIds[o.id].loadNo)+'</span>';
             else statusBadge=' <span class="badge badge-success" style="font-size:9px">Ready</span>';
             var dis=assignedOBDIds[o.id]?'disabled':'';
-            h+='<label class="chk-list-item" style="'+(assignedOBDIds[o.id]?'opacity:0.5':'')+'"><input type="checkbox" class="load-obd-chk" value="'+o.id+'" data-no="'+esc(o.obdNo)+'" '+dis+'><span><strong style="color:var(--accent);font-family:var(--font-display);font-size:11px">'+esc(o.obdNo)+'</strong> — '+(o.details||[]).length+' mats, '+totalQ+' qty'+statusBadge+'</span></label>';
+            h+='<label class="chk-list-item" style="'+(assignedOBDIds[o.id]?'opacity:0.5':'')+'"><input type="checkbox" class="load-obd-chk" value="'+o.id+'" data-no="'+esc(o.obdNo)+'" '+dis+'><span><strong style="color:var(--accent);font-family:var(--font-display);font-size:11px">'+esc(o.obdNo)+'</strong> — '+(o.details||[]).length+' mats, '+totalQ+' qty'+statusBadge+' <button type="button" class="btn btn-glass btn-sm" onclick="event.preventDefault();event.stopPropagation();showLoadAssignDetail(\''+o.id+'\')"><i class="bx bx-show"></i> Detail</button></span></label>';
         });
         h+='</div>';
         h+='<div class="form-actions"><button class="btn btn-glass" onclick="doLoadingAssign()"><i class="bx bx-check-double"></i> Assign Selected</button></div>';

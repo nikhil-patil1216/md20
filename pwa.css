@@ -1,0 +1,106 @@
+/* MD20 WMS — native-app-like mobile layer. Desktop styles remain unchanged. */
+.md20-install-btn {
+  display: inline-flex; align-items: center; gap: 7px; white-space: nowrap;
+  border: 1px solid rgba(255,255,255,.28); border-radius: 9px;
+  padding: 7px 11px; background: #0A6ED1; color: #fff;
+  font: 600 12px/1.2 Arial, sans-serif; cursor: pointer;
+}
+.md20-install-btn:active { transform: scale(.97); }
+.md20-install-icon { font-size: 17px; line-height: 12px; }
+.md20-install-hidden { display: none !important; }
+
+.md20-install-help {
+  display: none; position: fixed; inset: 0; z-index: 100000;
+  align-items: center; justify-content: center; padding: 20px;
+  background: rgba(10,20,35,.58); backdrop-filter: blur(5px);
+}
+.md20-install-help.open { display: flex; }
+.md20-install-help-card {
+  width: min(390px, 100%); position: relative; padding: 23px 20px 20px;
+  border-radius: 18px; background: #fff; color: #152238;
+  box-shadow: 0 18px 60px rgba(0,0,0,.25);
+}
+.md20-install-help-card strong { display:block; font-size:17px; margin-bottom:9px; }
+.md20-install-help-card p { font-size:14px; line-height:1.6; margin:0; }
+.md20-install-help-close {
+  position:absolute; top:8px; right:11px; border:0; background:transparent;
+  font-size:26px; color:#64748b; cursor:pointer;
+}
+
+@media (max-width: 768px) {
+  html { height:100%; overscroll-behavior-y: none; }
+  body {
+    min-height:100%; min-height:100dvh; overscroll-behavior-y: none;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-text-size-adjust: 100%;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  #mainApp { min-height:100dvh; }
+  #mainContent { min-width:0; min-height:100dvh; }
+  #shellBar {
+    height:58px; min-height:58px; padding:0 10px; gap:7px;
+    padding-top: env(safe-area-inset-top); top:0;
+  }
+  .shell-left { gap:5px; min-width:0; }
+  .shell-left > div { gap:5px !important; margin-right:0 !important; }
+  .shell-left > div img { height:23px !important; }
+  .shell-left > div span { font-size:12px !important; }
+  .shell-center { display:none; }
+  .shell-right { gap:2px; margin-left:auto; }
+  .shell-btn { min-width:34px; min-height:36px; padding:6px 5px; }
+  .user-menu { padding:3px 4px; gap:3px; }
+  .user-avatar { width:29px; height:29px; }
+  .um-meta { display:none; }
+  .user-menu > i { display:none; }
+  .md20-install-btn { padding:7px 8px; font-size:11px; }
+  #contentArea {
+    padding:12px 11px calc(82px + env(safe-area-inset-bottom));
+    overflow-x:hidden; -webkit-overflow-scrolling:touch;
+  }
+  .content-section, .card, .kpi-card { min-width:0; }
+  .card { padding:14px; border-radius:14px; }
+  .kpi-grid { gap:9px; }
+  .kpi-card { padding:13px 11px; border-radius:13px; }
+  .kpi-value { font-size:22px; }
+  .kpi-label { font-size:10px; }
+  .btn, button, input, select, textarea { touch-action: manipulation; }
+  input, select, textarea { font-size:16px !important; }
+  .btn { min-height:36px; }
+  table { min-width:650px; }
+  .table-container, .table-wrap, .data-table-wrap, .report-table-wrap {
+    max-width:100%; overflow-x:auto; -webkit-overflow-scrolling:touch;
+  }
+  .modal-overlay { padding:8px !important; align-items:flex-end; }
+  .modal-container {
+    width:100% !important; max-width:100% !important; max-height:88dvh;
+    overflow:auto; border-radius:18px 18px 10px 10px;
+    margin:0 !important; padding-bottom:env(safe-area-inset-bottom);
+  }
+  .modal-header { position:sticky; top:0; z-index:2; }
+  .bottom-nav {
+    height:calc(62px + env(safe-area-inset-bottom));
+    padding:5px 5px calc(5px + env(safe-area-inset-bottom));
+    background:rgba(255,255,255,.96);
+    box-shadow:0 -5px 22px rgba(15,23,42,.09);
+    border-top:1px solid rgba(15,23,42,.08);
+    backdrop-filter:blur(18px); -webkit-backdrop-filter:blur(18px);
+  }
+  .bnav-item {
+    flex:1; min-width:0; min-height:48px; justify-content:center;
+    gap:3px; padding:5px 2px; border-radius:12px;
+    color:#64748b; font-size:10px; font-weight:600;
+  }
+  .bnav-item i { font-size:21px; }
+  .bnav-item.active { color:#0A6ED1; background:rgba(10,110,209,.08); }
+  .more-panel-content {
+    max-height:78dvh; padding-bottom:calc(12px + env(safe-area-inset-bottom));
+    border-radius:22px 22px 0 0;
+  }
+  .more-panel-header { position:sticky; top:0; background:inherit; z-index:2; }
+  .login-card { width:min(420px, calc(100vw - 28px)); }
+}
+
+@media (display-mode: standalone) {
+  body { user-select:none; }
+  input, textarea, select { user-select:text; }
+}

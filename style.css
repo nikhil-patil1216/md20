@@ -1089,3 +1089,58 @@ body{background:var(--bg-primary);color:var(--text-primary);font-size:14px;lette
 input.form-input,select.form-input,textarea.form-input{border:1px solid #89919A;background:#fff;color:#32363A}
 input.form-input:focus,select.form-input:focus,textarea.form-input:focus{border-color:#0A6ED1;box-shadow:0 0 0 1px #0A6ED1;outline:none}
 .form-group label{color:#556B82}
+
+
+/* ============================================================
+   MOBILE APP MODE  —  sirf phone/narrow screen (<=768px) par lagta hai
+   PC / laptop ka design bilkul same rahega
+   ============================================================ */
+html{-webkit-tap-highlight-color:transparent}
+@media(max-width:768px){
+    html{touch-action:manipulation}
+    html,body{overscroll-behavior-y:none}
+    .btn,.bnav-item,.shell-btn,#sidebar a,.more-panel-grid *{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+    input,select,textarea{font-size:16px!important}               /* iPhone par auto-zoom band */
+
+    /* Top bar — app header jaisa, status bar ke neeche safe */
+    #shellBar{height:calc(48px + env(safe-area-inset-top,0px));padding:env(safe-area-inset-top,0px) 10px 0;gap:6px}
+    .shell-left span[style*="font-weight:700"],#helpBtn{display:none}
+    .shell-btn{min-width:40px;min-height:40px;display:inline-flex;align-items:center;justify-content:center}
+    .shell-center{min-width:0}
+    .global-search input{height:36px}
+    #sidebar{padding-top:env(safe-area-inset-top,0px)}
+
+    /* Page area */
+    #mainContent{min-height:100vh;min-height:100dvh}
+    #contentArea{padding:12px;padding-bottom:calc(78px + env(safe-area-inset-bottom,0px))}
+    .card{padding:14px;border-radius:12px}
+
+    /* Bottom tab bar — native app jaisa */
+    .bottom-nav{height:calc(60px + env(safe-area-inset-bottom,0px));padding:0 4px env(safe-area-inset-bottom,0px);box-shadow:0 -2px 12px rgba(0,0,0,.10)}
+    .bnav-item{position:relative;flex:1;min-width:0;padding:7px 4px;font-size:10px}
+    .bnav-item i{font-size:23px}
+    .bnav-item.active::before{content:"";position:absolute;top:-2px;left:50%;width:30px;height:3px;margin-left:-15px;border-radius:0 0 3px 3px;background:currentColor}
+    .more-panel-content{padding-bottom:env(safe-area-inset-bottom,0px);max-height:78vh}
+
+    /* Touch friendly buttons & inputs */
+    .btn{min-height:42px;font-size:14px;padding:0 16px;justify-content:center}
+    .btn.btn-sm{min-height:36px;padding:0 12px;font-size:13px}
+    input.form-input,select.form-input{min-height:44px}
+    .table-wrapper{-webkit-overflow-scrolling:touch}
+
+    /* Popups — neeche se upar aane wali sheet (app jaisa) */
+    .modal-overlay{align-items:flex-end;padding:0}
+    .modal-container,.modal-container.modal-sm,.modal-container.modal-lg,.modal-container.modal-xl{
+        max-width:100%!important;width:100%;max-height:92vh;max-height:92dvh;
+        border-radius:18px 18px 0 0!important;animation:slideUp .28s ease-out;
+        padding-bottom:env(safe-area-inset-bottom,0px)}
+
+    /* Toast — bottom bar ke upar, full width */
+    .toast-container{left:12px;right:12px;bottom:calc(72px + env(safe-area-inset-bottom,0px));align-items:stretch}
+    .toast{min-width:0;max-width:none}
+
+    /* Login screen */
+    #loginPage{min-height:100vh;min-height:100dvh;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+    .input-icon input{min-height:46px}
+    .btn-glass-login{min-height:48px}
+}

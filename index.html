@@ -2,10 +2,15 @@
 <html lang="en" data-theme="light">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="theme-color" content="#0A6ED1">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#354A5F">
     <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="VIP WMS">
+    <meta name="application-name" content="VIP WMS">
+    <link rel="manifest" href="manifest.json">
+    <link rel="apple-touch-icon" href="apple-touch-icon.png">
+    <link rel="icon" type="image/png" href="icon-192.png">
     <meta name="mobile-web-app-capable" content="yes">
     <title>VIP Industries Ltd. (MD20) — Warehouse Management System</title>
     <link href="https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css" rel="stylesheet">
@@ -108,6 +113,7 @@
                             <a href="#" id="ddProfile"><i class="bx bx-user"></i> Profile</a>
                             <a href="#" id="ddPassword"><i class="bx bx-lock"></i> Change Password</a>
                             <hr>
+                            <a href="#" id="ddInstall" style="display:none"><i class="bx bx-download"></i> Install App</a>
                             <a href="#" id="ddLogout"><i class="bx bx-log-out"></i> Logout</a>
                         </div>
                     </div>
@@ -183,5 +189,23 @@
     </div>
 
     <script src="script.js"></script>
+    <script>
+    // ---- PWA: service worker + "Install App" ----
+    if ('serviceWorker' in navigator) {
+        window.addEventListener('load', function () { navigator.serviceWorker.register('sw.js').catch(function () {}); });
+    }
+    var _installEvt = null;
+    window.addEventListener('beforeinstallprompt', function (e) {
+        e.preventDefault(); _installEvt = e;
+        var b = document.getElementById('ddInstall'); if (b) b.style.display = '';
+    });
+    document.getElementById('ddInstall').addEventListener('click', function (ev) {
+        ev.preventDefault();
+        if (!_installEvt) return;
+        _installEvt.prompt();
+        _installEvt.userChoice.finally(function () { _installEvt = null; document.getElementById('ddInstall').style.display = 'none'; });
+    });
+    window.addEventListener('appinstalled', function () { var b = document.getElementById('ddInstall'); if (b) b.style.display = 'none'; });
+    </script>
 </body>
 </html>

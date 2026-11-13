@@ -6002,7 +6002,7 @@ function renderStartLoading(){
                 rowStyle='opacity:0.4;pointer-events:none';isReady=false;
             }else if(partials.length>0){
                 var pl=partials[partials.length-1];
-                var loadedQ=0;(pl.scannedItems||[]).forEach(function(s){if(s.inOBD)loadedQ+=s.qty;});
+                var thisNo=String(a.obdNos[i]||pd.obdNo||'');var loadedQ=0;(pl.scannedItems||[]).forEach(function(s){if(s.inOBD&&(!s.obdNo||s.obdNo==='—'||String(s.obdNo)===thisNo))loadedQ+=s.qty;});
                 statusBadge='<span class="badge badge-warning" style="font-size:9px">Partial '+loadedQ+'/'+totalQ+'</span>';
                 actionBtn='<button class="btn btn-glass btn-sm" style="border-color:var(--warning)" onclick="continueLoading(\''+pl.id+'\')"><i class="bx bx-reload"></i> Continue</button>';
                 isReady=false;
@@ -6107,16 +6107,26 @@ function continueLoading(partialLoadId){
     var obdNos=pl.obdNos;
     if(!Array.isArray(obdNos))obdNos=[obdNos];
 
-    var obdId=obdIds[0];
-    var pd=DB.find('picking_done',obdId);
-    if(!pd){showToast('Picking data not found for OBD. It may have been cleared.','error');return;}
-
-    var expected=[];
-    (pd.details||[]).forEach(function(d){
-        var done=0;
-        (pl.scannedItems||[]).forEach(function(s){if(s.ean===d.ean&&s.inOBD)done+=s.qty;});
-        expected.push({obdNo:d.obdNo,material:d.material,ean:d.ean,requiredQty:d.pickedQty,scannedQty:done});
+     // load ALL OBDs of this partial load (not only the first one)
+    var expected=[],pool={};
+    (pl.scannedItems||[]).forEach(function(s){
+        if(!s.inOBD)return;
+        var k=String(s.obdNo)+'|'+s.ean;pool[k]=(pool[k]||0)+s.qty;
     });
+    var anyPd=false,lastIdx={};
+    obdIds.forEach(function(oid){
+        var pd=DB.find('picking_done',oid);if(!pd)return;
+        anyPd=true;
+        (pd.details||[]).forEach(function(d){
+            var k=String(d.obdNo)+'|'+d.ean,take=Math.min(pool[k]||0,d.pickedQty);
+            pool[k]=(pool[k]||0)-take;
+            expected.push({obdNo:d.obdNo,material:d.material,ean:d.ean,requiredQty:d.pickedQty,scannedQty:take});
+            lastIdx[k]=expected.length-1;
+        });
+    });
+    if(!anyPd){showToast('Picking data not found for OBD. It may have been cleared.','error');return;}
+    // any over-scanned qty (edited qty) stays on the last matching row
+    for(var pk in pool){if(pool[pk]>0&&lastIdx[pk]!==undefined)expected[lastIdx[pk]].scannedQty+=pool[pk];}
 
     window._loadScanData={
         obdId:obdIds,
@@ -6180,17 +6190,26 @@ async function resolveLoadScan(expected,val){
     var uv=String(val||'').trim().toUpperCase(),mm=null;
     try{var f=await sbFindMaterialAny(val);mm=f?f.row:null;}catch(e){mm=null;}
     var mEan=mm&&mm.ean?String(mm.ean).toUpperCase():'',mMat=mm&&mm.material?String(mm.material).toUpperCase():'';
-    var found=null;
-    for(var i=0;i<expected.length;i++){
-        var e=expected[i];if(e.scannedQty>=e.requiredQty)continue;
+    function same(e){
         var eEan=String(e.ean||'').toUpperCase(),eMat=String(e.material||'').toUpperCase();
-        if((eEan&&(eEan===uv||(mEan&&eEan===mEan)))||(eMat&&(eMat===uv||(mMat&&eMat===mMat)))){found=e;break;}
+        return (eEan&&(eEan===uv||(mEan&&eEan===mEan)))||(eMat&&(eMat===uv||(mMat&&eMat===mMat)));
     }
+    var found=null,extraFor=null;
+    // 1) search ALL OBDs of this vehicle: first one that still needs qty
+    for(var i=0;i<expected.length;i++){
+        var e=expected[i];if(same(e)&&e.scannedQty<e.requiredQty){found=e;break;}
+    }
+    // 2) material exists in an OBD but required qty is already complete => EXTRA load
+    if(!found){
+        for(var j=0;j<expected.length;j++){if(same(expected[j])){extraFor=expected[j];break;}}
+    }
+    var ref=found||extraFor;
     return{
         found:found,
-        ean:String((found&&found.ean)||(mm&&mm.ean)||uv).toUpperCase(),
-        material:(found&&found.material)||(mm&&mm.material)||val,
-        description:(mm&&mm.description)||(found&&found.description)||'',
+        extraFor:extraFor,
+        ean:String((ref&&ref.ean)||(mm&&mm.ean)||uv).toUpperCase(),
+        material:(ref&&ref.material)||(mm&&mm.material)||val,
+        description:(mm&&mm.description)||(ref&&ref.description)||'',
         inMaster:!!mm
     };
 }
@@ -6200,12 +6219,17 @@ async function doLoadScan(){
     var ld=window._loadScanData;if(!ld)return;
     var r=await resolveLoadScan(ld.expected,val);
     if(!window._loadScanData)return;
+    var now=new Date().toISOString();
     if(r.found){
         r.found.scannedQty++;
-        ld.scannedItems.push({ean:r.ean,material:r.material,description:r.description,qty:1,inOBD:true,obdNo:r.found.obdNo,scannedAt:new Date().toISOString()});
-        showToast(r.material+' — Match ✓','success');
+        ld.scannedItems.push({ean:r.ean,material:r.material,description:r.description,qty:1,inOBD:true,obdNo:r.found.obdNo,scannedAt:now});
+        showToast(r.material+' — Match ✓ (OBD '+r.found.obdNo+')','success');
+    }else if(r.extraFor){
+        // material is in an OBD but its required qty is already complete
+        ld.scannedItems.push({ean:r.ean,material:r.material,description:r.description,qty:1,inOBD:false,extra:true,obdNo:r.extraFor.obdNo,scannedAt:now});
+        showToast(r.material+' — Extra load (OBD '+r.extraFor.obdNo+' qty already complete)','warning');
     }else{
-        ld.scannedItems.push({ean:r.ean,material:r.material,description:r.description,qty:1,inOBD:false,obdNo:'—',scannedAt:new Date().toISOString()});
+        ld.scannedItems.push({ean:r.ean,material:r.material,description:r.description,qty:1,inOBD:false,obdNo:'—',scannedAt:now});
         showToast(r.material+' — Not in OBD ✗','warning');
     }
     renderLoadScanTable();
@@ -6259,14 +6283,14 @@ function updateLoadScanQty(idx,nq){
     var item=ld.scannedItems[idx];if(!item)return;
     nq=parseInt(nq)||1;if(nq<1)nq=1;
     var diff=nq-item.qty;
-    if(item.inOBD)ld.expected.forEach(function(e){if(e.ean===item.ean)e.scannedQty+=diff;});
+    if(item.inOBD)ld.expected.forEach(function(e){if(e.ean===item.ean&&(!item.obdNo||e.obdNo===item.obdNo))e.scannedQty+=diff;});
     item.qty=nq;renderLoadScanTable();
 }
 
 function removeLoadScanItem(idx){
     var ld=window._loadScanData;if(!ld)return;
     var item=ld.scannedItems[idx];if(!item)return;
-    if(item.inOBD)ld.expected.forEach(function(e){if(e.ean===item.ean)e.scannedQty-=item.qty;});
+    if(item.inOBD)ld.expected.forEach(function(e){if(e.ean===item.ean&&(!item.obdNo||e.obdNo===item.obdNo))e.scannedQty-=item.qty;});
     ld.scannedItems.splice(idx,1);renderLoadScanTable();
 }
 
@@ -6276,13 +6300,16 @@ function renderLoadScanTable(){
     var body=document.getElementById('loadScanBody');if(!body)return;
     var h='';
     ld.scannedItems.forEach(function(s,i){
-        var rowClass=s.inOBD?'':'scan-row-red';
+                var rowClass=s.inOBD?'':(s.extra?'':'scan-row-red');
+        var rowStyle=s.extra?'background:rgba(255,165,2,.10);border-left:3px solid var(--warning)':'';
         // Status badge
         var statusBadge=s.inOBD
             ?'<span class="badge badge-success" style="font-size:9px;padding:2px 6px"><i class="bx bx-check" style="font-size:10px"></i> Match</span>'
-            :'<span class="badge badge-danger" style="font-size:9px;padding:2px 6px"><i class="bx bx-x" style="font-size:10px"></i> Not in OBD</span>';
+            :(s.extra
+                ?'<span class="badge badge-warning" style="font-size:9px;padding:2px 6px"><i class="bx bx-plus" style="font-size:10px"></i> Extra Load</span>'
+                :'<span class="badge badge-danger" style="font-size:9px;padding:2px 6px"><i class="bx bx-x" style="font-size:10px"></i> Not in OBD</span>');
 
-        h+='<tr class="'+rowClass+'">';
+               h+='<tr class="'+rowClass+'" style="'+rowStyle+'">';
         h+='<td style="font-size:11px;color:var(--text-muted);text-align:center;width:30px">'+(i+1)+'</td>';
         h+='<td style="font-family:var(--font-display);font-size:10px;width:120px">'+esc(s.ean)+'</td>';
         h+='<td style="font-size:12px;font-weight:500">'+esc(s.material)+'</td>';
@@ -6353,9 +6380,14 @@ function showMismatchBlock(ld){
             mh+='<div style="font-size:11px;padding:2px 0;color:var(--text-muted)">→ '+esc(e.material)+': Expected <strong>'+e.requiredQty+'</strong>, Scanned <strong style="color:'+(diff>0?'var(--danger)':'var(--warning)')+'">'+e.scannedQty+'</strong>, Diff: <strong style="color:var(--danger)">'+(diff>0?'-'+diff:'+'+Math.abs(diff))+'</strong></div>';
         }
     });
-    var notInOBD=ld.scannedItems.filter(function(s){return !s.inOBD;});
+       var extraItems=ld.scannedItems.filter(function(s){return !s.inOBD&&s.extra;});
+    var notInOBD=ld.scannedItems.filter(function(s){return !s.inOBD&&!s.extra;});
+    if(extraItems.length){
+        mh+='<div style="font-size:12px;margin-top:6px;color:var(--warning)"><strong>Extra load (more than OBD qty):</strong></div>';
+        extraItems.forEach(function(s){mh+='<div style="font-size:11px;padding:2px 0;color:var(--text-muted)">→ '+esc(s.material)+' ('+esc(s.ean)+') OBD '+esc(s.obdNo)+' x '+s.qty+'</div>';});
+    }
     if(notInOBD.length){
-        mh+='<div style="font-size:12px;margin-top:6px;color:var(--warning)"><strong>Extra items (Not in OBD):</strong></div>';
+        mh+='<div style="font-size:12px;margin-top:6px;color:var(--warning)"><strong>Not in OBD:</strong></div>';
         notInOBD.forEach(function(s){mh+='<div style="font-size:11px;padding:2px 0;color:var(--text-muted)">→ '+esc(s.material)+' ('+esc(s.ean)+') x '+s.qty+'</div>';});
     }
     mh+='</div>';

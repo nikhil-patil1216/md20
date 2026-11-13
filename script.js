@@ -5706,7 +5706,7 @@ function renderPWLLoadingScan(){
     var totalPicked=0;pd.expected.forEach(function(e){totalPicked+=e.requiredQty;});
     h+='<div style="padding:8px 12px;background:var(--bg-secondary);border-radius:6px;margin-bottom:10px;font-size:11px;color:var(--text-muted)"><i class="bx bx-info-circle" style="color:var(--accent)"></i> You picked <strong style="color:var(--accent)">'+totalPicked+'</strong> items — scan exactly <strong style="color:var(--success)">'+totalPicked+'</strong> to load into vehicle</div>';
 
-    h+='<div class="search-box" style="margin-bottom:8px"><i class="bx bx-search"></i><input type="text" id="pwlScanInput" placeholder="Scan EAN..." onkeydown="if(event.key===\'Enter\')doPWLScan()" autofocus></div>';
+    h+='<div class="search-box" style="margin-bottom:8px"><i class="bx bx-search"></i><input type="text" id="pwlScanInput" placeholder="Scan EAN or Material..." onkeydown="if(event.key===\'Enter\')doPWLScan()" autofocus></div>';
     h+='<div style="display:flex;gap:6px;margin-bottom:12px">';
     h+='<button class="btn btn-glass btn-sm" onclick="APP.scanCallback=function(c){document.getElementById(\'pwlScanInput\').value=c;doPWLScan();};document.getElementById(\'scannerModal\').style.display=\'flex\'"><i class="bx bx-qr"></i> Scanner</button>';
     h+='<button class="btn btn-glass btn-sm" onclick="showPWLManualEntry()"><i class="bx bx-plus"></i> Manual</button>';
@@ -5726,18 +5726,16 @@ function renderPWLLoadingScan(){
 async function doPWLScan(){
     var inp=document.getElementById('pwlScanInput');if(!inp)return;
     var val=inp.value.trim();inp.value='';if(!val)return;
-    var pd=window._pwlData;if(!pd)return;var uv=val.toUpperCase();
-    var found=null;for(var i=0;i<pd.expected.length;i++){var e=pd.expected[i];if(e.ean&&e.ean.toUpperCase()===uv&&e.scannedQty<e.requiredQty){found=e;break;}}
-    var mm=await sbFindOne('material_master','ean',uv);   // ★ direct Supabase search
-    var mname=mm?(mm.material||''):'';
-    var mdesc=mm?(mm.description||''):'';
-    if(found){
-        found.scannedQty++;
-        pd.scannedItems.push({ean:found.ean,material:found.material,description:mdesc,qty:1,inOBD:true,obdNo:found.obdNo,scannedAt:new Date().toISOString()});
-        showToast(found.material+' — Match ✓','success');
+    var pd=window._pwlData;if(!pd)return;
+    var r=await resolveLoadScan(pd.expected,val);
+    if(!window._pwlData)return;
+    if(r.found){
+        r.found.scannedQty++;
+        pd.scannedItems.push({ean:r.ean,material:r.material,description:r.description,qty:1,inOBD:true,obdNo:r.found.obdNo,scannedAt:new Date().toISOString()});
+        showToast(r.material+' — Match ✓','success');
     }else{
-        pd.scannedItems.push({ean:uv,material:mname||val,description:mdesc,qty:1,inOBD:false,obdNo:'—',scannedAt:new Date().toISOString()});
-        showToast((mname||val)+' — Not in OBD ✗','warning');
+        pd.scannedItems.push({ean:r.ean,material:r.material,description:r.description,qty:1,inOBD:false,obdNo:'—',scannedAt:new Date().toISOString()});
+        showToast(r.material+' — Not in OBD ✗','warning');
     }
     renderPWLScanTable();setTimeout(function(){var i=document.getElementById('pwlScanInput');if(i)i.focus();},100);
 }
@@ -5782,7 +5780,7 @@ function renderPWLScanTable(){
         var sb=s.inOBD?'<span class="badge badge-success" style="font-size:9px;padding:2px 6px"><i class="bx bx-check" style="font-size:10px"></i> Match</span>':'<span class="badge badge-danger" style="font-size:9px;padding:2px 6px"><i class="bx bx-x" style="font-size:10px"></i> Not in OBD</span>';
         h+='<tr class="'+rc+'"><td style="font-size:11px;color:var(--text-muted);text-align:center;width:30px">'+(i+1)+'</td><td style="font-family:var(--font-display);font-size:10px;width:120px">'+esc(s.ean)+'</td><td style="font-size:12px;font-weight:500">'+esc(s.material)+'</td><td style="font-size:11px;color:var(--text-muted);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(s.description)+'</td><td style="width:70px"><input type="number" value="'+s.qty+'" min="1" style="width:55px;padding:4px 6px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);text-align:center;font-size:12px;font-family:var(--font-display)" onchange="updatePWLScanQty('+i+',parseInt(this.value)||1)"></td><td style="text-align:center;width:100px">'+sb+'</td><td style="width:30px;text-align:center"><button class="btn btn-danger btn-sm" style="width:24px;height:24px;padding:0;min-width:24px" onclick="removePWLScanItem('+i+')"><i class="bx bx-trash" style="font-size:10px"></i></button></td></tr>';
     });
-    if(!pd.scannedItems.length)h='<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:24px"><i class="bx bx-scan" style="font-size:24px;display:block;margin-bottom:6px;opacity:0.3"></i>Scan EAN to load</td></tr>';
+    if(!pd.scannedItems.length)h='<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:24px"><i class="bx bx-scan" style="font-size:24px;display:block;margin-bottom:6px;opacity:0.3"></i>Scan EAN or Material to load</td></tr>';
     body.innerHTML=h;
     var sd=document.getElementById('pwlScanSummary');if(!sd)return;
     var ts=0,mq=0,nq=0,mc=0;pd.scannedItems.forEach(function(s){ts+=s.qty;if(s.inOBD)mq+=s.qty;else nq+=s.qty;});
@@ -6153,7 +6151,7 @@ function renderLoadingScanModal(){
     h+='</div>';
 
     // Scan input
-    h+='<div class="search-box" style="margin-bottom:8px"><i class="bx bx-search"></i><input type="text" id="loadScanInput" placeholder="Scan EAN..." onkeydown="if(event.key===\'Enter\')doLoadScan()" autofocus></div>';
+    h+='<div class="search-box" style="margin-bottom:8px"><i class="bx bx-search"></i><input type="text" id="loadScanInput" placeholder="Scan EAN or Material..." onkeydown="if(event.key===\'Enter\')doLoadScan()" autofocus></div>';
     h+='<div style="display:flex;gap:6px;margin-bottom:12px">';
     h+='<button class="btn btn-glass btn-sm" onclick="APP.scanCallback=function(c){document.getElementById(\'loadScanInput\').value=c;doLoadScan();};document.getElementById(\'scannerModal\').style.display=\'flex\'"><i class="bx bx-qr"></i> Scanner</button>';
     h+='<button class="btn btn-glass btn-sm" onclick="showManualLoadEntry()"><i class="bx bx-plus"></i> Manual Entry</button>';
@@ -6177,47 +6175,38 @@ function renderLoadingScanModal(){
 }
 
 // ★★★ FIXED: doLoadScan — auto fill material & description ★★★
+// Loading scan helper: accepts EAN or Material code, matches against expected OBD items, auto-fills the rest from Material Master
+async function resolveLoadScan(expected,val){
+    var uv=String(val||'').trim().toUpperCase(),mm=null;
+    try{var f=await sbFindMaterialAny(val);mm=f?f.row:null;}catch(e){mm=null;}
+    var mEan=mm&&mm.ean?String(mm.ean).toUpperCase():'',mMat=mm&&mm.material?String(mm.material).toUpperCase():'';
+    var found=null;
+    for(var i=0;i<expected.length;i++){
+        var e=expected[i];if(e.scannedQty>=e.requiredQty)continue;
+        var eEan=String(e.ean||'').toUpperCase(),eMat=String(e.material||'').toUpperCase();
+        if((eEan&&(eEan===uv||(mEan&&eEan===mEan)))||(eMat&&(eMat===uv||(mMat&&eMat===mMat)))){found=e;break;}
+    }
+    return{
+        found:found,
+        ean:String((found&&found.ean)||(mm&&mm.ean)||uv).toUpperCase(),
+        material:(found&&found.material)||(mm&&mm.material)||val,
+        description:(mm&&mm.description)||(found&&found.description)||'',
+        inMaster:!!mm
+    };
+}
 async function doLoadScan(){
     var inp=document.getElementById('loadScanInput');if(!inp)return;
     var val=inp.value.trim();inp.value='';if(!val)return;
     var ld=window._loadScanData;if(!ld)return;
-    var uv=val.toUpperCase();
-
-    // Find first unmatched expected item
-    var found=null;
-    for(var i=0;i<ld.expected.length;i++){
-        var e=ld.expected[i];
-        if(e.ean&&e.ean.toUpperCase()===uv&&e.scannedQty<e.requiredQty){found=e;break;}
-    }
-
-    // Get material master for auto-fill (direct Supabase)
-    var mm=await sbFindOne('material_master','ean',uv);   // ★
-    var matName=mm?(mm.material||''):'';
-    var matDesc=mm?(mm.description||''):'';
-
-    if(found){
-        found.scannedQty++;
-        ld.scannedItems.push({
-            ean:found.ean,
-            material:found.material||matName,
-            description:matDesc,
-            qty:1,
-            inOBD:true,
-            obdNo:found.obdNo,
-            scannedAt:new Date().toISOString()
-        });
-        showToast(found.material+' — Match ✓','success');
+    var r=await resolveLoadScan(ld.expected,val);
+    if(!window._loadScanData)return;
+    if(r.found){
+        r.found.scannedQty++;
+        ld.scannedItems.push({ean:r.ean,material:r.material,description:r.description,qty:1,inOBD:true,obdNo:r.found.obdNo,scannedAt:new Date().toISOString()});
+        showToast(r.material+' — Match ✓','success');
     }else{
-        ld.scannedItems.push({
-            ean:uv,
-            material:matName||val,
-            description:matDesc,
-            qty:1,
-            inOBD:false,
-            obdNo:'—',
-            scannedAt:new Date().toISOString()
-        });
-        showToast((matName||val)+' — Not in OBD ✗','warning');
+        ld.scannedItems.push({ean:r.ean,material:r.material,description:r.description,qty:1,inOBD:false,obdNo:'—',scannedAt:new Date().toISOString()});
+        showToast(r.material+' — Not in OBD ✗','warning');
     }
     renderLoadScanTable();
     setTimeout(function(){var i=document.getElementById('loadScanInput');if(i)i.focus();},100);
@@ -6306,7 +6295,7 @@ function renderLoadScanTable(){
         h+='<td style="width:30px;text-align:center"><button class="btn btn-danger btn-sm" style="width:24px;height:24px;padding:0;min-width:24px" onclick="removeLoadScanItem('+i+')"><i class="bx bx-trash" style="font-size:10px"></i></button></td>';
         h+='</tr>';
     });
-    if(!ld.scannedItems.length)h='<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:24px"><i class="bx bx-scan" style="font-size:24px;display:block;margin-bottom:6px;opacity:0.3"></i>Scan EAN to start loading</td></tr>';
+    if(!ld.scannedItems.length)h='<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:24px"><i class="bx bx-scan" style="font-size:24px;display:block;margin-bottom:6px;opacity:0.3"></i>Scan EAN or Material to start loading</td></tr>';
     body.innerHTML=h;
 
     // Summary

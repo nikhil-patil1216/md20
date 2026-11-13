@@ -1478,7 +1478,7 @@ function showAssignUnloading(vehId){
     users.forEach(function(u){uOpts+='<option value="'+esc(u.id)+'">'+esc(u.name)+' ('+esc(u.username)+') — '+esc(u.id)+'</option>';});
     var h='<div style="background:var(--accent-dim);padding:12px;border-radius:var(--radius-sm);margin-bottom:14px"><strong style="color:var(--accent)">'+esc(v.vehicleNo)+'</strong> — '+esc(v.lrNo||'')+' | Invoices: '+invs.length+'</div>';
     h+='<div class="form-group"><label>Select User <span class="req">*</span></label><select id="assignUserSelect" class="form-input" onchange="document.getElementById(\'assignUserIdInput\').value=this.value">'+uOpts+'</select></div>';
-    h+='<div class="form-group"><label>Ya User ID Type Karein <span class="req">*</span></label><input type="text" id="assignUserIdInput" class="form-input" placeholder="User ID..." style="font-family:var(--font-display);font-size:13px" onkeydown="if(event.key===\'Enter\'){event.preventDefault();doAssignUnloading(\''+vehId+'\');}"></div>';
+    h+='<div class="form-group"><label>Or Type User ID <span class="req">*</span></label><input type="text" id="assignUserIdInput" class="form-input" placeholder="User ID..." style="font-family:var(--font-display);font-size:13px" onkeydown="if(event.key===\'Enter\'){event.preventDefault();doAssignUnloading(\''+vehId+'\');}"></div>';
     h+='<div style="background:var(--bg-secondary);padding:10px;border-radius:var(--radius-sm);font-size:11px;color:var(--text-muted);border:1px dashed var(--border)"><i class="bx bx-info-circle" style="color:var(--warning)"></i> Select a user from the dropdown or type a User ID</div>';
     showModal('Assign Unloading — '+v.vehicleNo,h,'md',
         '<button class="btn btn-glass" onclick="closeModal()">Cancel</button>'+
@@ -1705,7 +1705,7 @@ async function doLookupScan(type){
         return;
     }
 
-    // 2) Invoice me nahi — Material Master (Supabase) se auto-fill
+    // 2) Not in invoice — auto-fill from Material Master (Supabase)
     ud.currentMatchIdx=null;
     clearAutoFill();
     var mm=null;
@@ -1718,7 +1718,7 @@ async function doLookupScan(type){
         var eanEl2=document.getElementById('ulScanEan'),matIn2=document.getElementById('ulScanMat');
         if(eanEl2&&!eanEl2.value&&mm.ean)eanEl2.value=String(mm.ean).toUpperCase();
         if(matIn2&&!matIn2.value)matIn2.value=mm.material||'';
-        showToast((mm.material||val)+' — Invoice me nahi hai (details Material Master se)','warning');
+        showToast((mm.material||val)+' — Not in invoice (details loaded from Material Master)','warning');
         var q2=document.getElementById('ulScanQty');q2.focus();q2.select();
     }else{
         showToast('Material Not Found in Invoice or Material Master.','error');
@@ -1747,8 +1747,8 @@ function doSubmitScan(){
     var uomVal=(document.getElementById('ulAutoUom').value||'').trim()||'PCS';
     var qtyVal=parseInt(document.getElementById('ulScanQty').value)||0;
 
-    if(!matVal){showToast('Material name dalein','error');document.getElementById('ulAutoMat').focus();return;}
-    if(qtyVal<1){showToast('Minimum 1 qty dalein','error');document.getElementById('ulScanQty').focus();return;}
+    if(!matVal){showToast('Enter material name','error');document.getElementById('ulAutoMat').focus();return;}
+    if(qtyVal<1){showToast('Enter minimum 1 qty','error');document.getElementById('ulScanQty').focus();return;}
 
     var matched=ud.currentMatchIdx!==null;
     var entryIdx=ud.currentMatchIdx;
@@ -4463,7 +4463,7 @@ async function submitNotFound(lockId){
     var req=DB.add('location_requests',{reqNo:nextReqNo(),type:act==='newloc'?'NEW_LOCATION':'REPORT_ONLY',source:'NOT_FOUND',obdId:l.obdId,obdNo:l.obdNo,material:l.material,ean:l.ean,rack:l.rack,holdLockId:hold.id,missingQty:missing,foundQty:found,reason:reason,note:note,requestedBy:APP.currentUser.id,requestedByName:APP.currentUser.name,requestedAt:nowISO(),status:'Pending',report:report,assigned:[]});
     notifyLocRequest(req);
     logAction('Picking','LOC_REQUEST',req.reqNo+' '+l.material+' not found at '+l.rack+' (OBD '+l.obdNo+')');
-    showToast('Admin ko request + report bhej di','success');
+    showToast('Request and report sent to Admin','success');
     openPickingOBD(pd.obdId);
 }
 function requestLocationForMaterial(matIdx){
@@ -4484,7 +4484,7 @@ async function submitLocationRequest(matIdx){
     var req=DB.add('location_requests',{reqNo:nextReqNo(),type:'NEW_LOCATION',source:'NO_STOCK',obdId:pd.obdId,obdNo:pd.obdNo,material:m.material,ean:m.ean,rack:'—',holdLockId:'',missingQty:missing,foundQty:0,reason:'Stock could not be locked',note:note,requestedBy:APP.currentUser.id,requestedByName:APP.currentUser.name,requestedAt:nowISO(),status:'Pending',report:_eanRep,assigned:[]});
     notifyLocRequest(req);
     logAction('Picking','LOC_REQUEST',req.reqNo+' '+m.material+' no stock (OBD '+pd.obdNo+')');
-    showToast('Request admin ko bhej di','success');openPickingOBD(pd.obdId);
+    showToast('Request sent to Admin','success');openPickingOBD(pd.obdId);
 }
 
 // ---------- Admin: Location Requests ----------
@@ -4942,7 +4942,7 @@ function viewVehicleInvoices(vehId){
 }
 function showVehicleExcelUpload(vehId){
     var v=DB.find('vehicles',vehId);if(!v)return;
-    var h='<div class="pk-info">Vehicle <b>'+esc(v.vehicleNo)+'</b> ke liye Excel upload. Vehicle/LR apne aap lag jayega.<br><b>Format:</b> Invoice No | Material | Description | EAN | Qty | Customer</div>';
+    var h='<div class="pk-info">Vehicle <b>'+esc(v.vehicleNo)+'</b> — Excel upload. Vehicle/LR will be applied automatically.<br><b>Format:</b> Invoice No | Material | Description | EAN | Qty | Customer</div>';
     h+='<input type="file" id="vehExcelFile" accept=".xlsx,.xls,.csv" class="form-input">';
     showModal('Excel Upload — '+esc(v.vehicleNo),h,'sm','<button class="btn btn-glass" onclick="closeModal()">Cancel</button><button class="btn btn-glass" onclick="processVehicleExcel(\''+vehId+'\')"><i class="bx bx-upload"></i> Upload</button>');
 }
@@ -5280,7 +5280,7 @@ function renderCrossdockReport(){
     });
     rows=rows.filter(function(r){return (!from||r.date>=from)&&(!to||r.date<=to);}).sort(function(a,b){return String(b.at).localeCompare(String(a.at));});
     window._cdRows=rows;
-    var h='<div class="section-header"><h2><i class="bx bx-transfer"></i> Cross-Dock Report <span style="font-size:12px;color:var(--text-muted);font-weight:normal">(Unloading → OBD / Loading)</span></h2><div style="display:flex;gap:6px"><button class="btn btn-glass" onclick="exportCrossdock()"><i class="bx bx-download"></i> Excel</button></div></div>';
+    var h='<div class="section-header"><h2><i class="bx bx-transfer"></i> Cross-Dock Report <span style="font-size:12px;color:var(--text-muted);font-weight:normal">(Unloading → OBD / Loading)</span></h2><div style="display:flex;gap:6px"><button class="btn btn-glass" onclick="exportCrossdock()"><i class="bx bx-download"></i> Excel</button><button class="btn btn-glass" onclick="exportCrossdockPDF()"><i class="bx bx-file"></i> PDF</button></div></div>';
     h+='<div class="sap-report-header" style="margin-bottom:14px">';
     h+='<div class="srh-company"><h2>VIP INDUSTRIES LIMITED</h2><p>Plant MD20 · Cross-Docking Analysis</p></div>';
     h+='<div class="srh-divider"></div>';
@@ -5292,11 +5292,58 @@ function renderCrossdockReport(){
     h+='<div class="form-group"><label>To Date</label><input type="date" id="cdTo" class="form-input" value="'+to+'"></div>';
     h+='<div class="form-group" style="display:flex;align-items:flex-end"><button class="btn btn-primary" onclick="window._cdFrom=document.getElementById(\'cdFrom\').value;window._cdTo=document.getElementById(\'cdTo\').value;renderCrossdockReport()"><i class="bx bx-check"></i> Apply</button></div>';
     h+='</div></div>';
+    h+='<div style="font-size:11px;color:var(--text-muted);margin-bottom:6px"><i class="bx bx-pointer"></i> Double-click any row to see which OBD the material was taken for.</div>';
     h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Date</th><th>Inbound Vehicle</th><th>Invoice</th><th>Material</th><th>Qty</th><th>OBD</th><th>Picked By</th><th>Status</th><th>Outbound Vehicle</th><th>Load No</th></tr></thead><tbody>';
     if(!rows.length)h+='<tr><td colspan="10" style="text-align:center;color:var(--text-muted);padding:20px">No cross-dock records</td></tr>';
-    rows.forEach(function(r){h+='<tr><td style="font-size:11px">'+esc(r.date)+'</td><td><b>'+esc(r.inVeh)+'</b></td><td>'+esc(r.inv)+'</td><td>'+esc(r.material)+'</td><td><b>'+r.qty+'</b></td><td style="color:var(--accent)">'+esc(r.obdNo)+'</td><td>'+esc(r.by||'-')+'</td><td><span class="badge '+(r.status==='Loaded'?'badge-success':(r.status==='Reversed'?'badge-warning':'badge-info'))+'">'+r.status+'</span></td><td>'+esc(r.outVeh||'-')+'</td><td style="font-size:10px">'+esc(r.loadNo||'-')+'</td></tr>';});
+    rows.forEach(function(r,ix){h+='<tr class="cd-row" data-i="'+ix+'" ondblclick="toggleCdDetail(this)" style="cursor:pointer" title="Double click — OBD details"><td style="font-size:11px">'+esc(r.date)+'</td><td><b>'+esc(r.inVeh)+'</b></td><td>'+esc(r.inv)+'</td><td>'+esc(r.material)+'</td><td><b>'+r.qty+'</b></td><td style="color:var(--accent)">'+esc(r.obdNo)+'</td><td>'+esc(r.by||'-')+'</td><td><span class="badge '+(r.status==='Loaded'?'badge-success':(r.status==='Reversed'?'badge-warning':'badge-info'))+'">'+r.status+'</span></td><td>'+esc(r.outVeh||'-')+'</td><td style="font-size:10px">'+esc(r.loadNo||'-')+'</td></tr>';});
     h+='</tbody></table></div>';
     setHtml(h);
+}
+// Double-click: show below the row which OBD the material was taken for
+function toggleCdDetail(tr){
+    if(!tr)return;
+    var nx=tr.nextElementSibling;
+    if(nx&&nx.classList.contains('cd-detail')){nx.remove();tr.style.background='';return;}
+    var r=(window._cdRows||[])[parseInt(tr.getAttribute('data-i'),10)];if(!r)return;
+    var obd=DB.filter('obd_data',function(o){return o.obdNo===r.obdNo;})[0];
+    var obdQty=0;
+    if(obd)groupMats(obd).forEach(function(m){if((r.ean&&m.ean===r.ean)||m.material===r.material)obdQty+=m.qty;});
+    var cdTot=sumBy((window._cdRows||[]).filter(function(x){return x.obdNo===r.obdNo&&x.status!=='Reversed'&&((r.ean&&x.ean===r.ean)||x.material===r.material);}),function(x){return x.qty;});
+    function cell(l,v){return '<div style="min-width:130px"><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">'+l+'</div><div style="font-size:13px;font-weight:600">'+v+'</div></div>';}
+    var d='<div style="padding:4px 2px"><div style="font-weight:700;color:var(--accent);margin-bottom:8px"><i class="bx bx-right-arrow-alt"></i> '+esc(r.material)+' ('+r.qty+') — OBD <b>'+esc(r.obdNo)+'</b> — material taken for this OBD</div><div style="display:flex;flex-wrap:wrap;gap:18px">';
+    d+=cell('OBD No',esc(r.obdNo));
+    d+=cell('Customer',esc(obd?(obd.customer||'-'):'-'));
+    d+=cell('OBD Status',esc(obd?(obd.status||'-'):'-')+(obd&&obd.priority==='Urgent'?' <span class="badge badge-danger">URGENT</span>':''));
+    d+=cell('Qty of this material in OBD',obd?obdQty:'-');
+    d+=cell('Cross-dock qty (this entry)',r.qty);
+    d+=cell('Total cross-dock for this OBD',cdTot);
+    d+=cell('Inbound',esc(r.inVeh||'-')+' · Inv '+esc(r.inv||'-'));
+    d+=cell('Picked by / time',esc(r.by||'-')+(r.at?' · '+fmtDT(r.at):''));
+    d+=cell('Outbound / Load',esc(r.outVeh||'-')+' · '+esc(r.loadNo||'-'));
+    d+='</div></div>';
+    var row=document.createElement('tr');row.className='cd-detail';
+    row.innerHTML='<td colspan="10" style="background:var(--accent-dim);border-left:3px solid var(--accent)">'+d+'</td>';
+    tr.parentNode.insertBefore(row,tr.nextSibling);
+    tr.style.background='var(--accent-dim)';
+}
+function exportCrossdockPDF(){
+    var rows=window._cdRows||[];
+    if(!rows.length){showToast('No cross-dock records to export','warning');return;}
+    var pdf=new jspdf.jsPDF({orientation:'landscape',unit:'mm',format:'a4'});
+    var from=window._cdFrom||'',to=window._cdTo||'';
+    pdf.setFontSize(15);pdf.setFont(undefined,'bold');pdf.text('VIP INDUSTRIES LIMITED',14,14);
+    pdf.setFontSize(10);pdf.setFont(undefined,'normal');pdf.text('Plant MD20 - Cross-Dock Report (Unloading to OBD / Loading)',14,20);
+    pdf.setFontSize(8);
+    pdf.text('Generated: '+fmtDT(new Date())+'   |   User: '+(APP.currentUser?APP.currentUser.name:'-')+'   |   Period: '+(from||'All')+' to '+(to||'All'),14,26);
+    var tq=sumBy(rows.filter(function(r){return r.status!=='Reversed';}),function(r){return r.qty;});
+    pdf.text('Records: '+rows.length+'   |   Total Qty: '+tq,14,31);
+    var body=rows.map(function(r){
+        var obd=DB.filter('obd_data',function(o){return o.obdNo===r.obdNo;})[0];
+        return [r.date,r.inVeh||'-',r.inv||'-',r.material||'-',r.qty,r.obdNo||'-',obd?(obd.customer||'-'):'-',r.by||'-',r.status,r.outVeh||'-',r.loadNo||'-'];
+    });
+    pdf.autoTable({startY:35,head:[['Date','Inbound Vehicle','Invoice','Material','Qty','OBD','Customer','Picked By','Status','Outbound Vehicle','Load No']],body:body,styles:{fontSize:7.5,cellPadding:1.8},headStyles:{fillColor:[10,110,209]},
+        didDrawPage:function(){pdf.setFontSize(7);pdf.text('Page '+pdf.internal.getNumberOfPages(),pdf.internal.pageSize.getWidth()-20,pdf.internal.pageSize.getHeight()-6);}});
+    pdf.save('CrossDock_Report_'+today()+'.pdf');
 }
 function exportCrossdock(){
     var rows=[['Date','Inbound Vehicle','Invoice','Material','EAN','Qty','OBD','Picked By','Status','Outbound Vehicle','Load No']].concat((window._cdRows||[]).map(function(r){return [r.date,r.inVeh,r.inv,r.material,r.ean,r.qty,r.obdNo,r.by,r.status,r.outVeh,r.loadNo];}));
@@ -6807,7 +6854,7 @@ var BTN_PERMS=[
     {mod:'Order Picking',id:'pick.locreq',label:'Assign Location Requests (Admin)',fns:['openLocRequest','assignLocRequest','submitLocationRequest']},
     {mod:'Order Picking',id:'pick.reverse',label:'Reverse Picking',fns:['openReverseModal','doReversePicking']},
     {mod:'Order Picking',id:'pick.list',label:'Download Pick List',fns:['downloadPickList']},
-    {mod:'Order Picking',id:'pick.report',label:'Picking Reports & Export',fns:['exportCrossdock','exportPickingDoneExcel','exportPickingDonePDF']},
+    {mod:'Order Picking',id:'pick.report',label:'Picking Reports & Export',fns:['exportCrossdock','exportCrossdockPDF','exportPickingDoneExcel','exportPickingDonePDF']},
     // --- Pick & Load (Combined) ---
     {mod:'Pick & Load',id:'pick.pwl.assign',label:'PWL: Assign',fns:['openPWLSetup','doPWLAssign','unassignPWL']},
     {mod:'Pick & Load',id:'pick.pwl.execute',label:'PWL: Pick (Execute)',fns:['openPWLPicking','resumePWLPicking','continuePWL','doPWLPick','savePWLPartialPick','removePWLScanItem','openPWLManualEntry','addPWLManualItem','showPWLPickLocs']},
@@ -7852,7 +7899,7 @@ function scannerDeliver(code) {
 function _camError(reader, err) {
     SCANNER.starting = false;
     var msg = (err && (err.message || err.name)) || String(err || 'Unknown error');
-    if (/NotAllowed|Permission/i.test(msg)) msg = 'Camera permission denied. Browser/app settings me camera allow karein.';
+    if (/NotAllowed|Permission/i.test(msg)) msg = 'Camera permission denied. Please allow camera access in browser/app settings.';
     reader.innerHTML = '<div style="padding:20px;text-align:center"><i class="bx bx-error-circle" style="font-size:32px;color:var(--danger);display:block;margin-bottom:8px"></i><div style="color:var(--danger);font-size:13px">Camera error</div><div style="color:var(--text-muted);font-size:11px;margin-top:4px">' + esc(msg) + '</div></div>';
 }
 
@@ -8855,13 +8902,13 @@ async function autoLockShortOBDs(opts){
                 // is material ki pending NO_STOCK request ab poori cover ho gayi to close
                 if(al.short<=0){
                     DB.filter('location_requests',function(r){return r.obdId===e.obdId&&r.ean===m.ean&&r.status==='Pending'&&r.source==='NO_STOCK';}).forEach(function(r){
-                        DB.update('location_requests',r.id,{status:'Resolved',closedNote:'Auto-locked — stock aa gaya',resolvedBy:'System',resolvedAt:nowISO()});
+                        DB.update('location_requests',r.id,{status:'Resolved',closedNote:'Auto-locked — stock received',resolvedBy:'System',resolvedAt:nowISO()});
                     });
                 }
             }
             if(msgs.length){
                 mergeDuplicateLocks(e.obdId);
-                addNotif('OBD '+obd.obdNo+': stock aane par auto-lock — '+msgs.join(', '),'success',e.assignedTo);
+                addNotif('OBD '+obd.obdNo+': auto-locked after stock arrival — '+msgs.join(', '),'success',e.assignedTo);
                 logAction('Picking','AUTO_LOCK','OBD '+obd.obdNo+' — '+msgs.join('; '));
                 // picker ki screen par ye hi OBD khuli ho aur wo kuch type na kar raha ho to refresh
                 try{
@@ -8870,7 +8917,7 @@ async function autoLockShortOBDs(opts){
                 }catch(_e){}
             }
         }
-        if(totalLocked>0&&!opts.silent)showToast(totalLocked+' qty short OBD(s) me auto-lock ho gayi','success');
+        if(totalLocked>0&&!opts.silent)showToast(totalLocked+' qty auto-locked for short OBD(s)','success');
     }catch(err){ console.warn('autoLockShortOBDs:',err); }
     finally{ _autoLockBusy=false; }
     return totalLocked;

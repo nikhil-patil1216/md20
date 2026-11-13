@@ -1144,3 +1144,39 @@ html{-webkit-tap-highlight-color:transparent}
     .input-icon input{min-height:46px}
     .btn-glass-login{min-height:48px}
 }
+
+
+/* ============================================================
+   FIX: page screen se bahar na jaye, pinch/side-drag band — sirf upar-neeche scroll
+   ============================================================ */
+@media(max-width:768px){
+    html,body{width:100%;max-width:100%;touch-action:pan-y;overscroll-behavior-x:none}
+
+    /* root cause: flex child content ke saath chauda ho jata tha */
+    #mainApp,#mainContent{min-width:0;max-width:100%;overflow-x:clip}
+    #mainContent{width:100%}
+    #contentArea{min-width:0;max-width:100%;overflow-x:clip}
+    #contentArea *{max-width:100%}
+    #contentArea table{max-width:none}                             /* table andar apne wrapper me scroll karegi */
+    .card,.kpi-card,.section-header{min-width:0;max-width:100%}
+
+    /* grids screen ki width me hi rahein */
+    .kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .grid-2,.grid-3,.form-row{grid-template-columns:minmax(0,1fr)}
+
+    /* heading / button rows wrap hon, bahar na jayein */
+    .section-header{align-items:stretch;gap:10px}
+    .section-header h1,.section-header h2,.section-header h3{white-space:normal;font-size:17px;line-height:1.3;overflow-wrap:break-word}
+    .section-header>div,.form-actions,.btn-row,.btn-group,
+    #contentArea div[style*="display:flex"],#contentArea div[style*="display: flex"]{flex-wrap:wrap}
+    .btn{max-width:100%}
+    h1,h2,h3,h4,p{overflow-wrap:break-word}
+    input,select,textarea{max-width:100%}
+
+    /* Header ke andar bhi kuch bahar na nikle */
+    .shell-center{flex:1 1 0;min-width:0}
+    .global-search{min-width:0}
+
+    /* Jin jagah side-scroll chahiye (tables, tabs, popup, scanner) wahan allow */
+    .table-wrapper,.sap-table-wrap,.tab-bar,.modal-container,#qr-reader{max-width:100%;overflow-x:auto;touch-action:pan-x pan-y;-webkit-overflow-scrolling:touch}
+}

@@ -7824,6 +7824,7 @@ document.getElementById('loginForm').addEventListener('submit', async function(e
     try {
         var success = await doLogin(document.getElementById('loginUser').value.trim(), document.getElementById('loginPass').value);
         if (success) {
+            try { var rm = document.getElementById('loginRemember'); if (rm && rm.checked) localStorage.setItem('vip_wms_remember_user', document.getElementById('loginUser').value.trim()); else localStorage.removeItem('vip_wms_remember_user'); } catch (e2) {}
             document.getElementById('loginPage').style.display = 'none';
             document.getElementById('mainApp').style.display = 'flex';
             if (window._matrixInterval) clearInterval(window._matrixInterval);
@@ -7836,7 +7837,7 @@ document.getElementById('loginForm').addEventListener('submit', async function(e
     } finally {
         if (btn) {
             btn.disabled = false;
-            btn.innerHTML = '<span>Log On</span><i class="bx bx-log-in"></i>';
+            btn.innerHTML = '<span>Login</span>';
         }
     }
 });

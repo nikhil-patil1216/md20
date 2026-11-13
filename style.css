@@ -1180,3 +1180,51 @@ html{-webkit-tap-highlight-color:transparent}
     /* Jin jagah side-scroll chahiye (tables, tabs, popup, scanner) wahan allow */
     .table-wrapper,.sap-table-wrap,.tab-bar,.modal-container,#qr-reader{max-width:100%;overflow-x:auto;touch-action:pan-x pan-y;-webkit-overflow-scrolling:touch}
 }
+/* ================= LOGIN PAGE — mountain scene + frosted glass card ================= */
+#loginPage{background:#CFDFFF;display:flex;align-items:center;justify-content:center;overflow:hidden}
+#loginPage::before,#loginPage::after{display:none!important}
+#loginPage .lp-scene{position:absolute;inset:0;width:100%;height:100%}
+#loginPage .lp-nav{position:absolute;top:18px;right:28px;z-index:20;display:flex;align-items:center;gap:30px;font-family:"Montserrat","Segoe UI",Arial,sans-serif}
+#loginPage .lp-nav a{color:#0B1B33;font-size:13px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;text-decoration:none;padding:6px 2px}
+#loginPage .lp-nav a:hover{color:#1D4ED8}
+#loginPage .lp-nav a.lp-nav-login{padding:6px 16px;border:1px solid rgba(255,255,255,.8);border-radius:6px;background:rgba(255,255,255,.35);color:#fff}
+#loginPage .lp-panel{position:absolute;top:60px;right:28px;z-index:30;width:300px;max-width:calc(100vw - 32px);padding:18px 20px;background:rgba(255,255,255,.92);border-radius:12px;box-shadow:0 10px 30px rgba(11,37,64,.3);color:#0B1B33;font-size:13px;line-height:1.55}
+#loginPage .lp-panel h3{font-size:15px;margin:0 0 8px;color:#0B2540}
+#loginPage .lp-panel p{margin:6px 0}
+#loginPage .lp-panel a{color:#1D4ED8;font-weight:600;text-decoration:none}
+#loginPage .lp-panel i{vertical-align:middle;margin-right:6px;font-size:16px}
+#loginPage .lp-panel-x{position:absolute;top:6px;right:10px;background:none;border:0;font-size:22px;line-height:1;cursor:pointer;color:#556B82}
+
+#loginPage .login-card{position:relative;z-index:10;width:400px;max-width:90vw;padding:34px 38px 24px;border-radius:20px;
+    background:linear-gradient(160deg,rgba(255,255,255,.55) 0%,rgba(150,190,240,.45) 45%,rgba(20,60,95,.45) 100%);
+    border:1px solid rgba(255,255,255,.5);-webkit-backdrop-filter:blur(18px) saturate(140%);backdrop-filter:blur(18px) saturate(140%);
+    box-shadow:0 18px 45px rgba(5,20,40,.35),inset 0 1px 0 rgba(255,255,255,.6);color:#0B1B33;font-family:"Montserrat","Segoe UI",Arial,sans-serif}
+#loginPage .lp-title{text-align:center;font-size:19px;font-weight:700;letter-spacing:1px;color:#0B1B33;margin:0 0 4px;font-family:inherit}
+#loginPage .lp-sub{text-align:center;font-size:10.5px;color:#25415f;margin:0 0 26px;letter-spacing:.3px}
+#loginPage .lp-field{position:relative;margin-bottom:22px}
+#loginPage .lp-field input{width:100%;padding:9px 30px 8px 12px;background:transparent;border:0;border-bottom:1px solid #1B2B45;border-radius:0;color:#0B1B33;font-size:14px;font-family:inherit;outline:none;box-shadow:none}
+#loginPage .lp-field input::placeholder{color:#0B1B33;opacity:.9}
+#loginPage .lp-field input:focus{border-bottom-color:#1D4ED8;box-shadow:0 1px 0 #1D4ED8}
+#loginPage .lp-field input:-webkit-autofill{-webkit-box-shadow:0 0 0 40px #cfe0f8 inset;-webkit-text-fill-color:#0B1B33}
+#loginPage .lp-field i{position:absolute;right:4px;top:50%;transform:translateY(-50%);font-size:18px;color:#1B2B45}
+#loginPage .lp-eye{cursor:pointer}
+#loginPage .lp-forgot{text-align:right;margin:-16px 0 14px;font-size:10px}
+#loginPage .lp-forgot a{color:#0B1B33;text-decoration:none}
+#loginPage .lp-remember{display:flex;align-items:center;gap:10px;font-size:13px;color:#0B1B33;cursor:pointer;margin-bottom:30px;text-transform:none;letter-spacing:0;font-weight:500}
+#loginPage .lp-remember input{position:absolute;opacity:0;pointer-events:none}
+#loginPage .lp-box{width:18px;height:18px;border-radius:4px;background:rgba(235,240,255,.85);border:1px solid rgba(255,255,255,.9);display:inline-block;position:relative}
+#loginPage .lp-remember input:checked+.lp-box{background:#1D4ED8;border-color:#1D4ED8}
+#loginPage .lp-remember input:checked+.lp-box::after{content:'';position:absolute;left:5px;top:1px;width:5px;height:10px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg)}
+#loginPage .btn-glass-login{display:flex;align-items:center;justify-content:center;width:100%;padding:11px;border:0;border-radius:6px;font-size:14px;font-weight:600;letter-spacing:.5px;color:#fff;cursor:pointer;font-family:inherit;
+    background:linear-gradient(180deg,#8FB4F0 0%,#5F93E3 100%);box-shadow:0 2px 6px rgba(10,40,90,.35),inset 0 1px 0 rgba(255,255,255,.5)}
+#loginPage .btn-glass-login:hover{background:linear-gradient(180deg,#9CC0F7 0%,#6EA0EE 100%);transform:none}
+#loginPage .btn-glass-login:disabled{opacity:.7;cursor:wait}
+#loginPage .lp-bottom{display:flex;justify-content:space-between;align-items:center;margin-top:22px;font-size:12px;color:#eaf2ff}
+#loginPage .lp-bottom a{color:#fff;font-weight:700;text-decoration:none}
+#loginPage .login-footer{margin-top:16px;text-align:center;font-size:9.5px;color:rgba(255,255,255,.8);letter-spacing:.4px}
+@media(max-width:600px){
+    #loginPage .lp-nav{left:0;right:0;top:10px;justify-content:center;gap:14px;flex-wrap:wrap;padding:0 8px}
+    #loginPage .lp-nav a{font-size:11px}
+    #loginPage .lp-panel{top:84px;right:16px}
+    #loginPage .login-card{padding:28px 24px 20px;margin-top:40px}
+}

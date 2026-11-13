@@ -2903,7 +2903,7 @@ async function savePIV(){
         // RULE 2: re-count (5 days later or any time) → old entry deleted, new entry added
         // Works for any qty difference (10, 1, 500...) — stock is never inflated
         DB.remove('location_master',prev.id);
-        DB.add('location_master',rec);
+        DB.add('location_master',rec);scheduleAutoLock();
         logAction('PIV','RECOUNT',material+' @ '+rack+' — old entry (qty '+prev.quantity+') deleted, new count (qty '+qty+') saved. Stock not increased.');
         showToast('PIV updated — old entry deleted, new count saved (qty '+prev.quantity+' → '+qty+'). Stock not increased.','success');
         closeModal();
@@ -2912,7 +2912,7 @@ async function savePIV(){
     }
 
     // First count for this material at this rack → normal add
-    DB.add('location_master',rec);
+    DB.add('location_master',rec);scheduleAutoLock();
     logAction('PIV','ADD',material+' qty:'+qty+' at '+rack+' EAN:'+ean+(cyc?' (Cycle #'+cyc.cycleNo+')':''));
     showToast('PIV entry saved!'+(cyc?' — Cycle #'+cyc.cycleNo+' slot updated.':''),'success');
     closeModal();
@@ -3148,6 +3148,7 @@ function processLocBulkUpload(){
                         if(_rowPushTimers['location_master'])clearTimeout(_rowPushTimers['location_master']);
                         await flushPushRows('location_master');
                         broadcastRefresh('location_master');     // sab users live refresh
+                        scheduleAutoLock();
                         t1=performance.now();
                         var timeSec=((t1-t0)/1000).toFixed(1);
                         var resHtml='<div style="background:var(--bg-secondary);padding:14px;border-radius:var(--radius-sm);border:1px solid var(--border)">';
@@ -4785,6 +4786,7 @@ async function addPutawayStock(rec){
     if(!ex){
         var added=DB.add('location_master',rec);
         _stockCtxTs=0; _sbFullPullTs['location_master']=0;
+        scheduleAutoLock();
         return added;
     }
     var entries=(ex.entries&&ex.entries.length)?ex.entries.slice():[{action:ex.action,user:ex.user,userId:ex.userId||'',dateTime:ex.dateTime,qty:ex.quantity,grnNo:ex.grnNo||'',invoiceNo:ex.invoiceNo||'',packing:ex.packing||'',box:ex.box||''}];
@@ -4793,6 +4795,7 @@ async function addPutawayStock(rec){
     var pk=ex.packing||'';if(rec.packing&&pk.indexOf(rec.packing)<0)pk=pk?pk+', '+rec.packing:rec.packing;
     var upd=await sbUpdate('location_master',ex.id,{quantity:(parseInt(ex.quantity)||0)+rec.quantity,entries:entries,box:box,packing:pk});
     _stockCtxTs=0; _sbFullPullTs['location_master']=0;
+    scheduleAutoLock();
     return upd;
 }
 function recRows(l){
@@ -8770,3 +8773,112 @@ opWrap('renderStartLoading', function () {
         ]
     };
 });
+
+// =====================================================================
+//  AUTO LOCK FOR SHORT OBDs
+//  OBD assign ho chuki hai aur stock kam tha -> jab PIV / Putaway / bulk upload se
+//  stock aaye, to OBD sequence (Urgent pehle, phir assign order) me short material
+//  ke liye us OBD ke already-assigned locations ke SABSE NAZDEEK wali location
+//  auto-lock ho jati hai (picking me apne aap add).
+// =====================================================================
+var _autoLockBusy=false, _autoLockTimer=null;
+
+function autoLockActiveOBDs(){
+    // assigned OBDs, sequence wise: Urgent -> assign time -> seq
+    var list=[];
+    DB.filter('picking_assignments',function(a){return a.status==='Assigned';}).forEach(function(a){
+        var ids=(a.type==='pickandload')?(a.obdIds||[]):(a.obdId?[a.obdId]:[]);
+        ids.forEach(function(oid,i){
+            list.push({obdId:oid,assignedTo:a.assignedTo,priority:a.priority||'Normal',at:a.assignedAt||'',seq:(a.seq||0)*1000+i});
+        });
+    });
+    list.sort(function(x,y){
+        return ((y.priority==='Urgent'?1:0)-(x.priority==='Urgent'?1:0))||String(x.at).localeCompare(String(y.at))||(x.seq-y.seq);
+    });
+    var seen={},out=[];
+    list.forEach(function(e){
+        if(seen[e.obdId])return;seen[e.obdId]=1;
+        var obd=DB.find('obd_data',e.obdId);
+        if(!obd||obd.status==='Picking Done'||obd.status==='P&L Done'||obd.status==='Pending')return;
+        e.obd=obd;out.push(e);
+    });
+    return out;
+}
+function autoLockShortages(e){
+    var res=[];
+    groupMats(e.obd).forEach(function(m){
+        if(!m.ean||m.qty<=0)return;
+        var have=sumBy(DB.filter('location_locks',function(l){return l.obdId===e.obdId&&l.ean===m.ean&&isActiveLock(l);}),function(l){return l.lockedQty;});
+        if(m.qty-have>0)res.push({m:m,need:m.qty-have});
+    });
+    return res;
+}
+async function autoLockShortOBDs(opts){
+    opts=opts||{};
+    if(_autoLockBusy||!APP.currentUser||!supabaseClient)return 0;
+    _autoLockBusy=true;
+    var totalLocked=0;
+    try{
+        var obds=autoLockActiveOBDs();
+        // quick local check — koi shortage nahi to server pull bhi nahi
+        var withShort=obds.filter(function(e){return autoLockShortages(e).length>0;});
+        if(!withShort.length)return 0;
+
+        // fresh stock (silent — loader flash nahi)
+        var _sl=showLoader;showLoader=function(){};
+        try{ _sbFullPullTs['location_master']=0; _stockCtxTs=0; await sbPullFull('location_master'); }
+        finally{ showLoader=_sl; hideLoader(); }
+        var ctx=makeAvailCtx();_stockCtx=ctx;_stockCtxTs=Date.now();
+        if(!Object.keys(ctx.lm).length)return 0;
+
+        for(var oi=0;oi<withShort.length;oi++){
+            var e=withShort[oi],obd=e.obd,msgs=[];
+            var shorts=autoLockShortages(e);   // OBD ke locks DB se (live)
+            for(var si=0;si<shorts.length;si++){
+                var m=shorts[si].m,need=shorts[si].need;
+                if(!ctx.lm[m.ean])continue;
+                // anchor: is OBD ke already-assigned locations me se jo available stock ke sabse nazdeek ho
+                var anchors=DB.filter('location_locks',function(l){return l.obdId===e.obdId&&isActiveLock(l)&&l.source!=='GR'&&l.locationId!=='GR'&&l.rack;}).map(function(l){return l.rack;});
+                var anchor=null,av=getLocAvailability(m.ean,null,ctx).filter(function(a){return a.available>0;});
+                if(!av.length)continue;
+                if(anchors.length){
+                    var bd=Infinity;
+                    av.forEach(function(a){anchors.forEach(function(r){var d=rackDist(r,a.rack);if(d<bd){bd=d;anchor=a.rack;}});});
+                }
+                var al=allocateMaterial(m.ean,need,null,anchor,ctx);
+                al.picks.forEach(function(pk){
+                    addLock(obd,m,pk.loc,pk.qty,{autoLocked:true,autoLockedAt:nowISO()});
+                    (ctx.lk[m.ean]=ctx.lk[m.ean]||[]).push({ean:m.ean,rack:pk.loc.rack,lockedQty:pk.qty,pickedQty:0,obdId:obd.id,obdNo:obd.obdNo,status:'Locked'});   // next OBD ko updated availability
+                    msgs.push(m.material+' — '+pk.qty+' @ '+pk.loc.rack);
+                });
+                totalLocked+=al.locked;
+                // is material ki pending NO_STOCK request ab poori cover ho gayi to close
+                if(al.short<=0){
+                    DB.filter('location_requests',function(r){return r.obdId===e.obdId&&r.ean===m.ean&&r.status==='Pending'&&r.source==='NO_STOCK';}).forEach(function(r){
+                        DB.update('location_requests',r.id,{status:'Resolved',closedNote:'Auto-locked — stock aa gaya',resolvedBy:'System',resolvedAt:nowISO()});
+                    });
+                }
+            }
+            if(msgs.length){
+                mergeDuplicateLocks(e.obdId);
+                addNotif('OBD '+obd.obdNo+': stock aane par auto-lock — '+msgs.join(', '),'success',e.assignedTo);
+                logAction('Picking','AUTO_LOCK','OBD '+obd.obdNo+' — '+msgs.join('; '));
+                // picker ki screen par ye hi OBD khuli ho aur wo kuch type na kar raha ho to refresh
+                try{
+                    var ov=document.getElementById('modalOverlay'),ae=document.activeElement;
+                    if(window._pickData&&window._pickData.obdId===e.obdId&&ov&&ov.classList.contains('open')&&!(ae&&/^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName))&&typeof openPickingOBD==='function'&&APP.currentUser.id===e.assignedTo)openPickingOBD(e.obdId);
+                }catch(_e){}
+            }
+        }
+        if(totalLocked>0&&!opts.silent)showToast(totalLocked+' qty short OBD(s) me auto-lock ho gayi','success');
+    }catch(err){ console.warn('autoLockShortOBDs:',err); }
+    finally{ _autoLockBusy=false; }
+    return totalLocked;
+}
+// stock add hone ke baad call karo (debounced)
+function scheduleAutoLock(){
+    if(_autoLockTimer)clearTimeout(_autoLockTimer);
+    _autoLockTimer=setTimeout(function(){_autoLockTimer=null;autoLockShortOBDs();},3000);
+}
+// background check — har 2 minute (sirf Admin/Manager ke device par, taaki multiple devices ek saath lock na karein)
+setInterval(function(){ if(APP.currentUser&&isMgrUser())autoLockShortOBDs({silent:false}); },120000);

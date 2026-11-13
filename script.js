@@ -74,6 +74,33 @@ async function sbFindOne(table, field, value){
     return row;
 }
 
+// Exact, case-insensitive lookup — '_' aur '%' wale material codes bhi sahi match hon (sbFindOne unhe space bana deta hai)
+async function sbFindExactCI(table, field, value){
+    if(!supabaseClient || !value) return null;
+    var ck = table+'|X|'+field+'|'+String(value).toLowerCase();
+    if(_sbCache[ck]) return _sbCache[ck];
+    var pat = String(value).replace(/[\\%_]/g, function(c){ return '\\'+c; });
+    var res = await supabaseClient.from(table).select('data').filter('data->>'+field, 'ilike', pat).limit(1);
+    if(res.error || !res.data || !res.data.length) return null;
+    var row = res.data[0].data;
+    _sbCache[ck]=row; _sbCacheN++;
+    if(_sbCacheN>500){ _sbCache={}; _sbCacheN=0; }
+    return row;
+}
+// Scan/type me EAN ho ya Material (code/name) — khud pehchan kar Material Master se row deta hai.
+// return: { row, by:'ean'|'material'|'description' } ya null
+async function sbFindMaterialAny(value){
+    var v = String(value||'').trim();
+    if(!v) return null;
+    var looksEan = /^\d{8,14}$/.test(v);            // sirf 8-14 digit = EAN jaisa, pehle EAN try
+    var order = looksEan ? ['ean','material','description'] : ['material','ean','description'];
+    for(var i=0;i<order.length;i++){
+        var row = order[i]==='ean' ? await sbFindOne('material_master','ean',v) : await sbFindExactCI('material_master',order[i],v);
+        if(row) return { row:row, by:order[i] };
+    }
+    return null;
+}
+
 // Sirf COUNT (KPI ke liye — rows download nahi hoti)
 async function sbCount(table, eq){
     if(!supabaseClient) return 0;
@@ -2119,8 +2146,8 @@ function renderPutaway(){
 
     // === EAN Scan Putaway Card ===
     h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-scan"></i> EAN Scan Putaway</div>';
-    h+='<div class="form-group"><label>EAN Number <span class="req">*</span></label>';
-    h+='<div style="display:flex;gap:6px"><div class="search-box" style="flex:1;max-width:100%"><i class="bx bx-barcode"></i><input type="text" id="putawayEanScan" placeholder="Scan or type EAN..." onkeydown="if(event.key===\'Enter\'){event.preventDefault();lookupPutawayEan();}" style="font-family:var(--font-display);font-size:13px;letter-spacing:1px"></div>';
+    h+='<div class="form-group"><label>EAN / Material <span class="req">*</span></label>';
+    h+='<div style="display:flex;gap:6px"><div class="search-box" style="flex:1;max-width:100%"><i class="bx bx-barcode"></i><input type="text" id="putawayEanScan" placeholder="Scan or type EAN / Material..." onkeydown="if(event.key===\'Enter\'){event.preventDefault();lookupPutawayEan();}" style="font-family:var(--font-display);font-size:13px;letter-spacing:1px"></div>';
     h+='<button class="btn btn-glass btn-sm" onclick="openScannerForPutawayEan()"><i class="bx bx-qr"></i></button>';
     h+='<button class="btn btn-glass btn-sm" onclick="lookupPutawayEan()"><i class="bx bx-search"></i></button></div></div>';
     h+='<div id="putawayMatInfo" style="display:none"><div id="paLookupMsg"></div>';
@@ -2364,7 +2391,7 @@ async function lookupPutawayEan(){
     var input=document.getElementById('putawayEanScan');
     var val=input.value.trim().toUpperCase();
     if(!val){showToast('Scan or type an EAN code','error');return;}
-    var found=await sbFindOne('material_master','ean',val);   // ★ direct Supabase search
+    var hit=await sbFindMaterialAny(val); var found=hit?hit.row:null; var matchedBy=hit?hit.by:'';   // EAN ya Material — auto detect
     var infoDiv=document.getElementById('putawayMatInfo');
     var msgDiv=document.getElementById('paLookupMsg');
     infoDiv.style.display='';
@@ -2372,13 +2399,14 @@ async function lookupPutawayEan(){
         document.getElementById('paMaterial').value=found.material||'';
         document.getElementById('paDescription').value=found.description||found.material||'';
         document.getElementById('paEan').value=found.ean||val;
-        msgDiv.innerHTML='<div style="background:var(--accent-dim);padding:10px;border-radius:var(--radius-sm);margin-bottom:8px;font-size:12px;display:flex;align-items:center;gap:8px"><i class="bx bx-check-circle" style="color:var(--accent);font-size:18px"></i><span style="color:var(--accent)">Found in Product Master — <strong>'+esc(found.material)+'</strong></span></div>';
+        if(matchedBy!=='ean'&&found.ean)document.getElementById('putawayEanScan').value=found.ean;
+        msgDiv.innerHTML='<div style="background:var(--accent-dim);padding:10px;border-radius:var(--radius-sm);margin-bottom:8px;font-size:12px;display:flex;align-items:center;gap:8px"><i class="bx bx-check-circle" style="color:var(--accent);font-size:18px"></i><span style="color:var(--accent)">Found in Product Master — <strong>'+esc(found.material)+'</strong>'+(matchedBy&&matchedBy!=='ean'?' <span style="opacity:.8">(matched by '+(matchedBy==='material'?'Material code':'Description')+')</span>':'')+'</span></div>';
         document.getElementById('paRackScan').focus();
     } else {
         document.getElementById('paMaterial').value='';
         document.getElementById('paDescription').value='';
         document.getElementById('paEan').value=val;
-        msgDiv.innerHTML='<div style="background:rgba(255,107,107,0.1);padding:10px;border-radius:var(--radius-sm);margin-bottom:8px;font-size:12px;display:flex;align-items:center;gap:8px;border:1px solid rgba(255,107,107,0.3)"><i class="bx bx-error-circle" style="color:var(--danger);font-size:18px"></i><span style="color:var(--danger)">EAN <strong>'+esc(val)+'</strong> was not found in the Product Master. Please enter it manually.</span></div>';
+        msgDiv.innerHTML='<div style="background:rgba(255,107,107,0.1);padding:10px;border-radius:var(--radius-sm);margin-bottom:8px;font-size:12px;display:flex;align-items:center;gap:8px;border:1px solid rgba(255,107,107,0.3)"><i class="bx bx-error-circle" style="color:var(--danger);font-size:18px"></i><span style="color:var(--danger)">EAN / Material <strong>'+esc(val)+'</strong> was not found in the Product Master. Please enter it manually.</span></div>';
         document.getElementById('paMaterial').focus();
     }
 }
@@ -2627,8 +2655,8 @@ function showAddPIV(prefRack){
     var h='';
 
     // EAN Scan
-    h+='<div class="form-group"><label>EAN Number <span class="req">*</span></label>';
-    h+='<div style="display:flex;gap:6px"><div class="search-box" style="flex:1;max-width:100%"><i class="bx bx-barcode"></i><input type="text" id="pivEanScan" placeholder="Scan or type EAN number..." onkeydown="if(event.key===\'Enter\'){event.preventDefault();lookupPIVEan();}" style="font-family:var(--font-display);font-size:14px;letter-spacing:1px"></div>';
+    h+='<div class="form-group"><label>EAN / Material <span class="req">*</span></label>';
+    h+='<div style="display:flex;gap:6px"><div class="search-box" style="flex:1;max-width:100%"><i class="bx bx-barcode"></i><input type="text" id="pivEanScan" placeholder="Scan or type EAN / Material..." onkeydown="if(event.key===\'Enter\'){event.preventDefault();lookupPIVEan();}" style="font-family:var(--font-display);font-size:14px;letter-spacing:1px"></div>';
     h+='<button class="btn btn-glass btn-sm" onclick="openScannerForPIVEan()" title="Camera Scan"><i class="bx bx-qr"></i></button>';
     h+='<button class="btn btn-glass btn-sm" onclick="lookupPIVEan()" title="Search"><i class="bx bx-search"></i></button></div></div>';
 
@@ -2782,7 +2810,7 @@ async function lookupPIVEan(){
     var val=document.getElementById('pivEanScan').value.trim().toUpperCase();
     if(!val){showToast('Please scan or type an EAN number','error');return;}
 
-    var found=await sbFindOne('material_master','ean',val);   // ★ direct Supabase search
+    var hit=await sbFindMaterialAny(val); var found=hit?hit.row:null; var matchedBy=hit?hit.by:'';   // EAN ya Material — auto detect
 
     var infoDiv=document.getElementById('pivMatInfo');
     var msgDiv=document.getElementById('pivLookupMsg');
@@ -2792,7 +2820,8 @@ async function lookupPIVEan(){
         document.getElementById('pivMaterial').value=found.material||'';
         document.getElementById('pivDescription').value=found.description||found.material||'';
         document.getElementById('pivEanSaved').value=found.ean||val;
-        msgDiv.innerHTML='<div style="background:var(--accent-dim);padding:10px;border-radius:var(--radius-sm);margin-bottom:8px;font-size:12px;display:flex;align-items:center;gap:8px"><i class="bx bx-check-circle" style="color:var(--accent);font-size:18px"></i><span style="color:var(--accent)">Material found in master — <strong>'+esc(found.material)+'</strong>. You can edit it.</span></div>';
+        if(matchedBy!=='ean'&&found.ean)document.getElementById('pivEanScan').value=found.ean;   // material scan kiya to EAN field me asli EAN aa jaye
+        msgDiv.innerHTML='<div style="background:var(--accent-dim);padding:10px;border-radius:var(--radius-sm);margin-bottom:8px;font-size:12px;display:flex;align-items:center;gap:8px"><i class="bx bx-check-circle" style="color:var(--accent);font-size:18px"></i><span style="color:var(--accent)">Material found in master — <strong>'+esc(found.material)+'</strong>'+(matchedBy&&matchedBy!=='ean'?' <span style="opacity:.8">(matched by '+(matchedBy==='material'?'Material code':'Description')+')</span>':'')+'. You can edit it.</span></div>';
         document.getElementById('pivRackScan').focus();
     } else {
         document.getElementById('pivMaterial').value='';

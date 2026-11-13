@@ -753,6 +753,61 @@ function seedData(){
     logAction('System','INIT','System initialized with seed data');
 }
 
+// ==================== SINGLE DEVICE LOGIN (SAP-style) ====================
+// Ek user ID ek time par sirf ek device me chalegi.
+// Server side: wms_device_sessions table + RPC (device_lock.sql run karna zaroori hai).
+var DEVLOCK = {
+    HEARTBEAT_MS: 30000,      // har 30 sec me "main zinda hu" signal
+    ALLOW_TAKEOVER: false,    // true = SAP jaisa option: "purane device ko logout karke yaha login karein?"
+    _timer: null
+};
+function devId() {
+    var id = localStorage.getItem('wms_device_id');
+    if (!id) {
+        id = 'dev-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+        localStorage.setItem('wms_device_id', id);
+    }
+    return id;
+}
+function devToken() { return localStorage.getItem('wms_dev_token') || ''; }
+function devInfo() { return (navigator.userAgent || 'Unknown device').slice(0, 120); }
+
+async function devClaim(username, force) {
+    var tok = 'tk-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 12);
+    var r = await supabaseClient.rpc('wms_claim_session', {
+        p_username: username, p_device: devId(), p_token: tok, p_info: devInfo(), p_force: !!force
+    });
+    if (r.error) { console.warn('claim error', r.error); return { ok: false, reason: 'error' }; }
+    if (r.data && r.data.ok) localStorage.setItem('wms_dev_token', tok);
+    return r.data || { ok: false, reason: 'error' };
+}
+async function devHeartbeat() {
+    if (!APP.currentUser) return;
+    try {
+        var r = await supabaseClient.rpc('wms_heartbeat', { p_username: APP.currentUser.username, p_token: devToken() });
+        if (r.error) return;                       // network issue — logout mat karo
+        if (r.data === false) {                    // token match nahi — kisi aur device ne login le liya
+            devStop();
+            showToast('Aapki ID dusre device par login ho gayi hai. Logging out...', 'warning');
+            setTimeout(function () { doLogout(); }, 1500);
+        }
+    } catch (e) {}
+}
+function devStart() {
+    devStop();
+    DEVLOCK._timer = setInterval(devHeartbeat, DEVLOCK.HEARTBEAT_MS);
+}
+function devStop() {
+    if (DEVLOCK._timer) { clearInterval(DEVLOCK._timer); DEVLOCK._timer = null; }
+}
+async function devRelease(username) {
+    try { await supabaseClient.rpc('wms_release_session', { p_username: username, p_token: devToken() }); } catch (e) {}
+    localStorage.removeItem('wms_dev_token');
+}
+document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible') devHeartbeat();   // mobile me tab wapas aate hi check
+});
+
 // ==================== AUTH ====================
 async function doLogin(uname, pass) {
     if (!supabaseClient) { showToast('Server not connected', 'error'); return false; }
@@ -774,8 +829,23 @@ async function doLogin(uname, pass) {
         return false;
     }
 
+    // ---- Single device check ----
+    var claim = await devClaim(user.username, false);
+    if (!claim.ok && claim.reason === 'in_use') {
+        var go = DEVLOCK.ALLOW_TAKEOVER && confirm('Ye user ID already dusre device par logged in hai.\n\nWahan ka session end karke yaha login karna hai?');
+        if (go) claim = await devClaim(user.username, true);
+    }
+    if (!claim.ok) {
+        await supabaseClient.auth.signOut();
+        showToast(claim.reason === 'in_use'
+            ? 'User "' + user.username + '" already dusre device par logged in hai. Pehle wahan se logout karein.'
+            : 'Login failed: session check error. Dobara try karein.', 'error');
+        return false;
+    }
+
     APP.currentUser = user;
     APP.sessionStart = Date.now();
+    devStart();
     localStorage.setItem('wms_session', JSON.stringify({ userId: user.id, loginTime: new Date().toISOString() }));
     DB.add('user_sessions', { userId: user.id, userName: user.name, loginTime: new Date().toISOString(), logoutTime: null, status: 'Active' });
     logAction('Auth', 'LOGIN', 'User ' + user.name + ' logged in');
@@ -796,6 +866,8 @@ async function doLogout() {
         }
         
         await flushAllPendingPushes(); // Data save before logout
+        devStop();
+        await devRelease(APP.currentUser.username);   // device lock free karo
         await supabaseClient.auth.signOut();
         await new Promise(function(r) { setTimeout(r, 500); });
         
@@ -7628,7 +7700,15 @@ document.getElementById('loginForm').addEventListener('submit', async function(e
     var uname = (s.data.session.user.email || '').split('@')[0];
     var user = DB.get('users').filter(function (u) { return u.username === uname; })[0];
     if (!user) return;
+    // Refresh/reopen par bhi check: kya ye device abhi bhi is ID ka owner hai?
+    var hb = await supabaseClient.rpc('wms_heartbeat', { p_username: user.username, p_token: devToken() });
+    if (hb.error || hb.data !== true) {
+        await supabaseClient.auth.signOut();
+        localStorage.removeItem('wms_session'); localStorage.removeItem('wms_dev_token');
+        return;
+    }
     APP.currentUser = user; APP.sessionStart = Date.now();
+    devStart();
     document.getElementById('loginPage').style.display = 'none';
     document.getElementById('mainApp').style.display = 'flex';
     if (window._matrixInterval) clearInterval(window._matrixInterval);

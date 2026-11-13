@@ -5061,12 +5061,32 @@ function loadingGateVehicles(){
     return DB.filter('vehicles',function(v){return v.vehicleType==='Loading'&&v.status!=='Gate Out';}).filter(function(v){var s=loadingVehicleState(v).state;return s==='Waiting'||s==='Under Loading';});
 }
 function isLoadingGateVehicle(vno){return loadingGateVehicles().some(function(v){return rkey(v.vehicleNo)===rkey(vno);});}
+// Find the Gate-IN loading vehicle for typed text (ignores spaces/dashes/case)
+function findLoadingGateVehicle(txt){
+    var k=rkey(txt);if(!k)return null;
+    return loadingGateVehicles().filter(function(v){return rkey(v.vehicleNo)===k;})[0]||null;
+}
+function canonLoadingVeh(txt){var v=findLoadingGateVehicle(txt);return v?String(v.vehicleNo).toUpperCase():String(txt||'').trim().toUpperCase();}
+// typing / selecting a vehicle: auto-fill security/LR no. when it matches a Gate-IN vehicle
+function loadingVehPick(el,secId,final){
+    var v=findLoadingGateVehicle(el.value),s=secId?document.getElementById(secId):null;
+    if(v){
+        if(final)el.value=String(v.vehicleNo).toUpperCase();
+        if(s&&(v.gatePassNo||v.lrNo))s.value=v.gatePassNo||v.lrNo;
+        el.style.borderColor='';
+    }else if(final&&String(el.value||'').trim()){
+        el.style.borderColor='var(--danger)';
+        showToast('This vehicle is not IN at the gate','error');
+    }
+}
 function loadingVehSelect(id,secId){
     var vs=loadingGateVehicles();
     if(!vs.length)return '<div class="pk-info" style="border-color:var(--danger)">No loading vehicle is currently IN at the gate. Please create a loading vehicle entry at the Security Gate first.</div><input type="hidden" id="'+id+'" value="">';
-    var h='<select id="'+id+'" class="form-input" onchange="var o=this.options[this.selectedIndex],s=document.getElementById(\''+secId+'\');if(s&&o.getAttribute(\'data-gp\'))s.value=o.getAttribute(\'data-gp\');"><option value="">-- Select Vehicle (Gate IN) --</option>';
-    vs.forEach(function(v){h+='<option value="'+esc(v.vehicleNo)+'" data-gp="'+esc(v.gatePassNo||v.lrNo||'')+'">'+esc(v.vehicleNo)+(v.city?' — '+esc(v.city):'')+' ['+loadingVehicleState(v).state+']</option>';});
-    return h+'</select>';
+    var dl=id+'_list';
+    var h='<input type="text" id="'+id+'" class="form-input" list="'+dl+'" placeholder="Type vehicle number" autocomplete="off" style="text-transform:uppercase" oninput="loadingVehPick(this,\''+secId+'\',false)" onchange="loadingVehPick(this,\''+secId+'\',true)">';
+    h+='<datalist id="'+dl+'">';
+    vs.forEach(function(v){h+='<option value="'+esc(v.vehicleNo)+'">'+(v.city?esc(v.city)+' — ':'')+esc(loadingVehicleState(v).state)+'</option>';});
+    return h+'</datalist>';
 }
 function renderLoadingRegister(){
     var from=(window._lrgFrom!==undefined)?window._lrgFrom:today(),to=(window._lrgTo!==undefined)?window._lrgTo:today();
@@ -5522,9 +5542,9 @@ function openPWLSetup(obdId){
 
 // ===== STEP 2: PICKING =====
 function openPWLPicking(){
-    var vehNo=(document.getElementById('pwlVehNo').value||'').trim().toUpperCase();
+    var vehNo=canonLoadingVeh(document.getElementById('pwlVehNo').value);
     var secNo=(document.getElementById('pwlSecNo').value||'').trim().toUpperCase();
-    if(!vehNo){showToast('Please select a Gate-IN vehicle','error');return;}
+    if(!vehNo){showToast('Please enter a Gate-IN vehicle number','error');return;}
     if(!isLoadingGateVehicle(vehNo)){showToast('This vehicle is not IN at the gate','error');return;}
     if(!secNo){showToast('Enter security number','error');return;}
     var obdId=window._pwlOBDId;
@@ -6066,9 +6086,9 @@ function startMultiLoading(){
 }
 
 function openMultiLoadingScanner(){
-    var vehNo=(document.getElementById('loadVehicleNo').value||'').trim().toUpperCase();
+    var vehNo=canonLoadingVeh(document.getElementById('loadVehicleNo').value);
     var secNo=(document.getElementById('loadSecurityNo').value||'').trim().toUpperCase();
-    if(!vehNo){showToast('Please select a Gate-IN vehicle','error');return;}
+    if(!vehNo){showToast('Please enter a Gate-IN vehicle number','error');return;}
     if(!isLoadingGateVehicle(vehNo)){showToast('This vehicle is not IN at the gate','error');return;}
     if(!secNo){showToast('Enter security number','error');return;}
     var ml=window._multiLoadOBDs;if(!ml)return;

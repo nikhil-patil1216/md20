@@ -788,7 +788,7 @@ async function devHeartbeat() {
         if (r.error) return;                       // network issue — logout mat karo
         if (r.data === false) {                    // token match nahi — kisi aur device ne login le liya
             devStop();
-            showToast('Aapki ID dusre device par login ho gayi hai. Logging out...', 'warning');
+            showToast('Your ID has been logged in on another device. Logging out...', 'warning');
             setTimeout(function () { doLogout(); }, 1500);
         }
     } catch (e) {}
@@ -832,14 +832,14 @@ async function doLogin(uname, pass) {
     // ---- Single device check ----
     var claim = await devClaim(user.username, false);
     if (!claim.ok && claim.reason === 'in_use') {
-        var go = DEVLOCK.ALLOW_TAKEOVER && confirm('Ye user ID already dusre device par logged in hai.\n\nWahan ka session end karke yaha login karna hai?');
+        var go = DEVLOCK.ALLOW_TAKEOVER && confirm('This user ID is already logged in on another device.\n\nEnd that session and log in here?');
         if (go) claim = await devClaim(user.username, true);
     }
     if (!claim.ok) {
         await supabaseClient.auth.signOut({ scope: 'local' });   // local: dusre device ka session na toote
         var msg = claim.reason === 'in_use'
-            ? 'User "' + user.username + '" Already logged in on another device.\nPlease log out from the other device first, then log in here.'
-            : 'Session check fail hua: ' + (claim.message || 'device_lock.sql Has it been executed in Supabase?');
+            ? 'User "' + user.username + '" is already logged in on another device.\nPlease log out from that device first, then try again.'
+            : 'Session check failed: ' + (claim.message || 'Please make sure device_lock.sql has been run in Supabase.');
         showToast(msg.replace(/\n/g, ' '), 'error');
         alert(msg);
         return false;
@@ -2261,7 +2261,7 @@ function openScannerForPutawayRackModal(idx){
         if(qtyField)qtyField.focus();
     };
     document.getElementById('scannerModal').style.display='flex';
-    focusForBluetoothScanner();
+    
 }
 
 // --- Save Putaway from GRN (Partial Allowed) ---
@@ -2349,7 +2349,7 @@ async function savePutawayFromGRN(grnId){
 // --- EAN Scan Putaway Functions ---
 function openScannerForPutawayEan(){
     APP.scanCallback=function(code){document.getElementById('putawayEanScan').value=code;lookupPutawayEan();};
-    document.getElementById('scannerModal').style.display='flex';focusForBluetoothScanner();
+    document.getElementById('scannerModal').style.display='flex';
 }
 function openScannerForPutawayRack(){
     APP.scanCallback=function(code){
@@ -2358,7 +2358,7 @@ function openScannerForPutawayRack(){
         if(sel){for(var i=0;i<sel.options.length;i++){if(sel.options[i].value.toUpperCase()===code.toUpperCase()){sel.selectedIndex=i;break;}}}
         document.getElementById('paQty').focus();
     };
-    document.getElementById('scannerModal').style.display='flex';focusForBluetoothScanner();
+    document.getElementById('scannerModal').style.display='flex';
 }
 async function lookupPutawayEan(){
     var input=document.getElementById('putawayEanScan');
@@ -2763,7 +2763,7 @@ function openScannerForPIVEan(){
         lookupPIVEan();
     };
     document.getElementById('scannerModal').style.display='flex';
-    focusForBluetoothScanner();
+    
 }
 function openScannerForPIVRack(){
     APP.scanCallback=function(code){
@@ -2774,7 +2774,7 @@ function openScannerForPIVRack(){
         document.getElementById('pivQty').focus();
     };
     document.getElementById('scannerModal').style.display='flex';
-    focusForBluetoothScanner();
+    
 }
 
 // --- EAN Lookup from Material Master ---
@@ -7722,49 +7722,130 @@ document.getElementById('loginForm').addEventListener('submit', async function(e
 })();
 
 // ==================== SCANNER MODULE ====================
-var SCANNER = { html5Qr: null, callback: null, btInput: null, isActive: false };
+// Camera barcode/QR scanner — modal khulte hi camera apne aap start, code dikhte hi turant scan.
+// Sab callers (Putaway, Stock Count/PIV, Picking, Loading, Unloading) isi ko use karte hain:
+//   - APP.scanCallback set + #scannerModal display:flex   (purana tarika)
+//   - openScanner(callback)                               (naya tarika)
+var SCANNER = { html5Qr: null, callback: null, btInput: null, isActive: false, starting: false, handled: false };
+
+function _scanFormats() {
+    if (typeof Html5QrcodeSupportedFormats === 'undefined') return undefined;
+    var F = Html5QrcodeSupportedFormats;
+    // Sirf warehouse ke formats — decoder kam kaam karta hai, isliye jaldi pakadta hai
+    return [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.CODE_128, F.CODE_39, F.CODE_93, F.ITF, F.QR_CODE, F.DATA_MATRIX]
+        .filter(function (x) { return x !== undefined; });
+}
+// Barcode chauda hota hai — isliye scan area wide rectangle (square nahi)
+function _scanBox(vw, vh) {
+    var w = Math.floor(Math.min(vw * 0.92, 440));
+    var h = Math.floor(Math.min(vh * 0.6, w * 0.55));
+    return { width: Math.max(w, 60), height: Math.max(h, 60) };
+}
+function _scanBeep() {
+    try {
+        var C = window.AudioContext || window.webkitAudioContext; if (!C) return;
+        var ctx = new C(), o = ctx.createOscillator(), g = ctx.createGain();
+        o.type = 'square'; o.frequency.value = 1400; g.gain.value = 0.08;
+        o.connect(g); g.connect(ctx.destination); o.start();
+        setTimeout(function () { o.stop(); ctx.close(); }, 90);
+    } catch (e) {}
+}
 
 function openScanner(callback) {
-    if (typeof callback !== 'function') return;
-    SCANNER.callback = callback;
-    SCANNER.isActive = true;
+    if (typeof callback === 'function') SCANNER.callback = callback;
     var modal = document.getElementById('scannerModal');
-    if (modal) modal.style.display = 'flex';
+    if (modal) modal.style.display = 'flex';          // observer camera start kar dega
+}
+
+function _stopCamera() {
+    var q = SCANNER.html5Qr;
+    SCANNER.html5Qr = null; SCANNER.starting = false;
+    if (!q) return Promise.resolve();
+    try {
+        return q.stop().then(function () { try { q.clear(); } catch (e) {} }).catch(function () {});
+    } catch (e) { return Promise.resolve(); }
+}
+function _removeBtInput() {
+    if (SCANNER.btInput) { try { SCANNER.btInput.remove(); } catch (e) {} SCANNER.btInput = null; }
 }
 
 function closeScannerModal() {
     SCANNER.isActive = false;
     SCANNER.callback = null;
-    if (SCANNER.html5Qr) { try { SCANNER.html5Qr.stop(); } catch(e) {} SCANNER.html5Qr = null; }
-    if (SCANNER.btInput) { try { SCANNER.btInput.remove(); } catch(e) {} SCANNER.btInput = null; }
+    if (typeof APP !== 'undefined') APP.scanCallback = null;
+    _removeBtInput();
+    _stopCamera();
     var reader = document.getElementById('qr-reader');
-    if (reader) reader.innerHTML = '';
+    if (reader) setTimeout(function () { if (!SCANNER.html5Qr) reader.innerHTML = ''; }, 50);
     var modal = document.getElementById('scannerModal');
     if (modal) modal.style.display = 'none';
 }
 
+// Scan mil gaya — ek hi baar chalega, camera band, modal band, phir field me value
+function scannerDeliver(code) {
+    if (SCANNER.handled) return;
+    code = String(code == null ? '' : code).trim();
+    if (!code) return;
+    SCANNER.handled = true;
+    var cb = SCANNER.callback || (typeof APP !== 'undefined' ? APP.scanCallback : null);
+    try { if (navigator.vibrate) navigator.vibrate(70); } catch (e) {}
+    _scanBeep();
+    closeScannerModal();
+    if (typeof cb === 'function') {
+        try { cb(code); } catch (e) { console.error('scan callback error', e); showToast('Scan error: ' + (e.message || e), 'error'); }
+    } else {
+        showToast('Scanned: ' + code, 'success');
+    }
+}
+
+function _camError(reader, err) {
+    SCANNER.starting = false;
+    var msg = (err && (err.message || err.name)) || String(err || 'Unknown error');
+    if (/NotAllowed|Permission/i.test(msg)) msg = 'Camera permission denied. Browser/app settings me camera allow karein.';
+    reader.innerHTML = '<div style="padding:20px;text-align:center"><i class="bx bx-error-circle" style="font-size:32px;color:var(--danger);display:block;margin-bottom:8px"></i><div style="color:var(--danger);font-size:13px">Camera error</div><div style="color:var(--text-muted);font-size:11px;margin-top:4px">' + esc(msg) + '</div></div>';
+}
+
 function startCameraScan() {
     var reader = document.getElementById('qr-reader');
-    if (!reader) return;
+    if (!reader || SCANNER.starting) return;
+    _removeBtInput();
+    SCANNER.isActive = true; SCANNER.handled = false; SCANNER.starting = true;
     reader.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted)"><div class="loader-hex" style="margin:0 auto 10px;width:30px;height:30px"></div>Camera starting...</div>';
-    try {
-        SCANNER.html5Qr = new Html5Qrcode('qr-reader');
-        SCANNER.html5Qr.start(
-            { facingMode: 'environment' },
-            { fps: 10, qrbox: { width: 250, height: 250 } },
-            function(text) { if (SCANNER.callback) SCANNER.callback(text); },
-            function() {}
-        ).catch(function(err) {
-            reader.innerHTML = '<div style="padding:20px;text-align:center"><i class="bx bx-error-circle" style="font-size:32px;color:var(--danger);display:block;margin-bottom:8px"></i><div style="color:var(--danger);font-size:13px">Camera error</div><div style="color:var(--text-muted);font-size:11px;margin-top:4px">' + (err.message || err) + '</div></div>';
+
+    _stopCamera().then(function () {
+        SCANNER.starting = true;
+        function make() {
+            var cfg = { verbose: false, experimentalFeatures: { useBarCodeDetectorIfSupported: true } };   // phone ka native fast decoder
+            var f = _scanFormats(); if (f && f.length) cfg.formatsToSupport = f;
+            return new Html5Qrcode('qr-reader', cfg);
+        }
+        function ok(text) { scannerDeliver(text); }
+        function noop() {}
+
+        // 1) HD + continuous autofocus (barcode jaldi pakadne ke liye)
+        var hd = {
+            fps: 25, qrbox: _scanBox, disableFlip: true,
+            videoConstraints: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 }, advanced: [{ focusMode: 'continuous' }] }
+        };
+        var q1 = make(); SCANNER.html5Qr = q1;
+        q1.start({ facingMode: 'environment' }, hd, ok, noop).then(function () { SCANNER.starting = false; }).catch(function (err1) {
+            if (!SCANNER.isActive) return;
+            if (/NotAllowed|Permission/i.test((err1 && (err1.message || err1.name)) || '')) { _camError(reader, err1); return; }
+            // 2) fallback: basic settings
+            var q2 = make(); SCANNER.html5Qr = q2;
+            q2.start({ facingMode: 'environment' }, { fps: 15, qrbox: _scanBox, disableFlip: true }, ok, noop)
+                .then(function () { SCANNER.starting = false; })
+                .catch(function (err2) { SCANNER.html5Qr = null; _camError(reader, err2); });
         });
-    } catch(e) {
-        reader.innerHTML = '<div style="padding:20px;text-align:center;color:var(--danger)"><i class="bx bx-error-circle" style="font-size:32px;display:block;margin-bottom:8px"></i>Camera not supported</div>';
-    }
+    });
 }
 
 function focusForBluetoothScanner() {
     var reader = document.getElementById('qr-reader');
     if (!reader) return;
+    _stopCamera();
+    _removeBtInput();
+    SCANNER.isActive = true; SCANNER.handled = false;
     reader.innerHTML = '';
     SCANNER.btInput = document.createElement('input');
     SCANNER.btInput.type = 'text';
@@ -7772,21 +7853,32 @@ function focusForBluetoothScanner() {
     SCANNER.btInput.style.cssText = 'position:absolute;top:-200px;left:-200px;width:1px;height:1px;opacity:0;font-size:16px;';
     document.body.appendChild(SCANNER.btInput);
     reader.innerHTML = '<div style="padding:24px;text-align:center"><i class="bx bx-bluetooth" style="font-size:40px;color:var(--accent);display:block;margin-bottom:12px;animation:glow 2s infinite"></i><div style="font-size:14px;font-weight:700;color:var(--accent);margin-bottom:4px">Bluetooth Scanner Ready</div><div style="font-size:12px;color:var(--text-muted);margin-bottom:16px">Scan a barcode — the result will appear automatically</div><div style="display:inline-flex;align-items:center;gap:8px;padding:10px 16px;background:var(--accent-dim);border-radius:var(--radius-sm);border:1px solid rgba(var(--accent-rgb),.2)"><i class="bx bx-check-circle" style="color:var(--accent)"></i><span style="font-size:12px;color:var(--accent);font-weight:600">Waiting for scan...</span></div></div>';
-    setTimeout(function() { if (SCANNER.btInput) SCANNER.btInput.focus(); }, 300);
-    SCANNER.btInput.addEventListener('keydown', function(e) {
+    setTimeout(function () { if (SCANNER.btInput) SCANNER.btInput.focus(); }, 300);
+    SCANNER.btInput.addEventListener('keydown', function (e) {
         if (!SCANNER.isActive) return;
         if (e.key === 'Enter') {
             e.preventDefault(); e.stopPropagation();
             var val = SCANNER.btInput.value.trim();
-            if (val && SCANNER.callback) SCANNER.callback(val);
             SCANNER.btInput.value = '';
+            if (val) scannerDeliver(val);
         }
         if (e.key === 'Tab') e.preventDefault();
     });
-    SCANNER.btInput.addEventListener('blur', function() {
-        if (SCANNER.isActive && SCANNER.btInput) setTimeout(function() { if (SCANNER.isActive && SCANNER.btInput) SCANNER.btInput.focus(); }, 100);
+    SCANNER.btInput.addEventListener('blur', function () {
+        if (SCANNER.isActive && SCANNER.btInput) setTimeout(function () { if (SCANNER.isActive && SCANNER.btInput) SCANNER.btInput.focus(); }, 100);
     });
 }
+
+// Modal jab bhi khule (kisi bhi screen se) — camera turant start; band ho to camera off
+(function () {
+    var m = document.getElementById('scannerModal');
+    if (!m || !window.MutationObserver) return;
+    new MutationObserver(function () {
+        var open = m.style.display === 'flex';
+        if (open && !SCANNER.html5Qr && !SCANNER.btInput && !SCANNER.starting) startCameraScan();
+        if (!open && (SCANNER.html5Qr || SCANNER.btInput)) { SCANNER.isActive = false; _removeBtInput(); _stopCamera(); }
+    }).observe(m, { attributes: true, attributeFilter: ['style'] });
+})();
 
 document.addEventListener('click', function(e) {
     var modal = document.getElementById('scannerModal');

@@ -18,7 +18,7 @@ try {
     if (typeof supabase !== 'undefined' && SUPABASE_URL.indexOf('supabase.co') > -1) {
         supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
             realtime: { params: { eventsPerSecond: 10 } },
-            auth: { persistSession: false }
+            auth: { persistSession: true, autoRefreshToken: true }
         });
         console.log('✅ Supabase client initialized');
     }
@@ -332,10 +332,14 @@ function rtApplyChange(tableName, p) {
     if (!isLiveTable(tableName)) { try { localStorage.setItem('wms_' + tableName, JSON.stringify(MEMORY_DB[tableName])); } catch(e) {} }
     rtScheduleRender();
 }
-if (supabaseClient) {
+var _rtStarted = false;
+function startRealtime() {
+    if (!supabaseClient || _rtStarted) return;
+    _rtStarted = true;
     ALL_TABLES.forEach(function(t) {
         try {
             supabaseClient.channel('rt-' + t)
+            
                 .on('postgres_changes', { event: '*', schema: 'public', table: t }, function(p) { rtApplyChange(t, p); })
                 .subscribe();
         } catch(e) { console.warn('Realtime channel error [' + t + ']:', e); }
@@ -751,43 +755,31 @@ function seedData(){
 
 // ==================== AUTH ====================
 async function doLogin(uname, pass) {
-    var users = DB.get('users');
-    var user = null;
-    
-    for (var i = 0; i < users.length; i++) {
-        if (users[i].username === uname && users[i].password === pass) {
-            user = users[i];
-            break;
-        }
-    }
-    
-    if (!user && supabaseClient) {
-        await pullAll();
-        users = DB.get('users');
-        for (var i = 0; i < users.length; i++) {
-            if (users[i].username === uname && users[i].password === pass) {
-                user = users[i];
-                break;
-            }
-        }
-    }
-    
+    if (!supabaseClient) { showToast('Server not connected', 'error'); return false; }
+    uname = (uname || '').trim().toLowerCase();
+
+    var r = await supabaseClient.auth.signInWithPassword({
+        email: uname + '@wms.example.com', password: pass
+    });
+    if (r.error) { showToast('Invalid username or password', 'error'); return false; }
+
+    showLoader();
+    await pullAll();                       // ab authenticated hai, data aayega
+    hideLoader();
+
+    var user = DB.get('users').filter(function (u) { return u.username === uname; })[0];
     if (!user) {
-        showToast('Invalid username or password', 'error');
+        await supabaseClient.auth.signOut();
+        showToast('User profile not found', 'error');
         return false;
     }
-    
+
     APP.currentUser = user;
     APP.sessionStart = Date.now();
     localStorage.setItem('wms_session', JSON.stringify({ userId: user.id, loginTime: new Date().toISOString() }));
-    
     DB.add('user_sessions', { userId: user.id, userName: user.name, loginTime: new Date().toISOString(), logoutTime: null, status: 'Active' });
     logAction('Auth', 'LOGIN', 'User ' + user.name + ' logged in');
-    
-    showLoader();
-    await pullAll(); // Get latest data before showing dashboard
-    hideLoader();
-    
+    startRealtime();                       // Step 3.5 wala function
     return true;
 }
 async function doLogout() {
@@ -804,6 +796,7 @@ async function doLogout() {
         }
         
         await flushAllPendingPushes(); // Data save before logout
+        await supabaseClient.auth.signOut();
         await new Promise(function(r) { setTimeout(r, 500); });
         
         APP.currentUser = null;
@@ -6956,7 +6949,7 @@ function applyRoleDefaults(prefix){
     }
 }
 
-function saveUser(){
+async function saveUser(){
     var nm=document.getElementById('auName').value.trim();
     var un=document.getElementById('auUser').value.trim().toLowerCase();
     var pw=document.getElementById('auPass').value.trim();
@@ -6966,6 +6959,11 @@ function saveUser(){
     var exists=DB.filter('users',function(u){return u.username===un;});
     if(exists.length>0){showToast('Username already exists!','error');return;}
     var perms=readPermHTML('au');
+
+    // Supabase Auth me user banao
+    var rr=await supabaseClient.rpc('wms_upsert_auth_user',{p_username:un,p_password:pw});
+    if(rr.error){showToast('Auth error: '+rr.error.message,'error');return;}
+
     DB.add('users',{username:un,password:pw,name:nm,role:rl,permissions:perms});
     logAction('Admin','ADD_USER','User '+un+' ('+rl+') created');
     showToast('User created: '+nm,'success');
@@ -6994,12 +6992,20 @@ function editUser(id){
         '<button class="btn btn-glass" onclick="updateUser(\''+id+'\')"><i class="bx bx-check"></i> Update</button>');
 }
 
-function updateUser(id){
+async function updateUser(id){
     var nm=document.getElementById('euName').value.trim();
     var rl=document.getElementById('euRole').value;
     var pw=document.getElementById('euPass').value.trim();
     if(!nm||!rl){showToast('Name and Role required','error');return;}
     if(pw&&pw.length<4){showToast('Password min 4 characters','error');return;}
+
+    // Password badla hai to Supabase Auth me bhi badlo
+    if(pw&&pw.length>=4){
+        var eu=DB.find('users',id);
+        var rr=await supabaseClient.rpc('wms_upsert_auth_user',{p_username:eu.username,p_password:pw});
+        if(rr.error){showToast('Auth error: '+rr.error.message,'error');return;}
+    }
+
     var up={name:nm,role:rl,permissions:readPermHTML('eu')};
     if(pw&&pw.length>=4)up.password=pw;
     DB.update('users',id,up);
@@ -7009,10 +7015,14 @@ function updateUser(id){
 }
 
 // --- Delete User ---
-function deleteUser(id){
+async function deleteUser(id){
     var u=DB.find('users',id);if(!u)return;
     if(u.id===APP.currentUser.id){showToast('Cannot delete yourself!','error');return;}
     if(!confirm('Delete user "'+u.name+'" ('+u.username+')?'))return;
+
+    // Supabase Auth se bhi hatao
+    await supabaseClient.rpc('wms_delete_auth_user',{p_username:u.username});
+
     DB.remove('users',id);
     logAction('Admin','DELETE_USER','User '+u.name+' deleted');
     showToast('User deleted','success');
@@ -7156,11 +7166,16 @@ function showChangePassword(){
     h+='<div class="form-group"><label>Confirm New Password <span class="req">*</span></label><input type="password" id="cpConf" class="form-input"></div>';
     showModal('Change Password',h,'sm','<button class="btn btn-glass" onclick="closeModal()">Cancel</button><button class="btn btn-glass" onclick="doChangePassword()"><i class="bx bx-check"></i> Update</button>');
 }
-function doChangePassword(){
+async function doChangePassword(){
     var curr=document.getElementById('cpCurr').value,newP=document.getElementById('cpNew').value,conf=document.getElementById('cpConf').value;
     if(curr!==APP.currentUser.password){showToast('Current password incorrect','error');return;}
     if(newP!==conf){showToast('Passwords do not match','error');return;}
     if(newP.length<4){showToast('Password too short','error');return;}
+
+    // Supabase Auth me password badlo
+    var cr=await supabaseClient.auth.updateUser({password:newP});
+    if(cr.error){showToast(cr.error.message,'error');return;}
+
     DB.update('users',APP.currentUser.id,{password:newP});
     APP.currentUser.password=newP;showToast('Password updated!','success');closeModal();
 }
@@ -7605,23 +7620,23 @@ document.getElementById('loginForm').addEventListener('submit', async function(e
     initEvents();
 
     // Check existing session
-    var session=localStorage.getItem('wms_session');
-    if(session){
-        try{
-            var s=JSON.parse(session);
-            var user=DB.find('users',s.userId);
-            if(user){
-                APP.currentUser=user;APP.sessionStart=Date.now();
-                document.getElementById('loginPage').style.display='none';
-                document.getElementById('mainApp').style.display='flex';
-                if(window._matrixInterval)clearInterval(window._matrixInterval);
-                document.getElementById('userAvatar').textContent=user.name.charAt(0).toUpperCase();
-                document.getElementById('userName').textContent=user.name;
-                pullAll();
-                renderSidebar();initBottomNav();navTo('dashboard');initSessionTimeout();
-            }
-        }catch(e){}
-    }
+  (async function restoreSession() {
+    if (!supabaseClient) return;
+    var s = await supabaseClient.auth.getSession();
+    if (!s.data.session) { localStorage.removeItem('wms_session'); return; }
+    await pullAll();
+    var uname = (s.data.session.user.email || '').split('@')[0];
+    var user = DB.get('users').filter(function (u) { return u.username === uname; })[0];
+    if (!user) return;
+    APP.currentUser = user; APP.sessionStart = Date.now();
+    document.getElementById('loginPage').style.display = 'none';
+    document.getElementById('mainApp').style.display = 'flex';
+    if (window._matrixInterval) clearInterval(window._matrixInterval);
+    document.getElementById('userAvatar').textContent = user.name.charAt(0).toUpperCase();
+    document.getElementById('userName').textContent = user.name;
+    renderSidebar(); initBottomNav(); navTo('dashboard'); initSessionTimeout();
+    startRealtime();
+})();
 })();
 
 // ==================== SCANNER MODULE ====================

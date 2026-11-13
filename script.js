@@ -1666,46 +1666,65 @@ function startUnload(vehId,existingData){
     },250);
 }
 
-// --- Lookup: Silent background search ---
-function doLookupScan(type){
+// --- Lookup: invoice me dhundo, nahi mila to Material Master (Supabase) se auto-fill ---
+var _ulLookupSeq=0;
+function ulFillAuto(mat,desc,uom,rem,state){
+    var matEl=document.getElementById('ulAutoMat'),descEl=document.getElementById('ulAutoDesc'),uomEl=document.getElementById('ulAutoUom'),remEl=document.getElementById('ulAutoRem'),boxEl=document.getElementById('ulAutoBox');
+    if(!matEl)return;
+    matEl.value=mat||'';descEl.value=desc||'';uomEl.value=uom||'PCS';
+    var col=state==='extra'?'var(--warning)':'var(--accent)';
+    var bg=state==='extra'?'rgba(var(--warning-rgb),.10)':'var(--accent-dim)';
+    [matEl,uomEl].forEach(function(e){e.style.color=col;e.style.background=bg;});
+    descEl.style.color='var(--text-primary)';descEl.style.background=bg;
+    if(state==='extra'){remEl.textContent='NOT IN INVOICE';remEl.style.color='var(--warning)';remEl.style.background=bg;}
+    else if(rem>0){remEl.textContent=rem;remEl.style.color='var(--accent)';remEl.style.background=bg;}
+    else if(rem===0){remEl.textContent='COMPLETE';remEl.style.color='var(--success)';remEl.style.background='rgba(0,255,136,.1)';}
+    else{remEl.textContent='EXCESS (+'+Math.abs(rem)+')';remEl.style.color='var(--danger)';remEl.style.background='rgba(255,107,107,.1)';}
+    boxEl.style.borderColor=col;
+}
+async function doLookupScan(type){
     var ud=window._unloadData;if(!ud)return;
     var val='';
     if(type==='ean') val=(document.getElementById('ulScanEan').value||'').trim().toUpperCase();
     else val=(document.getElementById('ulScanMat').value||'').trim().toUpperCase();
     if(!val){showToast('Enter an EAN or Material Code','error');return;}
+    var seq=++_ulLookupSeq;
 
+    // 1) Invoice wale materials me dhundo
     var matchIdx=ud.eanIndex[val];
     if(matchIdx===undefined) matchIdx=ud.matIndex[val];
-
     if(matchIdx!==undefined&&ud.materialEntries[matchIdx]){
         var entry=ud.materialEntries[matchIdx];
         ud.currentMatchIdx=matchIdx;
+        ulFillAuto(entry.material,entry.description,entry.uom,entry.baseRemaining-entry.sessionScanned,'match');
+        // dusra field bhi auto bharo (EAN scan -> material code, material -> EAN)
+        var eanEl=document.getElementById('ulScanEan'),matIn=document.getElementById('ulScanMat');
+        if(eanEl&&!eanEl.value&&entry.ean)eanEl.value=entry.ean;
+        if(matIn&&!matIn.value)matIn.value=entry.material||'';
+        var q=document.getElementById('ulScanQty');q.focus();q.select();
+        return;
+    }
 
-        var matEl=document.getElementById('ulAutoMat');
-        var descEl=document.getElementById('ulAutoDesc');
-        var uomEl=document.getElementById('ulAutoUom');
-        var remEl=document.getElementById('ulAutoRem');
-        var boxEl=document.getElementById('ulAutoBox');
-
-        matEl.value=entry.material;matEl.style.color='var(--accent)';matEl.style.background='var(--accent-dim)';
-        descEl.value=entry.description;descEl.style.color='var(--text-primary)';descEl.style.background='var(--accent-dim)';
-        uomEl.value=entry.uom;uomEl.style.color='var(--accent)';uomEl.style.background='var(--accent-dim)';
-
-        var rem=entry.baseRemaining-entry.sessionScanned;
-        if(rem>0){remEl.textContent=rem;remEl.style.color='var(--accent)';remEl.style.background='var(--accent-dim)';}
-        else if(rem===0){remEl.textContent='COMPLETE';remEl.style.color='var(--success)';remEl.style.background='rgba(0,255,136,.1)';}
-        else{remEl.textContent='EXCESS (+'+Math.abs(rem)+')';remEl.style.color='var(--danger)';remEl.style.background='rgba(255,107,107,.1)';}
-        boxEl.style.borderColor='var(--accent)';
-
-        document.getElementById('ulScanQty').focus();
-        document.getElementById('ulScanQty').select();
+    // 2) Invoice me nahi — Material Master (Supabase) se auto-fill
+    ud.currentMatchIdx=null;
+    clearAutoFill();
+    var mm=null;
+    try{ var f=await sbFindMaterialAny(val); mm=f?f.row:null; }catch(e){ mm=null; }
+    if(seq!==_ulLookupSeq)return;           // beech me naya scan aa gaya — purana result ignore
+    if(!window._unloadData)return;          // modal band ho gaya
+    if(mm){
+        window._unloadData.currentMatchIdx=null;   // invoice me nahi => No Match (excess/wrong item) hi record hoga
+        ulFillAuto(mm.material||val,mm.description||'',mm.uom||mm.baseUom||'PCS',0,'extra');
+        var eanEl2=document.getElementById('ulScanEan'),matIn2=document.getElementById('ulScanMat');
+        if(eanEl2&&!eanEl2.value&&mm.ean)eanEl2.value=String(mm.ean).toUpperCase();
+        if(matIn2&&!matIn2.value)matIn2.value=mm.material||'';
+        showToast((mm.material||val)+' — Invoice me nahi hai (details Material Master se)','warning');
+        var q2=document.getElementById('ulScanQty');q2.focus();q2.select();
     }else{
-        ud.currentMatchIdx=null;
-        clearAutoFill();
-        showToast('Material Not Found in Any Invoice of This Vehicle.','error');
+        showToast('Material Not Found in Invoice or Material Master.','error');
         var inp=type==='ean'?document.getElementById('ulScanEan'):document.getElementById('ulScanMat');
         if(inp){inp.style.borderColor='var(--danger)';inp.style.boxShadow='0 0 12px rgba(255,107,107,.4)';setTimeout(function(){inp.style.borderColor='';inp.style.boxShadow='';},1000);}
-        document.getElementById('ulAutoMat').focus();
+        var am=document.getElementById('ulAutoMat');if(am)am.focus();
     }
 }
 

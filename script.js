@@ -7613,7 +7613,7 @@ document.getElementById('loginForm').addEventListener('submit', async function(e
     }
 
     // Seed data
-    seedData();
+    //seedData();
 
     // Init login
     initMatrix();

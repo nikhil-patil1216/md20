@@ -624,7 +624,7 @@ function renderNotifPanel(){
             h+='<div style="display:flex;gap:6px;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">';
             h+='<button class="btn btn-glass btn-sm" style="flex:1;justify-content:center;background:rgba(46,213,115,0.15);border-color:var(--success);color:var(--success);font-weight:600" onclick="event.stopPropagation();approveFromNotif(\''+nt.dataId+'\')"><i class="bx bx-check"></i> Approve</button>';
             h+='<button class="btn btn-glass btn-sm" style="flex:1;justify-content:center;background:rgba(255,71,87,0.15);border-color:var(--danger);color:var(--danger);font-weight:600" onclick="event.stopPropagation();rejectFromNotif(\''+nt.dataId+'\')"><i class="bx bx-x"></i> Reject</button>';
-            h+='<button class="btn btn-glass btn-sm" style="justify-content:center" onclick="event.stopPropagation();viewFromNotif(\''+nt.dataId+'\')"><i class="bx bx-eye"></i></button>';
+            h+='<button class="btn btn-glass btn-sm" style="justify-content:center" onclick="event.stopPropagation();viewFromNotif(\''+nt.dataId+'\')"><i class="bx bx-eye"></i> View</button>';
             h+='</div>';
         }else if(hasDataId){
             // Other clickable notifications
@@ -2095,7 +2095,7 @@ function buildInboundRecTable(vehs){
         var grns=DB.filter('grn_records',function(g){return g.vehicleId===v.id;});
         var grnStr=grns.map(function(g){return g.grnNo;}).join(', ')||'-';
         var sc=v.status==='Posted'?'badge-success':(v.status==='Partial Unload'?'badge-info':'badge-warning');
-        h+='<tr><td><strong>'+esc(v.vehicleNo)+'</strong></td><td>'+esc(v.lrNo||'-')+'</td><td>'+esc(v.transportName||'-')+'</td><td><span class="badge badge-info">'+invs.length+'</span></td><td><span class="badge '+sc+'">'+esc(v.status)+'</span></td><td style="font-size:11px;color:var(--text-secondary)">'+esc(v.entryByName||'-')+'</td><td style="font-size:10px;font-family:var(--font-display);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(grnStr)+'</td><td><button class="btn btn-glass btn-sm" onclick="viewUnloadingDetail(\''+v.id+'\')"><i class="bx bx-eye"></i></button></td></tr>';
+        h+='<tr><td><strong>'+esc(v.vehicleNo)+'</strong></td><td>'+esc(v.lrNo||'-')+'</td><td>'+esc(v.transportName||'-')+'</td><td><span class="badge badge-info">'+invs.length+'</span></td><td><span class="badge '+sc+'">'+esc(v.status)+'</span></td><td style="font-size:11px;color:var(--text-secondary)">'+esc(v.entryByName||'-')+'</td><td style="font-size:10px;font-family:var(--font-display);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(grnStr)+'</td><td><button class="btn btn-glass btn-sm" onclick="viewUnloadingDetail(\''+v.id+'\')"><i class="bx bx-eye"></i> View</button></td></tr>';
     });
     h+='</tbody></table></div>';return h;
 }
@@ -4196,7 +4196,7 @@ async function renderPickingAssign(){
             var lb=tl>=tq?'<span class="badge badge-success">Fully Locked</span>':(tl>0?'<span class="badge badge-warning">Partial ('+tl+'/'+tq+')</span>':'<span class="badge badge-danger">No Stock</span>');
             if(hold)lb+=' <span class="badge badge-info">'+hold+' on hold</span>';
             h+='<tr><td>'+(i+1)+'</td><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(a.obdNo||(obd?obd.obdNo:'-'))+(a.priority==='Urgent'?' <span class="badge badge-danger">URGENT</span>':'')+'</td><td>'+esc(a.assignedToName)+'</td><td>'+lb+'</td><td>'+tp+'</td><td style="display:flex;gap:4px;flex-wrap:wrap">';
-            h+='<button class="btn btn-glass btn-sm" onclick="showOBDStockDetail(\''+a.obdId+'\')"><i class="bx bx-show"></i></button>';
+            h+='<button class="btn btn-glass btn-sm" onclick="showOBDStockDetail(\''+a.obdId+'\')"><i class="bx bx-show"></i> View</button>';
             if(tl<tq)h+='<button class="btn btn-info btn-sm" onclick="topUpAssign(\''+a.id+'\')"><i class="bx bx-refresh"></i> Re-check</button>';
             if(a.priority!=='Urgent'&&tp===0)h+='<button class="btn btn-warning btn-sm" onclick="makeUrgentAssign(\''+a.id+'\')">★ Urgent</button>';
             h+='<button class="btn btn-danger btn-sm" onclick="unassignPicking(\''+a.id+'\')"><i class="bx bx-user-minus"></i></button></td></tr>';
@@ -4497,7 +4497,7 @@ function renderLocRequests(){
         if(!list.length)t+='<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:16px">Nothing</td></tr>';
         list.forEach(function(r){
             t+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(r.reqNo||'-')+'</td><td>'+esc(r.obdNo||'-')+'</td><td>'+esc(r.material||'-')+'</td><td>'+esc(r.rack||'-')+'</td><td><b>'+(r.missingQty||0)+'</b></td><td>'+esc(r.requestedByName||'-')+'<br><small style="color:var(--text-muted)">'+fmtDT(r.requestedAt)+'</small></td><td style="font-size:11px">'+esc(r.reason||'-')+(r.note?'<br><small>'+esc(r.note)+'</small>':'')+'</td><td>';
-            t+=isPend?'<div class="table-actions"><button class="btn btn-glass btn-sm" onclick="openLocRequest(\''+r.id+'\')"><i class="bx bx-show"></i> Review / Assign</button><button class="btn btn-danger btn-sm" title="Delete" onclick="deleteLocRequest(\''+r.id+'\')"><i class="bx bx-trash"></i></button></div>':'<div class="table-actions"><span class="badge '+(r.status==='Resolved'?'badge-success':'badge-info')+'">'+esc(r.status)+'</span> <button class="btn btn-glass btn-sm" title="View" onclick="openLocRequest(\''+r.id+'\')"><i class="bx bx-show"></i></button><button class="btn btn-danger btn-sm" title="Delete" onclick="deleteLocRequest(\''+r.id+'\')"><i class="bx bx-trash"></i></button></div>';
+            t+=isPend?'<div class="table-actions"><button class="btn btn-glass btn-sm" onclick="openLocRequest(\''+r.id+'\')"><i class="bx bx-show"></i> Review / Assign</button><button class="btn btn-danger btn-sm" title="Delete" onclick="deleteLocRequest(\''+r.id+'\')"><i class="bx bx-trash"></i></button></div>':'<div class="table-actions"><span class="badge '+(r.status==='Resolved'?'badge-success':'badge-info')+'">'+esc(r.status)+'</span> <button class="btn btn-glass btn-sm" title="View" onclick="openLocRequest(\''+r.id+'\')"><i class="bx bx-show"></i> View</button><button class="btn btn-danger btn-sm" title="Delete" onclick="deleteLocRequest(\''+r.id+'\')"><i class="bx bx-trash"></i></button></div>';
             t+='</td></tr>';
         });
         return t+'</tbody></table></div>';
@@ -4685,7 +4685,7 @@ function renderPickingDone(){
     if(!done.length)h+='<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:24px">No picking done yet</td></tr>';
     else done.forEach(function(d){
         var sc=0;(d.details||[]).forEach(function(det){if(det.short>0)sc++;});
-        h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(d.obdNo)+'</td><td><span class="badge badge-info">'+(d.details||[]).length+'</span></td><td>'+esc(d.pickedByName)+'</td><td style="font-size:11px;color:var(--text-muted)">'+fmtDT(d.pickedAt)+'</td><td>'+(sc?'<span class="badge badge-danger">'+sc+' short</span>':'<span class="badge badge-success">Complete</span>')+'</td><td>'+(d.status==='Reversed'?'<span class="badge badge-warning">Reversed</span>':'<span class="badge badge-success">Done</span>')+'</td><td><div class="table-actions"><button class="btn btn-glass btn-sm" title="View" onclick="viewPickingDoneDetail(\''+d.id+'\')"><i class="bx bx-eye"></i></button>'+(d.status==='Done'?'<button class="btn btn-warning btn-sm" title="Reverse" onclick="openReverseModal(\''+d.id+'\')"><i class="bx bx-undo"></i></button>':'')+'<button class="btn btn-danger btn-sm" title="Delete" onclick="deletePickingDone(\''+d.id+'\')"><i class="bx bx-trash"></i></button></div></td></tr>';
+        h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(d.obdNo)+'</td><td><span class="badge badge-info">'+(d.details||[]).length+'</span></td><td>'+esc(d.pickedByName)+'</td><td style="font-size:11px;color:var(--text-muted)">'+fmtDT(d.pickedAt)+'</td><td>'+(sc?'<span class="badge badge-danger">'+sc+' short</span>':'<span class="badge badge-success">Complete</span>')+'</td><td>'+(d.status==='Reversed'?'<span class="badge badge-warning">Reversed</span>':'<span class="badge badge-success">Done</span>')+'</td><td><div class="table-actions"><button class="btn btn-glass btn-sm" title="View" onclick="viewPickingDoneDetail(\''+d.id+'\')"><i class="bx bx-eye"></i> View</button>'+(d.status==='Done'?'<button class="btn btn-warning btn-sm" title="Reverse" onclick="openReverseModal(\''+d.id+'\')"><i class="bx bx-undo"></i></button>':'')+'<button class="btn btn-danger btn-sm" title="Delete" onclick="deletePickingDone(\''+d.id+'\')"><i class="bx bx-trash"></i></button></div></td></tr>';
     });
     h+='</tbody></table></div>';
     setHtml(h);
@@ -5488,7 +5488,7 @@ function buildPWLDoneTable(list){
     else list.forEach(function(l){
         var sb=l.loadStatus==='Fully Loaded'?'<span class="badge badge-success">Full</span>':'<span class="badge badge-warning">Partial</span>';
         var ot='';(l.obdNos||[]).forEach(function(n){ot+='<span class="badge badge-info" style="margin:1px;font-size:9px">'+esc(n)+'</span>';});
-        h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(l.loadNo)+'</td><td><strong>'+esc(l.vehicleNo)+'</strong></td><td style="font-size:11px">'+esc(l.securityNo||'-')+'</td><td>'+ot+'</td><td><span class="badge badge-info">'+(l.scannedItems||[]).length+'</span></td><td>'+sb+'</td><td style="font-size:11px">'+esc(l.loadedByName)+'</td><td style="font-size:10px;color:var(--text-muted)">'+fmtDT(l.loadedAt)+'</td><td><div class="table-actions"><button class="btn btn-glass btn-sm" title="View" onclick="viewPWLDoneDetail(\''+l.id+'\')"><i class="bx bx-eye"></i></button><button class="btn btn-danger btn-sm" title="Delete" onclick="deletePWLDone(\''+l.id+'\')"><i class="bx bx-trash"></i></button></div></td></tr>';
+        h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(l.loadNo)+'</td><td><strong>'+esc(l.vehicleNo)+'</strong></td><td style="font-size:11px">'+esc(l.securityNo||'-')+'</td><td>'+ot+'</td><td><span class="badge badge-info">'+(l.scannedItems||[]).length+'</span></td><td>'+sb+'</td><td style="font-size:11px">'+esc(l.loadedByName)+'</td><td style="font-size:10px;color:var(--text-muted)">'+fmtDT(l.loadedAt)+'</td><td><div class="table-actions"><button class="btn btn-glass btn-sm" title="View" onclick="viewPWLDoneDetail(\''+l.id+'\')"><i class="bx bx-eye"></i> View</button><button class="btn btn-danger btn-sm" title="Delete" onclick="deletePWLDone(\''+l.id+'\')"><i class="bx bx-trash"></i></button></div></td></tr>';
     });
     h+='</tbody></table></div>';return h;
 }
@@ -6461,7 +6461,7 @@ function buildLoadDoneTable(loaded,approved){
         var tm=fmtDT(l.loadedAt||l.createdAt);
         var fn=it.t==='load'?'viewLoadDetail(\''+l.id+'\')':'viewApprovalDetail(\''+l.id+'\')';
         var dl=it.t==='load'?'deleteLoadedVehicle(\''+l.id+'\')':'deleteApprovalReq(\''+l.id+'\')';
-        h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(l.loadNo)+'</td><td><strong>'+esc(l.vehicleNo)+'</strong></td><td style="font-size:11px">'+esc(l.securityNo||'-')+'</td><td>'+ot+'</td><td><span class="badge badge-info">'+(l.scannedItems||[]).length+'</span></td><td>'+sb+'</td><td style="font-size:11px">'+by+'</td><td style="font-size:10px;color:var(--text-muted)">'+tm+'</td><td><div class="table-actions"><button class="btn btn-glass btn-sm" title="View" onclick="'+fn+'"><i class="bx bx-eye"></i></button><button class="btn btn-danger btn-sm" title="Delete" onclick="'+dl+'"><i class="bx bx-trash"></i></button></div></td></tr>';
+        h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(l.loadNo)+'</td><td><strong>'+esc(l.vehicleNo)+'</strong></td><td style="font-size:11px">'+esc(l.securityNo||'-')+'</td><td>'+ot+'</td><td><span class="badge badge-info">'+(l.scannedItems||[]).length+'</span></td><td>'+sb+'</td><td style="font-size:11px">'+by+'</td><td style="font-size:10px;color:var(--text-muted)">'+tm+'</td><td><div class="table-actions"><button class="btn btn-glass btn-sm" title="View" onclick="'+fn+'"><i class="bx bx-eye"></i> View</button><button class="btn btn-danger btn-sm" title="Delete" onclick="'+dl+'"><i class="bx bx-trash"></i></button></div></td></tr>';
     });
     h+='</tbody></table></div>';return h;
 }
@@ -6479,27 +6479,47 @@ function searchLoadDone(){
 
 // ===== DISPATCH HISTORY: OBD vs Pick vs Load summary =====
 function dispatchSummaryRows(l){
+    var scanned=l.scannedItems||[];var rows=[];
+    var kf=function(e,m){return String(e||m||'').trim().toUpperCase();};
+    var validNo=function(n){return n&&n!=='—'&&n!=='-';};
+    // 1) resolve OBDs: by ids, then by OBD numbers, then from scanned items
     var ids=Array.isArray(l.obdIds)?l.obdIds:(l.obdIds?[l.obdIds]:[]);
-    var scanned=l.scannedItems||[];var rows=[];var used={};
-    var kf=function(e,m){return String(e||m||'').toUpperCase();};
-    ids.forEach(function(oid){
-        var obd=DB.find('obd_data',oid);if(!obd)return;
-        var pd=DB.filter('picking_done',function(p){return p.obdId===oid&&p.status!=='Reversed';})[0]||DB.find('picking_done',oid);
+    var nos=Array.isArray(l.obdNos)?l.obdNos:(l.obdNos?[l.obdNos]:[]);
+    var obds=[],seen={};
+    var addObd=function(o){if(o&&!seen[o.id]){seen[o.id]=1;obds.push(o);}};
+    ids.forEach(function(id){addObd(DB.find('obd_data',id));});
+    nos.forEach(function(n){DB.filter('obd_data',function(o){return String(o.obdNo)===String(n);}).forEach(addObd);});
+    scanned.forEach(function(s){if(validNo(s.obdNo))DB.filter('obd_data',function(o){return String(o.obdNo)===String(s.obdNo);}).forEach(addObd);});
+    // 2) base rows (OBD qty + pick qty)
+    obds.forEach(function(obd){
+        var pd=DB.filter('picking_done',function(p){return p.obdId===obd.id&&p.status!=='Reversed';})[0]||DB.filter('picking_done',function(p){return String(p.obdNo)===String(obd.obdNo)&&p.status!=='Reversed';})[0];
         (obd.materials||[]).forEach(function(m){
-            var k=kf(m.ean,m.material);
-            var pq=0;if(pd)(pd.details||[]).forEach(function(d){if(kf(d.ean,d.material)===k)pq+=Number(d.pickedQty)||0;});
-            var lq=0,desc=m.description||'';
-            scanned.forEach(function(s,i){if(s.inOBD&&s.obdNo===obd.obdNo&&kf(s.ean,s.material)===k){lq+=Number(s.qty)||0;used[i]=1;if(!desc)desc=s.description||'';}});
-            rows.push({obdNo:obd.obdNo,material:m.material,ean:m.ean||'',description:desc,obdQty:Number(m.qty)||0,pickQty:pq,loadQty:lq,extra:false});
+            var k=kf(m.ean,m.material);var pq=0;
+            if(pd)(pd.details||[]).forEach(function(d){if(kf(d.ean,d.material)===k)pq+=Number(d.pickedQty)||0;});
+            rows.push({obdNo:obd.obdNo,material:m.material,ean:m.ean||'',description:m.description||'',obdQty:Number(m.qty)||0,pickQty:pq,loadQty:0,extra:false,key:k});
         });
     });
-    var ex={};
-    scanned.forEach(function(s,i){
-        if(used[i])return;
-        var k=kf(s.ean,s.material);
-        if(!ex[k]){ex[k]={obdNo:s.obdNo||'—',material:s.material,ean:s.ean||'',description:s.description||'',obdQty:0,pickQty:0,loadQty:0,extra:true};rows.push(ex[k]);}
-        ex[k].loadQty+=Number(s.qty)||0;
+    // 3) assign scanned qty: direct by OBD no if present, else allocate by EAN across OBD rows
+    var extras={};
+    var addExtra=function(s,q){var k=kf(s.ean,s.material);if(!extras[k]){extras[k]={obdNo:'—',material:s.material,ean:s.ean||'',description:s.description||'',obdQty:0,pickQty:0,loadQty:0,extra:true,key:k};rows.push(extras[k]);}extras[k].loadQty+=q;};
+    var pool={},descMap={};
+    scanned.forEach(function(s){
+        var q=Number(s.qty)||0;var k=kf(s.ean,s.material);
+        if(s.description)descMap[k]=s.description;
+        if(s.inOBD===false){addExtra(s,q);return;}
+        if(validNo(s.obdNo)){
+            var r=rows.filter(function(x){return !x.extra&&x.key===k&&String(x.obdNo)===String(s.obdNo);})[0];
+            if(r){r.loadQty+=q;return;}
+        }
+        pool[k]=(pool[k]||0)+q;
     });
+    Object.keys(pool).forEach(function(k){
+        var left=pool[k];var mine=rows.filter(function(x){return !x.extra&&x.key===k;});
+        if(!mine.length){addExtra({ean:k,material:k,description:descMap[k]},left);return;}
+        mine.forEach(function(r){var need=Math.max(r.obdQty-r.loadQty,0);var t=Math.min(need,left);r.loadQty+=t;left-=t;});
+        if(left>0)mine[mine.length-1].loadQty+=left;
+    });
+    rows.forEach(function(r){if(!r.description)r.description=descMap[r.key]||'';});
     return rows;
 }
 function dispatchSummaryHTML(l){
@@ -6612,7 +6632,7 @@ function buildMismatchHTML(shorts,loadMis,pending,rejected){
         h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Load No</th><th>Vehicle</th><th>OBD</th><th>By</th><th>Reason</th><th>Time</th><th>Actions</th></tr></thead><tbody>';
         pending.forEach(function(a){
             h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(a.loadNo)+'</td><td>'+esc(a.vehicleNo)+'</td><td>'+(a.obdNos||[]).map(function(n){return '<span class="badge badge-info" style="font-size:9px">'+esc(n)+'</span>';}).join(' ')+'</td><td>'+esc(a.requestedByName)+'</td><td style="font-size:11px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(a.reason)+'</td><td style="font-size:10px;color:var(--text-muted)">'+fmtDT(a.createdAt)+'</td>';
-            h+='<td><div class="table-actions"><button class="btn btn-glass btn-sm" title="View" onclick="viewApprovalRequest(\''+a.id+'\')"><i class="bx bx-eye"></i></button>';
+            h+='<td><div class="table-actions"><button class="btn btn-glass btn-sm" title="View" onclick="viewApprovalRequest(\''+a.id+'\')"><i class="bx bx-eye"></i> View</button>';
             if(chkAct('canApprove'))h+='<button class="btn btn-glass btn-sm" style="color:var(--success)" title="Approve" onclick="approveLoading(\''+a.id+'\')"><i class="bx bx-check"></i></button><button class="btn btn-danger btn-sm" title="Reject" onclick="rejectLoading(\''+a.id+'\')"><i class="bx bx-x"></i></button>';
             h+='<button class="btn btn-danger btn-sm" title="Delete" onclick="deleteApprovalReq(\''+a.id+'\')"><i class="bx bx-trash"></i></button></div></td></tr>';
         });
@@ -6623,7 +6643,7 @@ function buildMismatchHTML(shorts,loadMis,pending,rejected){
         h+='<div class="card" style="margin-top:12px"><div class="card-title"><i class="bx bx-x-circle" style="color:var(--danger)"></i> Rejected ('+rejected.length+')</div>';
         h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Load No</th><th>Vehicle</th><th>OBD</th><th>By</th><th>Reason</th><th>Time</th><th>Actions</th></tr></thead><tbody>';
         rejected.forEach(function(a){
-            h+='<tr class="scan-row-red"><td style="font-family:var(--font-display);font-size:11px;color:var(--danger)">'+esc(a.loadNo)+'</td><td>'+esc(a.vehicleNo)+'</td><td>'+(a.obdNos||[]).map(function(n){return '<span class="badge badge-info" style="font-size:9px">'+esc(n)+'</span>';}).join(' ')+'</td><td>'+esc(a.requestedByName)+'</td><td style="font-size:11px">'+esc(a.reason)+'</td><td style="font-size:10px;color:var(--text-muted)">'+fmtDT(a.createdAt)+'</td><td><div class="table-actions"><button class="btn btn-glass btn-sm" title="View" onclick="viewApprovalRequest(\''+a.id+'\')"><i class="bx bx-eye"></i></button><button class="btn btn-danger btn-sm" title="Delete" onclick="deleteApprovalReq(\''+a.id+'\')"><i class="bx bx-trash"></i></button></div></td></tr>';
+            h+='<tr class="scan-row-red"><td style="font-family:var(--font-display);font-size:11px;color:var(--danger)">'+esc(a.loadNo)+'</td><td>'+esc(a.vehicleNo)+'</td><td>'+(a.obdNos||[]).map(function(n){return '<span class="badge badge-info" style="font-size:9px">'+esc(n)+'</span>';}).join(' ')+'</td><td>'+esc(a.requestedByName)+'</td><td style="font-size:11px">'+esc(a.reason)+'</td><td style="font-size:10px;color:var(--text-muted)">'+fmtDT(a.createdAt)+'</td><td><div class="table-actions"><button class="btn btn-glass btn-sm" title="View" onclick="viewApprovalRequest(\''+a.id+'\')"><i class="bx bx-eye"></i> View</button><button class="btn btn-danger btn-sm" title="Delete" onclick="deleteApprovalReq(\''+a.id+'\')"><i class="bx bx-trash"></i></button></div></td></tr>';
         });
         h+='</tbody></table></div></div>';
     }
@@ -6634,7 +6654,7 @@ function buildMismatchHTML(shorts,loadMis,pending,rejected){
         h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Load No</th><th>Vehicle</th><th>Material</th><th>EAN</th><th>Expected</th><th>Scanned</th><th>Diff</th><th>Actions</th></tr></thead><tbody>';
         loadMis.forEach(function(lm){
             (lm.mismatches||[]).forEach(function(m){
-                h+='<tr class="scan-row-red"><td style="font-family:var(--font-display);font-size:10px;color:var(--accent)">'+esc(lm.loadNo)+'</td><td>'+esc(lm.vehicleNo)+'</td><td>'+esc(m.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(m.ean||'')+'</td><td>'+m.expectedQty+'</td><td>'+m.scannedQty+'</td><td class="qty-mismatch">'+(m.diff>0?'-'+m.diff:'+'+Math.abs(m.diff))+'</td><td><div class="table-actions"><button class="btn btn-glass btn-sm" title="View" onclick="viewMismatchDetail(\''+lm.id+'\')"><i class="bx bx-eye"></i></button><button class="btn btn-danger btn-sm" title="Delete" onclick="deleteLoadingMismatch(\''+lm.id+'\')"><i class="bx bx-trash"></i></button></div></td></tr>';
+                h+='<tr class="scan-row-red"><td style="font-family:var(--font-display);font-size:10px;color:var(--accent)">'+esc(lm.loadNo)+'</td><td>'+esc(lm.vehicleNo)+'</td><td>'+esc(m.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(m.ean||'')+'</td><td>'+m.expectedQty+'</td><td>'+m.scannedQty+'</td><td class="qty-mismatch">'+(m.diff>0?'-'+m.diff:'+'+Math.abs(m.diff))+'</td><td><div class="table-actions"><button class="btn btn-glass btn-sm" title="View" onclick="viewMismatchDetail(\''+lm.id+'\')"><i class="bx bx-eye"></i> View</button><button class="btn btn-danger btn-sm" title="Delete" onclick="deleteLoadingMismatch(\''+lm.id+'\')"><i class="bx bx-trash"></i></button></div></td></tr>';
             });
         });
         h+='</tbody></table></div>';
@@ -6647,7 +6667,7 @@ function buildMismatchHTML(shorts,loadMis,pending,rejected){
         h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Short No</th><th>Vehicle</th><th>Invoice</th><th>Material</th><th>EAN</th><th>Expected</th><th>Actual</th><th>Short</th><th>Posted</th><th>Actions</th></tr></thead><tbody>';
         shorts.forEach(function(s){
             (s.items||[]).forEach(function(it){
-                h+='<tr class="scan-row-red"><td style="font-family:var(--font-display);font-size:10px">'+esc(s.shortNo)+'</td><td>'+esc(s.vehicleNo)+'</td><td>'+esc(it.invoiceNo)+'</td><td>'+esc(it.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(it.ean||'')+'</td><td>'+it.expected+'</td><td>'+it.scanned+'</td><td class="qty-mismatch">-'+it.short+'</td><td>'+(s.posted?'<span class="badge badge-success">Yes</span>':'<span class="badge badge-warning">No</span>')+'</td><td><div class="table-actions"><button class="btn btn-glass btn-sm" title="View" onclick="viewShortDetail(\''+s.id+'\')"><i class="bx bx-eye"></i></button><button class="btn btn-danger btn-sm" title="Delete" onclick="deleteShortReport(\''+s.id+'\')"><i class="bx bx-trash"></i></button></div></td></tr>';
+                h+='<tr class="scan-row-red"><td style="font-family:var(--font-display);font-size:10px">'+esc(s.shortNo)+'</td><td>'+esc(s.vehicleNo)+'</td><td>'+esc(it.invoiceNo)+'</td><td>'+esc(it.material)+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(it.ean||'')+'</td><td>'+it.expected+'</td><td>'+it.scanned+'</td><td class="qty-mismatch">-'+it.short+'</td><td>'+(s.posted?'<span class="badge badge-success">Yes</span>':'<span class="badge badge-warning">No</span>')+'</td><td><div class="table-actions"><button class="btn btn-glass btn-sm" title="View" onclick="viewShortDetail(\''+s.id+'\')"><i class="bx bx-eye"></i> View</button><button class="btn btn-danger btn-sm" title="Delete" onclick="deleteShortReport(\''+s.id+'\')"><i class="bx bx-trash"></i></button></div></td></tr>';
             });
         });
         h+='</tbody></table></div>';

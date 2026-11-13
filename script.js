@@ -777,7 +777,7 @@ async function devClaim(username, force) {
     var r = await supabaseClient.rpc('wms_claim_session', {
         p_username: username, p_device: devId(), p_token: tok, p_info: devInfo(), p_force: !!force
     });
-    if (r.error) { console.warn('claim error', r.error); return { ok: false, reason: 'error' }; }
+    if (r.error) { console.warn('claim error', r.error); return { ok: false, reason: 'error', message: r.error.message }; }
     if (r.data && r.data.ok) localStorage.setItem('wms_dev_token', tok);
     return r.data || { ok: false, reason: 'error' };
 }
@@ -836,10 +836,12 @@ async function doLogin(uname, pass) {
         if (go) claim = await devClaim(user.username, true);
     }
     if (!claim.ok) {
-        await supabaseClient.auth.signOut();
-        showToast(claim.reason === 'in_use'
-            ? 'User "' + user.username + '" already dusre device par logged in hai. Pehle wahan se logout karein.'
-            : 'Login failed: session check error. Dobara try karein.', 'error');
+        await supabaseClient.auth.signOut({ scope: 'local' });   // local: dusre device ka session na toote
+        var msg = claim.reason === 'in_use'
+            ? 'User "' + user.username + '" Already logged in on another device.\nPlease log out from the other device first, then log in here.'
+            : 'Session check fail hua: ' + (claim.message || 'device_lock.sql Has it been executed in Supabase?');
+        showToast(msg.replace(/\n/g, ' '), 'error');
+        alert(msg);
         return false;
     }
 
@@ -868,7 +870,7 @@ async function doLogout() {
         await flushAllPendingPushes(); // Data save before logout
         devStop();
         await devRelease(APP.currentUser.username);   // device lock free karo
-        await supabaseClient.auth.signOut();
+        await supabaseClient.auth.signOut({ scope: 'local' });
         await new Promise(function(r) { setTimeout(r, 500); });
         
         APP.currentUser = null;
@@ -7703,7 +7705,7 @@ document.getElementById('loginForm').addEventListener('submit', async function(e
     // Refresh/reopen par bhi check: kya ye device abhi bhi is ID ka owner hai?
     var hb = await supabaseClient.rpc('wms_heartbeat', { p_username: user.username, p_token: devToken() });
     if (hb.error || hb.data !== true) {
-        await supabaseClient.auth.signOut();
+        await supabaseClient.auth.signOut({ scope: 'local' });
         localStorage.removeItem('wms_session'); localStorage.removeItem('wms_dev_token');
         return;
     }

@@ -29,8 +29,8 @@ try {
 var ALL_TABLES = ['users','location_master','material_master','rack_master','vehicles','invoices','invoice_materials','picking_reports','audit_log','notifications','difference_reports','obd_data','picking_assignments','loading_assignments','loading_data','user_sessions','grn_records','short_reports','unloading_records','loaded_vehicles','picking_done','loading_users','user_work_log','partial_unloads','location_locks','loading_approvals','short_excess_reports','location_requests'];
 
 // ==================== SERVER-SIDE SEARCH ENGINE (60k+ rows safe) ====================
-// Master data (material_master / location_master) is NOT fully loaded into browser memory.
-// Every search/scan goes directly to Supabase. SQL indexes are required (supabase_setup.sql).
+// Master data (material_master / location_master) browser memory me FULL load NAHI hota.
+// Har search/scan direct Supabase par hota hai. SQL indexes zaroori hain (supabase_setup.sql).
 var _sbCache = {};      // scan cache (table|field|value -> row) — repeat scan instant
 var _sbCacheN = 0;
 var _sbFullPullTs = {}; // sbPullFull TTL cache timestamps
@@ -74,7 +74,7 @@ async function sbFindOne(table, field, value){
     return row;
 }
 
-// Exact, case-insensitive lookup — also matches material codes containing '_' and '%' (sbFindOne turns them into spaces)
+// Exact, case-insensitive lookup — '_' aur '%' wale material codes bhi sahi match hon (sbFindOne unhe space bana deta hai)
 async function sbFindExactCI(table, field, value){
     if(!supabaseClient || !value) return null;
     var ck = table+'|X|'+field+'|'+String(value).toLowerCase();
@@ -87,12 +87,12 @@ async function sbFindExactCI(table, field, value){
     if(_sbCacheN>500){ _sbCache={}; _sbCacheN=0; }
     return row;
 }
-// Whether the scan/typed value is an EAN or a Material (code/name) — detected automatically; returns the row from Material Master.
+// Scan/type me EAN ho ya Material (code/name) — khud pehchan kar Material Master se row deta hai.
 // return: { row, by:'ean'|'material'|'description' } ya null
 async function sbFindMaterialAny(value){
     var v = String(value||'').trim();
     if(!v) return null;
-    var looksEan = /^\d{8,14}$/.test(v);            // only 8-14 digits looks like an EAN, try EAN first
+    var looksEan = /^\d{8,14}$/.test(v);            // sirf 8-14 digit = EAN jaisa, pehle EAN try
     var order = looksEan ? ['ean','material','description'] : ['material','ean','description'];
     for(var i=0;i<order.length;i++){
         var row = order[i]==='ean' ? await sbFindOne('material_master','ean',v) : await sbFindExactCI('material_master',order[i],v);
@@ -101,7 +101,7 @@ async function sbFindMaterialAny(value){
     return null;
 }
 
-// COUNT only (for KPIs — rows are not downloaded)
+// Sirf COUNT (KPI ke liye — rows download nahi hoti)
 async function sbCount(table, eq){
     if(!supabaseClient) return 0;
     var q = supabaseClient.from(table).select('data', { count:'exact', head:true });
@@ -117,7 +117,7 @@ async function sbGetById(table, id){
     return (res.error||!res.data||!res.data.length) ? null : res.data[0].data;
 }
 
-// Direct server update (works even if the row is not in memory)
+// Direct server update (memory me row na ho tab bhi chalega)
 async function sbUpdate(table, id, patch){
     if(!supabaseClient || !id) return null;
     var cur = await sbGetById(table,id); if(!cur) return null;
@@ -128,7 +128,7 @@ async function sbUpdate(table, id, patch){
     return res.error?null:cur;
 }
 
-// Direct server delete (works even if the row is not in memory)
+// Direct server delete (memory me row na ho tab bhi chalega)
 async function sbRemove(table, id){
     if(!supabaseClient || !id) return;
     try{
@@ -137,8 +137,8 @@ async function sbRemove(table, id){
     }catch(e){ console.warn('sbRemove catch:',e); }
 }
 
-// On-demand FULL pull — only for Excel export / Reports / picking stock-map
-// Pass maxAgeMs to skip a cached re-pull (e.g. 120000 = 2 min)
+// On-demand FULL pull — sirf Excel export / Reports / picking stock-map ke liye
+// maxAgeMs do to cached re-pull skip hota hai (e.g. 120000 = 2 min)
 async function sbPullFull(table, maxAgeMs){
     if(!supabaseClient) return;
     if(maxAgeMs && _sbFullPullTs[table] && (Date.now()-_sbFullPullTs[table])<maxAgeMs && MEMORY_DB[table] && MEMORY_DB[table].length) return;
@@ -174,7 +174,7 @@ var LIVE_TABLES = ['material_master','location_master','rack_master'];
 function isLiveTable(k){return LIVE_TABLES.indexOf(k)>-1;}
 var _livePushTs = {};
 
-// Row-level push queue — only NEW/changed rows are sent, never the whole table
+// Row-level push queue — sirf NAYI/changed rows jaate hain, poori table kabhi nahi
 var _pendingRows = {};
 var _rowPushTimers = {};
 function pushRows(key, rows) {
@@ -284,11 +284,11 @@ async function pullAll() {
     _isSyncing = true;
     console.log('🔄 Starting data sync from Supabase...');
     try {
-        // Remove the old device cache of master data — it is now served only from Supabase
+        // Master data ka purana device-cache hata do — ab sirf Supabase se active hoga
         LIVE_TABLES.forEach(function(t){ try { localStorage.removeItem('wms_' + t); } catch(e) {} });
 
         await Promise.all(ALL_TABLES.map(async function(t) {
-            // MASTER TABLES (60k+ rows) — full pull DISABLED. They now work through server-side search.
+            // MASTER TABLES (60k+ rows) — full pull BAND. Ye ab server-side search se chalte hain.
             if(t==='material_master'||t==='location_master'){
                 if(!MEMORY_DB[t]) MEMORY_DB[t]=[];
                 return;
@@ -345,8 +345,8 @@ function rtScheduleRender() {
 }
 function rtApplyChange(tableName, p) {
     if (!tableName) return;
-    if (!MEMORY_DB[tableName]) { pullLiveTable(tableName); return; }   // table not pulled yet — fetch it from the server
-    if (_localWriteTs[tableName] && (Date.now() - _localWriteTs[tableName]) < 5000) return;  // our own echo — ignore
+    if (!MEMORY_DB[tableName]) { pullLiveTable(tableName); return; }   // table abhi pull nahi hui — server se le aao
+    if (_localWriteTs[tableName] && (Date.now() - _localWriteTs[tableName]) < 5000) return;  // apna hi echo — ignore
     if (p.eventType === 'DELETE' && p.old && p.old.id) {
         MEMORY_DB[tableName] = MEMORY_DB[tableName].filter(function(item) { return item.id !== p.old.id; });
     } else if (p.new && p.new.data) {
@@ -371,7 +371,7 @@ function startRealtime() {
                 .subscribe();
         } catch(e) { console.warn('Realtime channel error [' + t + ']:', e); }
     });
-    // Broadcast refresh — after a bulk upload all clients pull the table again
+    // Broadcast refresh — bulk upload ke baad sab clients table dobara pull karte hain
     try {
         window._refreshChannel = supabaseClient.channel('wms-refresh', { config: { broadcast: { self: false } } })
             .on('broadcast', { event: 'refresh' }, function(msg) {
@@ -389,7 +389,7 @@ function broadcastRefresh(table) {
 }
 async function pullLiveTable(t) {
     if (!supabaseClient) return;
-    if(t==='material_master'||t==='location_master'){ rtScheduleRender(); return; } // server-driven screens — no full pull
+    if(t==='material_master'||t==='location_master'){ rtScheduleRender(); return; } // server-driven screens — full pull nahi
     try {
         var res = await supabaseClient.from(t).select('data');
         if (!res.error && res.data) {
@@ -414,7 +414,7 @@ var DB = {
     _k: function(k){return 'wms_'+k;},
     get: function(k){
         if(!MEMORY_DB[k]) {
-            if (isLiveTable(k)) MEMORY_DB[k] = [];   // master data is never loaded from the device — Supabase only
+            if (isLiveTable(k)) MEMORY_DB[k] = [];   // master data device se kabhi load nahi hota — sirf Supabase
             else { try { MEMORY_DB[k] = JSON.parse(localStorage.getItem(this._k(k))||'[]'); } catch(e) { MEMORY_DB[k] = []; } }
         }
         return MEMORY_DB[k];
@@ -431,7 +431,7 @@ var DB = {
         MEMORY_DB[k] = v;
         _localWriteTs[k] = Date.now();
         if (isLiveTable(k)) {
-            // LIVE table: no localStorage, no full-array push — push only the changed rows (diff)
+            // LIVE table: no localStorage, no full-array push — sirf changed rows diff karke push
             var toPush = [];
             if (v.length <= 3000) {
                 var oldMap = {};
@@ -781,11 +781,11 @@ function seedData(){
 }
 
 // ==================== SINGLE DEVICE LOGIN (SAP-style) ====================
-// One user ID can be active on only one device at a time.
-// Server side: wms_device_sessions table + RPC (device_lock.sql must be run).
+// Ek user ID ek time par sirf ek device me chalegi.
+// Server side: wms_device_sessions table + RPC (device_lock.sql run karna zaroori hai).
 var DEVLOCK = {
     HEARTBEAT_MS: 30000,      // har 30 sec me "main zinda hu" signal
-    ALLOW_TAKEOVER: false,    // true = SAP-like option: "log out the old device and log in here?"
+    ALLOW_TAKEOVER: false,    // true = SAP jaisa option: "purane device ko logout karke yaha login karein?"
     _timer: null
 };
 function devId() {
@@ -812,8 +812,8 @@ async function devHeartbeat() {
     if (!APP.currentUser) return;
     try {
         var r = await supabaseClient.rpc('wms_heartbeat', { p_username: APP.currentUser.username, p_token: devToken() });
-        if (r.error) return;                       // network issue — do not log out
-        if (r.data === false) {                    // token mismatch — another device has logged in
+        if (r.error) return;                       // network issue — logout mat karo
+        if (r.data === false) {                    // token match nahi — kisi aur device ne login le liya
             devStop();
             showToast('Your ID has been logged in on another device. Logging out...', 'warning');
             setTimeout(function () { doLogout(); }, 1500);
@@ -832,7 +832,7 @@ async function devRelease(username) {
     localStorage.removeItem('wms_dev_token');
 }
 document.addEventListener('visibilitychange', function () {
-    if (document.visibilityState === 'visible') devHeartbeat();   // on mobile, check immediately when the tab becomes active again
+    if (document.visibilityState === 'visible') devHeartbeat();   // mobile me tab wapas aate hi check
 });
 
 // ==================== AUTH ====================
@@ -846,7 +846,7 @@ async function doLogin(uname, pass) {
     if (r.error) { showToast('Invalid username or password', 'error'); return false; }
 
     showLoader();
-    await pullAll();                       // now authenticated, data will load
+    await pullAll();                       // ab authenticated hai, data aayega
     hideLoader();
 
     var user = DB.get('users').filter(function (u) { return u.username === uname; })[0];
@@ -878,7 +878,7 @@ async function doLogin(uname, pass) {
     localStorage.setItem('wms_session', JSON.stringify({ userId: user.id, loginTime: new Date().toISOString() }));
     DB.add('user_sessions', { userId: user.id, userName: user.name, loginTime: new Date().toISOString(), logoutTime: null, status: 'Active' });
     logAction('Auth', 'LOGIN', 'User ' + user.name + ' logged in');
-    startRealtime();                       // Step 3.5 function
+    startRealtime();                       // Step 3.5 wala function
     return true;
 }
 async function doLogout() {
@@ -896,7 +896,7 @@ async function doLogout() {
         
         await flushAllPendingPushes(); // Data save before logout
         devStop();
-        await devRelease(APP.currentUser.username);   // release the device lock
+        await devRelease(APP.currentUser.username);   // device lock free karo
         await supabaseClient.auth.signOut({ scope: 'local' });
         await new Promise(function(r) { setTimeout(r, 500); });
         
@@ -1667,7 +1667,7 @@ function startUnload(vehId,existingData){
     },250);
 }
 
-// --- Lookup: search in the invoice; if not found, auto-fill from Material Master (Supabase) ---
+// --- Lookup: invoice me dhundo, nahi mila to Material Master (Supabase) se auto-fill ---
 var _ulLookupSeq=0;
 function ulFillAuto(mat,desc,uom,rem,state){
     var matEl=document.getElementById('ulAutoMat'),descEl=document.getElementById('ulAutoDesc'),uomEl=document.getElementById('ulAutoUom'),remEl=document.getElementById('ulAutoRem'),boxEl=document.getElementById('ulAutoBox');
@@ -1691,14 +1691,14 @@ async function doLookupScan(type){
     if(!val){showToast('Enter an EAN or Material Code','error');return;}
     var seq=++_ulLookupSeq;
 
-    // 1) Search in the invoice materials
+    // 1) Invoice wale materials me dhundo
     var matchIdx=ud.eanIndex[val];
     if(matchIdx===undefined) matchIdx=ud.matIndex[val];
     if(matchIdx!==undefined&&ud.materialEntries[matchIdx]){
         var entry=ud.materialEntries[matchIdx];
         ud.currentMatchIdx=matchIdx;
         ulFillAuto(entry.material,entry.description,entry.uom,entry.baseRemaining-entry.sessionScanned,'match');
-        // also auto-fill the other field (EAN scan -> material code, material -> EAN)
+        // dusra field bhi auto bharo (EAN scan -> material code, material -> EAN)
         var eanEl=document.getElementById('ulScanEan'),matIn=document.getElementById('ulScanMat');
         if(eanEl&&!eanEl.value&&entry.ean)eanEl.value=entry.ean;
         if(matIn&&!matIn.value)matIn.value=entry.material||'';
@@ -1711,10 +1711,10 @@ async function doLookupScan(type){
     clearAutoFill();
     var mm=null;
     try{ var f=await sbFindMaterialAny(val); mm=f?f.row:null; }catch(e){ mm=null; }
-    if(seq!==_ulLookupSeq)return;           // a new scan came in meanwhile — ignore the old result
-    if(!window._unloadData)return;          // modal was closed
+    if(seq!==_ulLookupSeq)return;           // beech me naya scan aa gaya — purana result ignore
+    if(!window._unloadData)return;          // modal band ho gaya
     if(mm){
-        window._unloadData.currentMatchIdx=null;   // not in the invoice => it is recorded as No Match (excess/wrong item)
+        window._unloadData.currentMatchIdx=null;   // invoice me nahi => No Match (excess/wrong item) hi record hoga
         ulFillAuto(mm.material||val,mm.description||'',mm.uom||mm.baseUom||'PCS',0,'extra');
         var eanEl2=document.getElementById('ulScanEan'),matIn2=document.getElementById('ulScanMat');
         if(eanEl2&&!eanEl2.value&&mm.ean)eanEl2.value=String(mm.ean).toUpperCase();
@@ -2243,7 +2243,7 @@ async function doPutaway(grnId){
     var pendingMats=mats.filter(function(m){return (m.putawayedQty||0)<m.qty;});
     if(!pendingMats.length){showToast('All materials have been put away already!','success');return;}
 
-    // ★ EAN -> description map from a single server query (no per-row memory search)
+    // ★ EAN -> description map ek hi server query se (per-row memory search nahi)
     var descMap={};
     var _eans=pendingMats.map(function(m){return m.ean;}).filter(Boolean);
     if(_eans.length && supabaseClient){
@@ -2252,7 +2252,7 @@ async function doPutaway(grnId){
     }
 
     var rackList=DB.get('rack_master');
-    var rOpts='<option value="">-- Scan or Select --</option>';
+    var rOpts='<option value="">-- Scan ya Select --</option>';
     rackList.forEach(function(r){rOpts+='<option value="'+esc(r.rack)+'">'+esc(r.rack)+'</option>';});
 
     var totalRemaining=0;
@@ -2303,7 +2303,7 @@ async function doPutaway(grnId){
 
     showModal('Putaway — '+g.grnNo,h,'xl','<button class="btn btn-glass" onclick="closeModal()">Cancel</button>');
 
-    // Focus the rack field first
+    // Pehle rack field pe focus
     setTimeout(function(){var f=document.getElementById('paGRackScan_0');if(f)f.focus();},300);
 }
 
@@ -2389,7 +2389,7 @@ async function savePutawayFromGRN(grnId){
 
     if(stillPending.length>0){
         var remTotal=0;stillPending.forEach(function(p){remTotal+=p.totalQty-p.doneQty;});
-        showToast(count+' items saved! '+remTotal+' qty pending — you can complete it later','warning');
+        showToast(count+' items saved! '+remTotal+' qty pending — baad mein kar sakte ho','warning');
     } else {
         showToast(count+' items putaway complete — all done!','success');
     }
@@ -2850,7 +2850,7 @@ async function lookupPIVEan(){
         document.getElementById('pivMaterial').value=found.material||'';
         document.getElementById('pivDescription').value=found.description||found.material||'';
         document.getElementById('pivEanSaved').value=found.ean||val;
-        if(matchedBy!=='ean'&&found.ean)document.getElementById('pivEanScan').value=found.ean;   // if a material was scanned, show the actual EAN in the EAN field
+        if(matchedBy!=='ean'&&found.ean)document.getElementById('pivEanScan').value=found.ean;   // material scan kiya to EAN field me asli EAN aa jaye
         msgDiv.innerHTML='<div style="background:var(--accent-dim);padding:10px;border-radius:var(--radius-sm);margin-bottom:8px;font-size:12px;display:flex;align-items:center;gap:8px"><i class="bx bx-check-circle" style="color:var(--accent);font-size:18px"></i><span style="color:var(--accent)">Material found in master — <strong>'+esc(found.material)+'</strong>'+(matchedBy&&matchedBy!=='ean'?' <span style="opacity:.8">(matched by '+(matchedBy==='material'?'Material code':'Description')+')</span>':'')+'. You can edit it.</span></div>';
         document.getElementById('pivRackScan').focus();
     } else {
@@ -3032,8 +3032,8 @@ function showLocBulkUpload(){
     var cols=['Date','Rack','Material','EAN','Qty','Action','Packing','Box'];
     cols.forEach(function(c){h+='<span style="background:var(--accent-dim);color:var(--accent);padding:3px 8px;border-radius:4px;font-size:10px;font-weight:600;border:1px solid var(--accent)">'+c+'</span>';});
     h+='</div>';
-    h+='<div><strong>Action values:</strong> PUTAWAY, PIV, EAN-SCAN (or any custom value)</div>';
-    h+='<div><strong>Date format:</strong> YYYY-MM-DD or DD/MM/YYYY</div>';
+    h+='<div><strong>Action values:</strong> PUTAWAY, PIV, EAN-SCAN (ya jo bhi custom ho)</div>';
+    h+='<div><strong>Date format:</strong> YYYY-MM-DD ya DD/MM/YYYY</div>';
     h+='</div>';
     h+='<div id="locBulkProgress" style="display:none;margin-top:12px"></div>';
     showModal('Bulk Upload — Location Master',h,'lg',
@@ -3191,7 +3191,7 @@ function processLocBulkUpload(){
 
 // --- Location Report ---
 async function showLocReport(){
-    await sbPullFull('location_master');   // full data from the server on demand
+    await sbPullFull('location_master');   // server se poora data on-demand
     var locs=DB.get('location_master');
 
     // Action wise summary
@@ -3469,7 +3469,7 @@ function processBulkBinUpload(){
 
     var progDiv=document.getElementById('binBulkProgress');
     progDiv.style.display='';
-    progDiv.innerHTML='<div style="background:var(--bg-secondary);padding:16px;border-radius:var(--radius-sm);text-align:center;color:var(--accent)"><i class="bx bx-loader-circle bx-spin" style="font-size:24px;display:block;margin-bottom:8px"></i>Processing... 15000+ rows are supported</div>';
+    progDiv.innerHTML='<div style="background:var(--bg-secondary);padding:16px;border-radius:var(--radius-sm);text-align:center;color:var(--accent)"><i class="bx bx-loader-circle bx-spin" style="font-size:24px;display:block;margin-bottom:8px"></i>Processing... 15000+ rows bhi handle honge</div>';
 
     setTimeout(function(){
         try{
@@ -3585,7 +3585,7 @@ function showBulkUploadMaterial(){
     h+='<li>Upload a CSV file (max 100,000 rows supported)</li>';
     h+='<li>Required columns: <code style="background:var(--bg-primary);padding:2px 6px;border-radius:4px">Material, EAN</code></li>';
     h+='<li>Optional columns: <code style="background:var(--bg-primary);padding:2px 6px;border-radius:4px">Description, Division, Brand</code></li>';
-    h+='<li>Duplicate EANs will be skipped</li>';
+    h+='<li>Duplicate EAN skip ho jayenge</li>';
     h+='<li>First row must be header row</li>';
     h+='</ul></div>';
     
@@ -3798,7 +3798,7 @@ function executeBulkUpload(){
     progressDiv.style.display='block';
 
     var total=rows.length;
-    var CHUNK=2000;                    // memory insert batch — 1 write per 2000 rows (earlier it was per-row = hang)
+    var CHUNK=2000;                    // memory insert batch — 1 write per 2000 rows (pehle per-row tha = hang)
     var inserted=0;
     var startTime=Date.now();
 
@@ -3835,10 +3835,10 @@ function executeBulkUpload(){
     }
 
     async function finish(){
-        // Commit all rows to the server (row-level, chunked, 3 parallel)
+        // Saari rows server par commit (row-level, chunked, 3 parallel)
         if(_rowPushTimers['material_master'])clearTimeout(_rowPushTimers['material_master']);
         await flushPushRows('material_master');
-        broadcastRefresh('material_master');                     // signal all users — pull the table again
+        broadcastRefresh('material_master');                     // sab users ko signal — table dobara pull karo
         var elapsed=((Date.now()-startTime)/1000).toFixed(1);
         var ph='<div style="padding:20px;background:#2ed57311;border:1px solid #2ed573;border-radius:12px;text-align:center">';
         ph+='<i class="bx bx-check-circle" style="font-size:48px;color:#2ed573;display:block;margin-bottom:8px"></i>';
@@ -4015,7 +4015,7 @@ function allocateMaterial(ean,need,excludeObdId,anchor,ctx){
     }
     return{picks:picks,locked:take,short:need-take,anchor:picks[picks.length-1].loc.rack};
 }
-// merges duplicate locks of the same OBD + material + rack into one row
+// same OBD + material + rack ke duplicate locks ko ek row me merge karta hai
 function mergeDuplicateLocks(obdId){
     var seen={},merged=0;
     DB.filter('location_locks',function(l){return l.obdId===obdId&&l.status==='Locked';}).forEach(function(l){
@@ -4084,7 +4084,7 @@ function stealLocksForUrgent(obd){
             need-=take;total+=take;affected[d.obdNo]=(affected[d.obdNo]||0)+take;
         });
     });
-    for(var no in affected)addNotif('Urgent '+obd.obdNo+' took over '+affected[no]+' qty of locked stock from '+no+'. '+no+' — lock re-check required.','warning');
+    for(var no in affected)addNotif('Urgent '+obd.obdNo+' ne '+no+' se '+affected[no]+' qty lock le liya. '+no+' — lock re-check required.','warning');
     return total;
 }
 
@@ -4293,7 +4293,7 @@ async function topUpAll(){
 }
 async function makeUrgentAssign(assignId){
     var a=DB.find('picking_assignments',assignId);if(!a)return;
-    if(!confirm('Make this OBD URGENT? If needed, it will take locks from other (non-urgent, unpicked) OBDs.'))return;
+    if(!confirm('Is OBD ko URGENT banayein? Zarurat padi to dusri (non-urgent, unpicked) OBD ke locks isko mil jayenge.'))return;
     DB.update('picking_assignments',assignId,{priority:'Urgent',seq:0});
     DB.update('obd_data',a.obdId,{priority:'Urgent'});
     DB.filter('location_locks',function(l){return l.obdId===a.obdId&&isActiveLock(l);}).forEach(function(l){DB.update('location_locks',l.id,{priority:'Urgent'});});
@@ -4445,7 +4445,7 @@ function openNotFound(lockId){
     var h='<div class="pk-info"><b>'+esc(l.material)+'</b> · EAN '+esc(l.ean)+'<br>Rack: <b>'+esc(l.rack)+'</b> · System required quantity: <b>'+rem+'</b></div>';
     h+='<div class="form-group"><label>Physically found quantity? (0 if nothing was found)</label><input type="number" id="nfFound" class="form-input" value="0" min="0" max="'+rem+'"></div>';
     h+='<div class="form-group"><label>Reason <span class="req">*</span></label><select id="nfReason" class="form-input"><option>Material not found at the location</option><option>Quantity less than in system</option><option>Material is damaged</option><option>Found stored at another location</option><option>Other</option></select></div>';
-    h+='<div class="form-group"><label>Note</label><textarea id="nfNote" class="form-input" placeholder="Any other details..."></textarea></div>';
+    h+='<div class="form-group"><label>Note</label><textarea id="nfNote" class="form-input" placeholder="Kuch aur detail..."></textarea></div>';
     h+='<div class="form-group"><label>What should be sent to the Admin?</label><label class="pk-radio"><input type="radio" name="nfAct" value="newloc" checked> Request new location + send report</label><label class="pk-radio"><input type="radio" name="nfAct" value="report"> Send report only (stock exists in system but was not found)</label></div>';
     showModal('Material Not Found',h,'sm','<button class="btn btn-glass" onclick="openPickingOBD(\''+l.obdId+'\')"><i class="bx bx-arrow-back"></i> Back</button><button class="btn btn-warning" onclick="submitNotFound(\''+lockId+'\')"><i class="bx bx-send"></i> Send to Admin</button>');
 }
@@ -4454,7 +4454,7 @@ async function submitNotFound(lockId){
     var l=DB.find('location_locks',lockId);if(!l||l.status!=='Locked'){showToast('Lock not found','error');return;}
     var rem=l.lockedQty-l.pickedQty;
     var found=parseInt(document.getElementById('nfFound').value)||0;
-    if(found<0||found>rem){showToast('Found qty must be between 0 and '+rem,'error');return;}
+    if(found<0||found>rem){showToast('Found qty 0 se '+rem+' ke beech ho','error');return;}
     var reason=document.getElementById('nfReason').value,note=document.getElementById('nfNote').value.trim();
     if(reason==='Other'&&!note){showToast('Please enter a note describing the issue','error');return;}
     var actEl=document.querySelector('input[name="nfAct"]:checked'),act=actEl?actEl.value:'newloc';
@@ -4791,7 +4791,7 @@ function putawayMats(invoiceId){
 async function addPutawayStock(rec){
     var R=rkey(rec.rack),d=rec.date||today();
     var entry={action:'PUTAWAY',user:rec.user,userId:APP.currentUser?APP.currentUser.id:'',dateTime:rec.dateTime||nowISO(),qty:rec.quantity,grnNo:rec.grnNo||'',invoiceNo:rec.invoiceNo||'',packing:rec.packing||'',box:rec.box||''};
-    // ★ Find the existing PUTAWAY row with the same rack+ean+date on the server (for merging)
+    // ★ Same rack+ean+date wali existing PUTAWAY row server se dhundo (merge ke liye)
     var res=await sbSearch('location_master',{eq:{ean:rec.ean,rack:R,action:'PUTAWAY',date:d},limit:1});
     var ex=res.rows.filter(function(l){return (parseInt(l.quantity)||0)>0;})[0];
     if(!ex){
@@ -4833,7 +4833,7 @@ async function buildEanReport(ean,obdNo){
 }
 async function deductStock(rack,ean,qty){
     var R=rkey(rack),rem=qty,src=[];
-    // ★ Fetch the rows of that rack+ean from the server (no need to load everything into memory)
+    // ★ Server se us rack+ean ki rows fetch karo (memory full load ki zaroorat nahi)
     var res=await sbSearch('location_master',{eq:{ean:ean,rack:rack},limit:100});
     var rows=res.rows.filter(function(l){return (parseInt(l.quantity)||0)>0;})
       .sort(function(a,b){return String(a.dateTime||a.date).localeCompare(String(b.dateTime||b.date));});
@@ -4914,7 +4914,7 @@ function showUnloadReport(unloadNo){
     var r=d.rec,v=d.v;
     var h='<div style="text-align:center;margin-bottom:12px"><div style="font-size:20px;font-weight:900;color:var(--accent);font-family:var(--font-display);letter-spacing:2px">'+esc(r.unloadNo)+'</div><div style="font-size:11px;color:var(--text-muted)">Unloading Report</div></div>';
     h+='<div class="pk-info">Vehicle: <b>'+esc(r.vehicleNo)+'</b> · LR: <b>'+esc(r.lrNo||'-')+'</b>'+(v.city?' · City: <b>'+esc(v.city)+'</b>':'')+' · Transporter: '+esc(v.transportName||'-')+'<br>Invoices: <b>'+esc((r.invoiceNos||[]).join(', ')||'-')+'</b><br>Unloaded by: <b>'+esc(r.unloadedByName||'-')+'</b>'+(r.startedAt?' · Start: '+fmtDT(r.startedAt):'')+' · End: '+fmtDT(r.unloadedAt)+(d.mins?' · Time: <b>'+d.mins+' min</b>':'')+(r.wasPartial?' · Partial sessions: '+r.partialSessions:'')+'</div>';
-    h+='<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px"><span class="badge badge-info">Invoice Qty '+d.tInv+'</span><span class="badge badge-accent">Received '+d.tRec+' (goes to putaway)</span><span class="badge '+(d.tShort?'badge-danger':'badge-success')+'">Short '+d.tShort+'</span><span class="badge '+(d.tEx?'badge-warning':'badge-success')+'">Excess '+d.tEx+'</span></div>';
+    h+='<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px"><span class="badge badge-info">Invoice Qty '+d.tInv+'</span><span class="badge badge-accent">Received '+d.tRec+' (putaway ko jayega)</span><span class="badge '+(d.tShort?'badge-danger':'badge-success')+'">Short '+d.tShort+'</span><span class="badge '+(d.tEx?'badge-warning':'badge-success')+'">Excess '+d.tEx+'</span></div>';
     h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>Material</th><th>EAN</th><th>Invoice Qty</th><th>Received</th><th>Short</th><th>Excess</th></tr></thead><tbody>';
     d.rows.forEach(function(x){
         h+='<tr class="'+((x.short||x.excess)?'scan-row-red':'scan-row-green')+'"><td>'+esc(x.material)+(x.notInInvoice?' <span class="badge badge-warning">Not in invoice</span>':'')+'</td><td style="font-family:var(--font-display);font-size:10px">'+esc(x.ean||'-')+'</td><td>'+x.invQty+'</td><td><b>'+x.received+'</b></td><td>'+(x.short?'<b style="color:var(--danger)">-'+x.short+'</b>':'0')+'</td><td>'+(x.excess?'<b style="color:var(--warning)">+'+x.excess+'</b>':'0')+'</td></tr>';
@@ -5177,7 +5177,7 @@ function inboundForEan(ean){
         var partScanned=part?sumBy((part.scanHistory||[]).filter(function(s){return s.matched&&String(s.ean||'').toUpperCase()===E;}),function(s){return s.qty;}):0;
         var st,pendingVeh=(v.status==='Unload Pending'||v.status==='Assigned'||v.status==='Partial Unload');
         if(v.status==='Partial Unload'||part)st='Unloading in progress'+(v.assignedToName?' — '+v.assignedToName:'')+' (scanned '+partScanned+')';
-        else if(v.status==='Unload Pending'||v.status==='Assigned')st=v.assignedToName?('Assigned to '+v.assignedToName+' — unloading not started'):'At gate — unassigned';
+        else if(v.status==='Unload Pending'||v.status==='Assigned')st=v.assignedToName?('Assigned to '+v.assignedToName+' — unloading not started'):'Gate me aayi — unassigned';
         else if(v.status==='Posting Pending Approval')st='Unloaded — posting pending (GR area)';
         else if(v.status==='Posted')st='Posted — GR area';
         else st=v.status;
@@ -5290,12 +5290,12 @@ function pickFromGR(matIdx,i){
     else DB.add('location_locks',{obdId:pd.obdId,obdNo:pd.obdNo,material:m.material,ean:m.ean,locationId:'GR',rack:rack,lockedQty:qty,pickedQty:qty,status:'Locked',source:'GR',invMatId:im.id,vehicleNo:r.vehicleNo,invoiceNo:r.invoiceNo,vehId:r.vehId,pickedBy:APP.currentUser.name,pickedAt:nowISO(),priority:(DB.find('obd_data',pd.obdId)||{}).priority||'Normal'});
     trimExcessLocks(pd.obdId,m.ean,m.qty);
     logAction('Cross-Dock','PICK',qty+' x '+m.material+' from '+r.vehicleNo+' to '+pd.obdNo);
-    showToast(qty+' picked from unloading','success');
+    showToast(qty+' unloading se pick hua','success');
     openPickingOBD(pd.obdId);
 }
 function removeGRPick(lockId){
     var pd=window._pickData;var l=DB.find('location_locks',lockId);if(!l||l.source!=='GR')return;
-    if(!confirm('Remove this unloading pick?'))return;
+    if(!confirm('Ye unloading pick hata dein?'))return;
     DB.update('location_locks',lockId,{status:'Released',releaseReason:'Removed by picker',releasedAt:nowISO()});
     if(pd)openPickingOBD(pd.obdId);
 }
@@ -6945,7 +6945,7 @@ var ALL_ACTIONS = [
     {id:'canAdmin',label:'Admin Panel Access',mod:'Users & Permissions'}
 ];
 // ==================== BUTTON PERMISSIONS (module-wise, every button) ====================
-// fns = onclick function names controlled by this permission (the auto-enforcer finds them)
+// fns = onclick function names jo is permission se control honge (auto-enforcer inhe dhundta hai)
 var BTN_PERMS=[
     // --- Goods Inward: Gate ---
     {mod:'Gate Entry',id:'inb.gate.create',label:'Create Gate Check-In',fns:['submitSecGate']},
@@ -7311,7 +7311,7 @@ async function updateUser(id){
     if(!nm||!rl){showToast('Name and Role required','error');return;}
     if(pw&&pw.length<4){showToast('Password min 4 characters','error');return;}
 
-    // If the password changed, change it in Supabase Auth too
+    // Password badla hai to Supabase Auth me bhi badlo
     if(pw&&pw.length>=4){
         var eu=DB.find('users',id);
         var rr=await supabaseClient.rpc('wms_upsert_auth_user',{p_username:eu.username,p_password:pw});
@@ -7332,7 +7332,7 @@ async function deleteUser(id){
     if(u.id===APP.currentUser.id){showToast('Cannot delete yourself!','error');return;}
     if(!confirm('Delete user "'+u.name+'" ('+u.username+')?'))return;
 
-    // Also remove from Supabase Auth
+    // Supabase Auth se bhi hatao
     await supabaseClient.rpc('wms_delete_auth_user',{p_username:u.username});
 
     DB.remove('users',id);
@@ -7376,7 +7376,7 @@ function clearAllData(){
 }
 function reseedData(){seedData();showToast('Sample data re-seeded!','success');renderSettings();}
 async function showExportAll(){
-    await sbPullFull('location_master');await sbPullFull('material_master');   // master tables will also be included in the backup
+    await sbPullFull('location_master');await sbPullFull('material_master');   // master tables bhi backup me aayengi
     var tables=['users','vehicles','invoices','invoice_materials','location_master','material_master','rack_master','obd_data','picking_done','loaded_vehicles','grn_records','short_reports','unloading_records','audit_log'];
     var wb=XLSX.utils.book_new();
     tables.forEach(function(t){
@@ -7676,7 +7676,7 @@ function deleteWorkLog(){
 
 // ==================== EXPORT UTILITY ====================
 async function exportTableExcel(tableKey,fileName){
-    await sbPullFull(tableKey);   // 60k rows on demand — fetched only at export time
+    await sbPullFull(tableKey);   // 60k rows on-demand — export ke waqt hi fetch hoti hain
     var data=DB.get(tableKey);if(!data.length){showToast('No data','error');return;}
     var rows=[];var keys=Object.keys(data[0]);
     rows.push(keys);
@@ -7941,7 +7941,7 @@ document.getElementById('loginForm').addEventListener('submit', async function(e
     var uname = (s.data.session.user.email || '').split('@')[0];
     var user = DB.get('users').filter(function (u) { return u.username === uname; })[0];
     if (!user) return;
-    // On refresh/reopen also check: is this device still the owner of this ID?
+    // Refresh/reopen par bhi check: kya ye device abhi bhi is ID ka owner hai?
     var hb = await supabaseClient.rpc('wms_heartbeat', { p_username: user.username, p_token: devToken() });
     if (hb.error || hb.data !== true) {
         await supabaseClient.auth.signOut({ scope: 'local' });
@@ -7961,20 +7961,20 @@ document.getElementById('loginForm').addEventListener('submit', async function(e
 })();
 
 // ==================== SCANNER MODULE ====================
-// Camera barcode/QR scanner — the camera starts automatically when the modal opens and scans instantly when a code appears.
-// All callers (Putaway, Stock Count/PIV, Picking, Loading, Unloading) use this:
-//   - APP.scanCallback set + #scannerModal display:flex   (old way)
-//   - openScanner(callback)                               (new way)
+// Camera barcode/QR scanner — modal khulte hi camera apne aap start, code dikhte hi turant scan.
+// Sab callers (Putaway, Stock Count/PIV, Picking, Loading, Unloading) isi ko use karte hain:
+//   - APP.scanCallback set + #scannerModal display:flex   (purana tarika)
+//   - openScanner(callback)                               (naya tarika)
 var SCANNER = { html5Qr: null, callback: null, btInput: null, isActive: false, starting: false, handled: false };
 
 function _scanFormats() {
     if (typeof Html5QrcodeSupportedFormats === 'undefined') return undefined;
     var F = Html5QrcodeSupportedFormats;
-    // Only warehouse formats — the decoder has less work, so it detects faster
+    // Sirf warehouse ke formats — decoder kam kaam karta hai, isliye jaldi pakadta hai
     return [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.CODE_128, F.CODE_39, F.CODE_93, F.ITF, F.QR_CODE, F.DATA_MATRIX]
         .filter(function (x) { return x !== undefined; });
 }
-// A barcode is wide — so the scan area is a wide rectangle (not a square)
+// Barcode chauda hota hai — isliye scan area wide rectangle (square nahi)
 function _scanBox(vw, vh) {
     var w = Math.floor(Math.min(vw * 0.92, 440));
     var h = Math.floor(Math.min(vh * 0.6, w * 0.55));
@@ -8020,7 +8020,7 @@ function closeScannerModal() {
     if (modal) modal.style.display = 'none';
 }
 
-// Scan found — runs only once: camera off, modal closed, then the value goes into the field
+// Scan mil gaya — ek hi baar chalega, camera band, modal band, phir field me value
 function scannerDeliver(code) {
     if (SCANNER.handled) return;
     code = String(code == null ? '' : code).trim();
@@ -8108,7 +8108,7 @@ function focusForBluetoothScanner() {
     });
 }
 
-// Whenever a modal opens (from any screen) the camera starts immediately; when it closes the camera turns off
+// Modal jab bhi khule (kisi bhi screen se) — camera turant start; band ho to camera off
 (function () {
     var m = document.getElementById('scannerModal');
     if (!m || !window.MutationObserver) return;
@@ -8964,10 +8964,10 @@ opWrap('renderStartLoading', function () {
 
 // =====================================================================
 //  AUTO LOCK FOR SHORT OBDs
-//  When an OBD is already assigned and stock was short, as soon as stock arrives (PIV / Putaway / bulk upload),
-//  the short material is auto-locked following the OBD sequence (Urgent first, then assign order)
-//  at the location NEAREST to that OBD's already-assigned locations
-//  (and is added to picking automatically).
+//  OBD assign ho chuki hai aur stock kam tha -> jab PIV / Putaway / bulk upload se
+//  stock aaye, to OBD sequence (Urgent pehle, phir assign order) me short material
+//  ke liye us OBD ke already-assigned locations ke SABSE NAZDEEK wali location
+//  auto-lock ho jati hai (picking me apne aap add).
 // =====================================================================
 var _autoLockBusy=false, _autoLockTimer=null;
 
@@ -9008,11 +9008,11 @@ async function autoLockShortOBDs(opts){
     var totalLocked=0;
     try{
         var obds=autoLockActiveOBDs();
-        // quick local check — if there is no shortage, no server pull either
+        // quick local check — koi shortage nahi to server pull bhi nahi
         var withShort=obds.filter(function(e){return autoLockShortages(e).length>0;});
         if(!withShort.length)return 0;
 
-        // fresh stock (silent — no loader flash)
+        // fresh stock (silent — loader flash nahi)
         var _sl=showLoader;showLoader=function(){};
         try{ _sbFullPullTs['location_master']=0; _stockCtxTs=0; await sbPullFull('location_master'); }
         finally{ showLoader=_sl; hideLoader(); }
@@ -9025,7 +9025,7 @@ async function autoLockShortOBDs(opts){
             for(var si=0;si<shorts.length;si++){
                 var m=shorts[si].m,need=shorts[si].need;
                 if(!ctx.lm[m.ean])continue;
-                // anchor: the available stock nearest to this OBD's already-assigned locations
+                // anchor: is OBD ke already-assigned locations me se jo available stock ke sabse nazdeek ho
                 var anchors=DB.filter('location_locks',function(l){return l.obdId===e.obdId&&isActiveLock(l)&&l.source!=='GR'&&l.locationId!=='GR'&&l.rack;}).map(function(l){return l.rack;});
                 var anchor=null,av=getLocAvailability(m.ean,null,ctx).filter(function(a){return a.available>0;});
                 if(!av.length)continue;
@@ -9040,7 +9040,7 @@ async function autoLockShortOBDs(opts){
                     msgs.push(m.material+' — '+pk.qty+' @ '+pk.loc.rack);
                 });
                 totalLocked+=al.locked;
-                // if this material's pending NO_STOCK request is now fully covered, close it
+                // is material ki pending NO_STOCK request ab poori cover ho gayi to close
                 if(al.short<=0){
                     DB.filter('location_requests',function(r){return r.obdId===e.obdId&&r.ean===m.ean&&r.status==='Pending'&&r.source==='NO_STOCK';}).forEach(function(r){
                         DB.update('location_requests',r.id,{status:'Resolved',closedNote:'Auto-locked — stock received',resolvedBy:'System',resolvedAt:nowISO()});
@@ -9051,7 +9051,7 @@ async function autoLockShortOBDs(opts){
                 mergeDuplicateLocks(e.obdId);
                 addNotif('OBD '+obd.obdNo+': auto-locked after stock arrival — '+msgs.join(', '),'success',e.assignedTo);
                 logAction('Picking','AUTO_LOCK','OBD '+obd.obdNo+' — '+msgs.join('; '));
-                // if the picker has this OBD open and is not typing anything, refresh
+                // picker ki screen par ye hi OBD khuli ho aur wo kuch type na kar raha ho to refresh
                 try{
                     var ov=document.getElementById('modalOverlay'),ae=document.activeElement;
                     if(window._pickData&&window._pickData.obdId===e.obdId&&ov&&ov.classList.contains('open')&&!(ae&&/^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName))&&typeof openPickingOBD==='function'&&APP.currentUser.id===e.assignedTo)openPickingOBD(e.obdId);
@@ -9063,7 +9063,7 @@ async function autoLockShortOBDs(opts){
     finally{ _autoLockBusy=false; }
     return totalLocked;
 }
-// call after stock is added (debounced)
+// stock add hone ke baad call karo (debounced)
 function scheduleAutoLock(){
     if(_autoLockTimer)clearTimeout(_autoLockTimer);
     _autoLockTimer=setTimeout(function(){_autoLockTimer=null;autoLockShortOBDs();},3000);

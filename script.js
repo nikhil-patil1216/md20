@@ -5000,7 +5000,7 @@ function renderSecurityGate(){
     h+='<div class="form-group"><label>Driver Name <span class="req">*</span></label><input type="text" id="secDriver" class="form-input" placeholder="Driver full name"></div>';
     h+='<div class="form-group"><label>Driver Mobile <span class="req">*</span></label><input type="tel" id="secMobile" class="form-input" placeholder="10 digit" maxlength="10"></div>';
     h+='<div class="form-group"><label>Transporter Name <span class="req">*</span></label><input type="text" id="secTransport" class="form-input" placeholder="Transport company"></div>';
-    h+='<div class="form-group" id="photoGrp"><label>Invoice Photo (optional, AI)</label><input type="file" id="secInvPhoto" accept="image/*" capture="environment" multiple class="form-input"></div>';
+    h+='<div class="form-group" id="photoGrp"><label>Invoice Photo (optional, AI)</label>'+photoPickerHTML('secInvPhoto')+'</div>';
     h+='<div class="form-group"><label>Reporting Time</label><div class="form-input" style="background:var(--bg-secondary);color:var(--accent);font-weight:600">'+fmtDT(new Date())+' <small>(Auto)</small></div></div>';
     h+='<div class="form-group"><label>Entry By</label><div class="form-input" style="background:var(--bg-secondary);color:var(--accent2);font-weight:600"><i class="bx bx-user-check"></i> '+(APP.currentUser?esc(APP.currentUser.name)+' ('+esc(APP.currentUser.role)+')':'Unknown')+'</div></div>';
     h+='</div>';
@@ -5039,7 +5039,7 @@ function submitSecGate(){
     addNotif('New '+type+' Vehicle '+vno+(city?' ('+city+')':'')+' reported at gate by '+(APP.currentUser?APP.currentUser.name:'Unknown'),'warning');
     logAction('Security Gate','ENTRY',type+' Vehicle '+vno+' '+gp+(city?' City:'+city:'')+' LR:'+(lr||'N/A'));
     showToast('Vehicle submitted! Gate Pass '+gp,'success');
-    ['secVNo','secLR','secCity','secDriver','secMobile','secTransport','secInvPhoto'].forEach(function(id){var e=document.getElementById(id);if(e)e.value='';});
+    ['secVNo','secLR','secCity','secDriver','secMobile','secTransport','secInvPhoto'].forEach(function(id){var e=document.getElementById(id);if(e)e.value='';});try{photoPickRender('secInvPhoto');}catch(e){}
     if(type==='Unloading'&&pf&&newV&&newV.id)setTimeout(function(){showInvoicePhoto(newV.id,pf);},300);
 }
 
@@ -9190,6 +9190,47 @@ async function enrichItems(items){
     }
     return items;
 }
+// ---- Photo picker: Gallery se (multiple) + Camera se photo, dono ek saath ----
+// id = asli (hidden) input jisse baaki code .files padhta hai; Gal/Cam inputs ki files usme merge hoti hain
+function photoPickerHTML(id){
+    return '<input type="file" id="'+id+'" accept="image/*" multiple style="display:none">'+
+        '<input type="file" id="'+id+'Gal" accept="image/*" multiple style="display:none" onchange="photoPickMerge(\''+id+'\',this)">'+
+        '<input type="file" id="'+id+'Cam" accept="image/*" capture="environment" style="display:none" onchange="photoPickMerge(\''+id+'\',this)">'+
+        '<div style="display:flex;gap:8px;flex-wrap:wrap">'+
+        '<button type="button" class="btn btn-glass" onclick="document.getElementById(\''+id+'Gal\').click()"><i class="bx bx-image-add"></i> Gallery se chuno</button>'+
+        '<button type="button" class="btn btn-glass" onclick="document.getElementById(\''+id+'Cam\').click()"><i class="bx bx-camera"></i> Camera se photo lo</button>'+
+        '</div><div id="'+id+'List" style="margin-top:8px;font-size:12px;color:var(--text-muted)">Koi photo select nahi</div>';
+}
+function photoPickMerge(id,src){
+    var main=document.getElementById(id);if(!main||!src||!src.files||!src.files.length)return;
+    var dt=new DataTransfer(),seen={};
+    function add(f){var k=f.name+'|'+f.size+'|'+f.lastModified;if(seen[k])return;seen[k]=1;dt.items.add(f);}
+    Array.prototype.forEach.call(main.files||[],add);
+    Array.prototype.forEach.call(src.files,add);
+    main.files=dt.files;
+    src.value='';                       // taaki wahi photo dobara bhi chuni ja sake
+    photoPickRender(id);
+}
+function photoPickRemove(id,idx){
+    var main=document.getElementById(id);if(!main)return;
+    var dt=new DataTransfer();
+    Array.prototype.forEach.call(main.files||[],function(f,i){if(i!==idx)dt.items.add(f);});
+    main.files=dt.files;photoPickRender(id);
+}
+function photoPickClear(id){var m=document.getElementById(id);if(m)m.value='';photoPickRender(id);}
+function photoPickRender(id){
+    var main=document.getElementById(id),box=document.getElementById(id+'List');if(!main||!box)return;
+    var fs=Array.prototype.slice.call(main.files||[]);
+    if(!fs.length){box.style.color='var(--text-muted)';box.innerHTML='Koi photo select nahi';return;}
+    var h='<div style="font-weight:700;color:var(--text-primary);margin-bottom:4px">'+fs.length+' photo selected</div>';
+    fs.forEach(function(f,i){
+        h+='<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:3px 0;border-bottom:1px solid var(--border);color:var(--text-primary)">'+
+           '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(i+1)+'. '+esc(f.name)+' <small style="color:var(--text-muted)">('+Math.max(1,Math.round(f.size/1024))+' KB)</small></span>'+
+           '<a href="javascript:void(0)" onclick="photoPickRemove(\''+id+'\','+i+')" style="color:var(--danger);font-weight:700;padding:0 6px">&#10005;</a></div>';
+    });
+    h+='<div style="margin-top:6px"><a href="javascript:void(0)" onclick="photoPickClear(\''+id+'\')" style="color:var(--danger)">Sab hatao</a></div>';
+    box.style.color='';box.innerHTML=h;
+}
 function showInvoicePhoto(vehId,preFiles){
     var v=DB.find('vehicles',vehId);if(!v){showToast('Vehicle not found','error');return;}
     window._invVehId=vehId;window._invDrafts=[];
@@ -9197,7 +9238,7 @@ function showInvoicePhoto(vehId,preFiles){
     h+='<div class="form-group"><label>Vehicle No</label><div class="form-input" style="background:var(--bg-secondary);color:var(--accent);font-weight:700">'+esc(v.vehicleNo)+'</div></div>';
     h+='<div class="form-group"><label>LR No</label><div class="form-input" style="background:var(--bg-secondary);color:var(--accent);font-weight:700">'+esc(v.lrNo||'-')+'</div></div>';
     h+='</div>';
-    h+='<div class="form-group"><label>Invoice Photo(s) <span class="req">*</span></label><input type="file" id="invPhoto" accept="image/*" capture="environment" multiple class="form-input"></div>';
+    h+='<div class="form-group"><label>Invoice Photo(s) <span class="req">*</span></label>'+photoPickerHTML('invPhoto')+'</div>';
     h+='<div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">Ek photo = ek invoice. Vehicle No & LR No match hone par hi save hoga.</div>';
     h+='<div id="invPhotoOut"></div>';
     showModal('Invoice Photo — '+esc(v.vehicleNo),h,'lg',
@@ -9208,6 +9249,7 @@ function showInvoicePhoto(vehId,preFiles){
             var dt=new DataTransfer();
             Array.prototype.forEach.call(preFiles,function(f){dt.items.add(f);});
             document.getElementById('invPhoto').files=dt.files;
+            photoPickRender('invPhoto');
             runInvoicePhoto(vehId);
         }catch(e){}
     }

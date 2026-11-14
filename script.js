@@ -1304,6 +1304,7 @@ function renderPendingVehicle(){
         if(chkAct('canUploadInvoice'))h+='<button class="btn btn-glass btn-sm" onclick="showVehicleExcelUpload(\''+v.id+'\')"><i class="bx bx-spreadsheet"></i> Excel</button>';
         h+='<button class="btn btn-glass btn-sm" onclick="viewVehicleInvoices(\''+v.id+'\')"><i class="bx bx-show"></i> View</button>';
         if(chkAct('canAssignVehicle'))h+='<button class="btn btn-glass btn-sm" onclick="showAssignUnloading(\''+v.id+'\')"><i class="bx bx-user-plus"></i> Assign</button>';
+        if(chkAct('canUploadInvoice')||chkAct('inb.inv.photo'))h+='<button class="btn btn-glass btn-sm" title="Invoice Photo (AI)" onclick="showInvoicePhoto(\''+v.id+'\')"><i class="bx bx-camera"></i> Photo</button>';
         h+='<button class="btn btn-danger btn-sm" title="Delete" onclick="deleteVehicle(\''+v.id+'\')"><i class="bx bx-trash"></i></button>';
         h+='</div></td></tr>';
     });
@@ -4999,6 +5000,7 @@ function renderSecurityGate(){
     h+='<div class="form-group"><label>Driver Name <span class="req">*</span></label><input type="text" id="secDriver" class="form-input" placeholder="Driver full name"></div>';
     h+='<div class="form-group"><label>Driver Mobile <span class="req">*</span></label><input type="tel" id="secMobile" class="form-input" placeholder="10 digit" maxlength="10"></div>';
     h+='<div class="form-group"><label>Transporter Name <span class="req">*</span></label><input type="text" id="secTransport" class="form-input" placeholder="Transport company"></div>';
+    h+='<div class="form-group" id="photoGrp"><label>Invoice Photo (optional, AI)</label><input type="file" id="secInvPhoto" accept="image/*" capture="environment" multiple class="form-input"></div>';
     h+='<div class="form-group"><label>Reporting Time</label><div class="form-input" style="background:var(--bg-secondary);color:var(--accent);font-weight:600">'+fmtDT(new Date())+' <small>(Auto)</small></div></div>';
     h+='<div class="form-group"><label>Entry By</label><div class="form-input" style="background:var(--bg-secondary);color:var(--accent2);font-weight:600"><i class="bx bx-user-check"></i> '+(APP.currentUser?esc(APP.currentUser.name)+' ('+esc(APP.currentUser.role)+')':'Unknown')+'</div></div>';
     h+='</div>';
@@ -5009,7 +5011,7 @@ function renderSecurityGate(){
     setHtml(h);
 }
 document.addEventListener('change',function(e){
-    if(e.target.name==='vehType'){var cg=document.getElementById('cityGrp');if(cg)cg.style.display=e.target.value==='Loading'?'':'none';}
+    if(e.target.name==='vehType'){var cg=document.getElementById('cityGrp');if(cg)cg.style.display=e.target.value==='Loading'?'':'none';var pg=document.getElementById('photoGrp');if(pg)pg.style.display=e.target.value==='Unloading'?'':'none';}
 });
 function submitSecGate(){
     var vt=document.querySelector('input[name="vehType"]:checked');
@@ -5020,6 +5022,8 @@ function submitSecGate(){
     var mb=document.getElementById('secMobile').value.trim();
     var tp=document.getElementById('secTransport').value.trim();
     var type=vt?vt.value:'Unloading';
+    var pf=(document.getElementById('secInvPhoto')||{}).files;
+    pf=(pf&&pf.length)?Array.prototype.slice.call(pf):null;
     if(!vno||!dr||!mb||!tp){showToast('All fields are required','error');return;}
     if(!/^\d{10}$/.test(mb)){showToast('Invalid 10-digit mobile','error');return;}
     if(type==='Unloading'&&!lr){showToast('LR Number required for unloading','error');return;}
@@ -5031,11 +5035,12 @@ function submitSecGate(){
         if(act.length){showToast('This vehicle is already IN at the gate ('+act[0].gatePassNo+')','error');return;}
     }
     var gp=genGatePassNo();
-    DB.add('vehicles',{vehicleNo:vno,lrNo:lr||'',city:city,gatePassNo:gp,driverName:dr,driverMobile:mb,transportName:tp,vehicleType:type,status:type==='Unloading'?'Unload Pending':'Loading Pending',reportedAt:nowISO(),entryBy:APP.currentUser?APP.currentUser.id:'',entryByName:APP.currentUser?APP.currentUser.name:''});
+    var newV=DB.add('vehicles',{vehicleNo:vno,lrNo:lr||'',city:city,gatePassNo:gp,driverName:dr,driverMobile:mb,transportName:tp,vehicleType:type,status:type==='Unloading'?'Unload Pending':'Loading Pending',reportedAt:nowISO(),entryBy:APP.currentUser?APP.currentUser.id:'',entryByName:APP.currentUser?APP.currentUser.name:''});
     addNotif('New '+type+' Vehicle '+vno+(city?' ('+city+')':'')+' reported at gate by '+(APP.currentUser?APP.currentUser.name:'Unknown'),'warning');
     logAction('Security Gate','ENTRY',type+' Vehicle '+vno+' '+gp+(city?' City:'+city:'')+' LR:'+(lr||'N/A'));
     showToast('Vehicle submitted! Gate Pass '+gp,'success');
-    ['secVNo','secLR','secCity','secDriver','secMobile','secTransport'].forEach(function(id){var e=document.getElementById(id);if(e)e.value='';});
+    ['secVNo','secLR','secCity','secDriver','secMobile','secTransport','secInvPhoto'].forEach(function(id){var e=document.getElementById(id);if(e)e.value='';});
+    if(type==='Unloading'&&pf&&newV&&newV.id)setTimeout(function(){showInvoicePhoto(newV.id,pf);},300);
 }
 
 // ---------- Loading Vehicle Register ----------
@@ -6936,6 +6941,7 @@ var BTN_PERMS=[
     {mod:'Gate Entry',id:'inb.gate.create',label:'Create Gate Check-In',fns:['submitSecGate']},
     {mod:'Gate Entry',id:'inb.gate.reopen',label:'Re-open Vehicle',fns:['reopenGateVehicle']},
     // --- Goods Inward: Invoices ---
+    {mod:'Inward Invoices',id:'inb.inv.photo',label:'Invoice Photo Upload (AI)',fns:['showInvoicePhoto','runInvoicePhoto','saveInvDraft']},
     {mod:'Inward Invoices',id:'inb.inv.upload',label:'Upload Invoice / Vehicle Excel',fns:['showUploadInvoice','saveSingleInvoice','addInvMatRow','showVehicleExcelUpload','processVehicleExcel']},
     // --- Goods Inward: Unloading & GR ---
     {mod:'Unloading',id:'inb.unload.assign',label:'Assign / Unassign Vehicle',fns:['showAssignUnloading','doAssignUnloading','unassignVehicle']},
@@ -9054,3 +9060,161 @@ function scheduleAutoLock(){
 }
 // background check — har 2 minute (sirf Admin/Manager ke device par, taaki multiple devices ek saath lock na karein)
 setInterval(function(){ if(APP.currentUser&&isMgrUser())autoLockShortOBDs({silent:false}); },120000);
+
+// ==================== INVOICE PHOTO (AI OCR) ====================
+// Photo -> Supabase Edge Function 'invoice-ocr' (Gemini) -> verify Vehicle/LR -> Master se material fill -> save.
+function normId(s){return String(s||'').toUpperCase().replace(/[^A-Z0-9]/g,'');}
+function imgToBase64(file,maxW){
+    return new Promise(function(resolve,reject){
+        var rd=new FileReader();
+        rd.onerror=function(){reject(new Error('Image read failed'));};
+        rd.onload=function(){
+            var img=new Image();
+            img.onerror=function(){reject(new Error('Invalid image'));};
+            img.onload=function(){
+                var w=img.width,h=img.height;
+                if(w>maxW){h=Math.round(h*maxW/w);w=maxW;}
+                var c=document.createElement('canvas');c.width=w;c.height=h;
+                c.getContext('2d').drawImage(img,0,0,w,h);
+                resolve(c.toDataURL('image/jpeg',0.85).split(',')[1]);
+            };
+            img.src=rd.result;
+        };
+        rd.readAsDataURL(file);
+    });
+}
+async function invoiceOCR(file){
+    if(!supabaseClient)throw new Error('Supabase not connected');
+    var b64=await imgToBase64(file,1600);
+    var r=await supabaseClient.functions.invoke('invoice-ocr',{body:{image:b64,mime:'image/jpeg'}});
+    if(r.error)throw r.error;
+    return r.data||{};
+}
+function verifyInvoiceVsVehicle(ocr,veh){
+    var errs=[],warn=[];
+    var ov=normId(ocr.vehicle_no),ol=normId(ocr.lr_no);
+    var vv=normId(veh.vehicleNo),vl=normId(veh.lrNo);
+    if(!ov)warn.push('Invoice me Vehicle No nahi mila');
+    else if(ov!==vv)errs.push('Vehicle No mismatch — Invoice: '+ocr.vehicle_no+' | Entry: '+veh.vehicleNo);
+    if(!ol)warn.push('Invoice me LR No nahi mila');
+    else if(ol!==vl)errs.push('LR No mismatch — Invoice: '+ocr.lr_no+' | Entry: '+(veh.lrNo||'-'));
+    return{ok:errs.length===0,errs:errs,warn:warn};
+}
+async function enrichItems(items){
+    for(var i=0;i<items.length;i++){
+        var it=items[i];it.inMaster=false;
+        var key=String(it.ean||'').trim()||String(it.material||'').trim();
+        if(!key)continue;
+        try{
+            var f=await sbFindMaterialAny(key);
+            if(f&&f.row){
+                it.inMaster=true;
+                if(!it.material)it.material=f.row.material||'';
+                if(!it.description)it.description=f.row.description||'';
+                if(!it.ean)it.ean=f.row.ean||'';
+            }
+        }catch(e){}
+    }
+    return items;
+}
+function showInvoicePhoto(vehId,preFiles){
+    var v=DB.find('vehicles',vehId);if(!v){showToast('Vehicle not found','error');return;}
+    window._invVehId=vehId;window._invDrafts=[];
+    var h='<div class="form-row">';
+    h+='<div class="form-group"><label>Vehicle No</label><div class="form-input" style="background:var(--bg-secondary);color:var(--accent);font-weight:700">'+esc(v.vehicleNo)+'</div></div>';
+    h+='<div class="form-group"><label>LR No</label><div class="form-input" style="background:var(--bg-secondary);color:var(--accent);font-weight:700">'+esc(v.lrNo||'-')+'</div></div>';
+    h+='</div>';
+    h+='<div class="form-group"><label>Invoice Photo(s) <span class="req">*</span></label><input type="file" id="invPhoto" accept="image/*" capture="environment" multiple class="form-input"></div>';
+    h+='<div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">Ek photo = ek invoice. Vehicle No & LR No match hone par hi save hoga.</div>';
+    h+='<div id="invPhotoOut"></div>';
+    showModal('Invoice Photo — '+esc(v.vehicleNo),h,'lg',
+        '<button class="btn btn-glass" onclick="closeModal();renderInbound(\'pending-vehicle\')">Close</button>'+
+        '<button class="btn btn-glass" id="invReadBtn" onclick="runInvoicePhoto(\''+vehId+'\')"><i class="bx bx-scan"></i> Read Photo</button>');
+    if(preFiles&&preFiles.length){
+        try{
+            var dt=new DataTransfer();
+            Array.prototype.forEach.call(preFiles,function(f){dt.items.add(f);});
+            document.getElementById('invPhoto').files=dt.files;
+            runInvoicePhoto(vehId);
+        }catch(e){}
+    }
+}
+async function runInvoicePhoto(vehId){
+    var v=DB.find('vehicles',vehId);if(!v)return;
+    var fi=document.getElementById('invPhoto');
+    var files=fi&&fi.files?Array.prototype.slice.call(fi.files):[];
+    if(!files.length){showToast('Photo select karo','error');return;}
+    var out=document.getElementById('invPhotoOut'),btn=document.getElementById('invReadBtn');
+    if(btn)btn.disabled=true;
+    window._invDrafts=[];
+    var html='';
+    for(var k=0;k<files.length;k++){
+        if(out)out.innerHTML='<div style="padding:12px;color:var(--text-muted)"><i class="bx bx-loader-alt bx-spin"></i> Reading photo '+(k+1)+' / '+files.length+'...</div>'+html;
+        try{
+            var o=await invoiceOCR(files[k]);
+            o.items=Array.isArray(o.items)?o.items:[];
+            var chk=verifyInvoiceVsVehicle(o,v);
+            await enrichItems(o.items);
+            var invNo=String(o.invoice_no||'').trim().toUpperCase();
+            var dup=!!invNo&&DB.filter('invoices',function(i){return i.vehicleId===vehId&&i.invoiceNo===invNo;}).length>0;
+            var idx=window._invDrafts.length;
+            window._invDrafts.push({o:o,chk:chk,dup:dup,saved:false});
+            html+=invDraftHTML(idx,o,chk,dup);
+        }catch(e){
+            html+='<div class="card" style="border:1px solid var(--danger);padding:10px;margin-bottom:10px;color:var(--danger)">Photo '+(k+1)+': read failed — '+esc((e&&e.message)||'error')+'</div>';
+            window._invDrafts.push(null);
+        }
+    }
+    if(out)out.innerHTML=html;
+    if(btn)btn.disabled=false;
+}
+function invDraftHTML(i,o,chk,dup){
+    var h='<div class="card" id="invDraft_'+i+'" style="margin-bottom:12px;padding:10px">';
+    if(!chk.ok){
+        h+='<div style="background:rgba(255,0,0,.1);border:1px solid var(--danger);color:var(--danger);padding:8px;border-radius:6px;margin-bottom:8px"><strong><i class="bx bx-error-circle"></i> Not Correct</strong><br>'+chk.errs.map(esc).join('<br>')+'</div>';
+    }else{
+        h+='<div style="background:rgba(0,200,100,.1);border:1px solid var(--success,#2ecc71);color:var(--success,#2ecc71);padding:8px;border-radius:6px;margin-bottom:8px"><i class="bx bx-check-circle"></i> Vehicle & LR match'+(chk.warn.length?'<br><small style="color:var(--warning)">'+chk.warn.map(esc).join(' | ')+'</small>':'')+'</div>';
+    }
+    if(dup)h+='<div style="background:rgba(255,160,0,.1);border:1px solid var(--warning);color:var(--warning);padding:8px;border-radius:6px;margin-bottom:8px">Ye Invoice No is vehicle me pehle se hai — save nahi hoga.</div>';
+    h+='<div class="form-row"><div class="form-group"><label>Invoice No</label><input type="text" id="di_no_'+i+'" class="form-input" style="text-transform:uppercase" value="'+esc(o.invoice_no||'')+'"></div>';
+    h+='<div class="form-group"><label>Customer</label><input type="text" id="di_cu_'+i+'" class="form-input" value="'+esc(o.customer||'')+'"></div></div>';
+    h+='<div style="display:grid;grid-template-columns:2fr 2fr 1.2fr 0.6fr;gap:6px;margin-bottom:4px;font-size:9px;font-weight:700;color:var(--text-muted);text-transform:uppercase"><div>Material</div><div>Description</div><div>EAN</div><div>Qty</div></div>';
+    o.items.forEach(function(it,j){
+        h+='<div style="display:grid;grid-template-columns:2fr 2fr 1.2fr 0.6fr;gap:6px;margin-bottom:6px">'+
+        '<input type="text" id="di_m_'+i+'_'+j+'" class="form-input" style="font-size:12px'+(it.inMaster?'':';border-color:var(--warning)')+'" value="'+esc(it.material||'')+'">'+
+        '<input type="text" id="di_d_'+i+'_'+j+'" class="form-input" style="font-size:12px" value="'+esc(it.description||'')+'">'+
+        '<input type="text" id="di_e_'+i+'_'+j+'" class="form-input" style="font-size:11px" value="'+esc(it.ean||'')+'">'+
+        '<input type="number" id="di_q_'+i+'_'+j+'" class="form-input" style="font-size:12px;text-align:center" min="1" value="'+esc(it.qty||1)+'"></div>';
+    });
+    if(!o.items.length)h+='<div style="color:var(--text-muted);font-size:12px">Koi material nahi mila.</div>';
+    if(o.items.some(function(it){return !it.inMaster;}))h+='<div style="font-size:10px;color:var(--warning)">Orange border = Product Master me nahi mila, check karo.</div>';
+    if(chk.ok&&!dup&&o.items.length)h+='<div style="text-align:right;margin-top:8px"><button class="btn btn-glass btn-sm" onclick="saveInvDraft('+i+')"><i class="bx bx-check"></i> Save Invoice</button></div>';
+    h+='</div>';
+    return h;
+}
+function saveInvDraft(i){
+    var d=(window._invDrafts||[])[i];var vehId=window._invVehId;
+    if(!d||d.saved||!d.chk.ok||d.dup){return;}
+    var v=DB.find('vehicles',vehId);if(!v)return;
+    var invNo=(document.getElementById('di_no_'+i).value||'').trim().toUpperCase();
+    var cust=(document.getElementById('di_cu_'+i).value||'').trim();
+    if(!invNo){showToast('Invoice number required','error');return;}
+    if(!cust){showToast('Customer name required','error');return;}
+    if(DB.filter('invoices',function(x){return x.vehicleId===vehId&&x.invoiceNo===invNo;}).length){showToast('Invoice number already exists for this vehicle','error');return;}
+    var mats=[];
+    d.o.items.forEach(function(it,j){
+        var ean=(document.getElementById('di_e_'+i+'_'+j).value||'').trim().toUpperCase();
+        var desc=(document.getElementById('di_d_'+i+'_'+j).value||'').trim();
+        var mat=(document.getElementById('di_m_'+i+'_'+j).value||'').trim()||desc||ean;
+        var qty=parseInt(document.getElementById('di_q_'+i+'_'+j).value)||0;
+        if(mat&&ean&&qty>0)mats.push({material:mat,description:desc,ean:ean,qty:qty});
+    });
+    if(!mats.length){showToast('Kam se kam ek material (EAN + Qty) chahiye','error');return;}
+    var inv=DB.add('invoices',{vehicleId:vehId,invoiceNo:invNo,customer:cust,status:'Pending',viaPhoto:true});
+    mats.forEach(function(m){DB.add('invoice_materials',{invoiceId:inv.id,material:m.material,description:m.description,ean:m.ean,qty:m.qty,unloadedQty:0});});
+    d.saved=true;
+    logAction('Inbound','INVOICE_PHOTO','Invoice '+invNo+' uploaded via photo with '+mats.length+' materials (Veh '+v.vehicleNo+')');
+    showToast('Invoice '+invNo+' saved with '+mats.length+' materials!','success');
+    var box=document.getElementById('invDraft_'+i);
+    if(box)box.innerHTML='<div style="color:var(--success,#2ecc71);padding:8px"><i class="bx bx-check-circle"></i> Saved — '+esc(invNo)+' ('+mats.length+' materials)</div>';
+}

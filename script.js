@@ -1781,7 +1781,7 @@ function renderScanHistory(){
         return;
     }
 
-    var h='<div class="table-wrapper" style="border-radius:0"><table class="data-table"><thead><tr><th style="width:34px">#</th><th>EAN</th><th>Material</th><th>Description</th><th style="width:56px">Qty</th><th style="width:54px">UOM</th><th style="width:86px">Status</th><th style="width:118px">Time</th><th style="width:86px">Actions</th></tr></thead><tbody>';
+    var h='<div class="table-wrapper" style="border-radius:0"><table class="data-table"><thead><tr><th style="width:34px">#</th><th>EAN</th><th>Material</th><th>Description</th><th style="width:56px">Qty</th><th style="width:54px">UOM</th><th style="width:110px">Status</th><th style="width:118px">Time</th><th style="width:86px">Actions</th></tr></thead><tbody>';
     for(var i=ud.scanHistory.length-1;i>=0;i--){
         var s=ud.scanHistory[i];
         if(ud.editingIdx===i){
@@ -1798,14 +1798,24 @@ function renderScanHistory(){
             h+='</tr>';
         }else{
             // === NORMAL MODE — table row ===
-            h+='<tr class="'+(s.matched?'scan-row-green':'scan-row-red')+'">';
+            var stBadge='',rowOk=false;
+            var stEn=(s.matched&&s.entryIdx!==null&&s.entryIdx!==undefined)?ud.materialEntries[s.entryIdx]:null;
+            if(!stEn){
+                stBadge='<span class="badge badge-danger">Not in OBD</span>';
+            }else{
+                var stRem=stEn.baseRemaining-stEn.sessionScanned;
+                if(stRem===0){stBadge='<span class="badge badge-success">Match</span>';rowOk=true;}
+                else if(stRem<0){stBadge='<span class="badge badge-warning">Excess +'+Math.abs(stRem)+'</span>';}
+                else{stBadge='<span class="badge badge-danger">Short -'+stRem+'</span>';}
+            }
+            h+='<tr class="'+(rowOk?'scan-row-green':'scan-row-red')+'">';
             h+='<td>'+(i+1)+'</td>';
             h+='<td style="font-family:var(--font-display);font-size:10px">'+esc(s.ean||'Manual')+'</td>';
             h+='<td style="font-weight:600;font-size:12px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(s.material)+'</td>';
             h+='<td style="font-size:11px;color:var(--text-muted);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(s.description||'-')+'</td>';
             h+='<td><b style="font-family:var(--font-display);font-size:14px;color:'+(s.matched?'var(--success)':'var(--danger)')+'">'+s.qty+'</b></td>';
             h+='<td>'+esc(s.uom)+'</td>';
-            h+='<td>'+(s.matched?'<span class="badge badge-success">Matched</span>':'<span class="badge badge-danger">No Match</span>')+'</td>';
+            h+='<td>'+stBadge+'</td>';
             h+='<td style="font-size:10px;color:var(--text-muted)">'+fmtDT(s.ts)+'</td>';
             h+='<td><div class="table-actions"><button class="btn btn-glass btn-sm" id="ebE_'+i+'" title="Edit"><i class="bx bx-pencil"></i></button><button class="btn btn-danger btn-sm" id="ebD_'+i+'" title="Delete"><i class="bx bx-trash"></i></button></div></td>';
             h+='</tr>';

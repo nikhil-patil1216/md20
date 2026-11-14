@@ -4117,7 +4117,7 @@ async function renderOBDUpload(){
     h+='<label class="btn btn-glass" style="cursor:pointer;margin-bottom:12px"><i class="bx bx-upload"></i> Choose OBD File<input type="file" id="obdFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="document.getElementById(\'obdFName\').innerText=this.files[0].name"></label>';
     h+='<div id="obdFName" style="font-size:11px;color:var(--text-muted);margin-bottom:8px">No file chosen</div>';
     h+='<button class="btn btn-glass" onclick="processOBDUpload()"><i class="bx bx-check-double"></i> Upload OBDs</button> <button class="btn btn-glass" onclick="showOBDPhoto()"><i class="bx bx-camera"></i> Upload OBD (Photo)</button>';
-    h+='<div style="background:var(--bg-secondary);padding:10px;border-radius:var(--radius-sm);font-size:11px;color:var(--text-muted);border:1px dashed var(--warning);margin-top:10px"><strong style="color:var(--warning)">Excel Format:</strong><br>OBD No | Material | EAN | Qty | Customer<br><span style="color:var(--text-muted)">OBD No pehle se hai to naya material / badhi qty usi OBD me add hogi (assigned ho to Picker ko seedha dikhega).</span></div>';
+    h+='<div style="background:var(--bg-secondary);padding:10px;border-radius:var(--radius-sm);font-size:11px;color:var(--text-muted);border:1px dashed var(--warning);margin-top:10px"><strong style="color:var(--warning)">Excel Format:</strong><br>OBD No | Material | EAN | Qty | Customer<br><span style="color:var(--text-muted)">If the OBD No already exists, new material / increased qty is added to the same OBD (if assigned, the Picker sees it directly).</span></div>';
     h+='</div>';
     h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-list-ul"></i> Uploaded OBDs ('+obds.length+') <span style="font-size:10px;color:var(--text-muted);font-weight:normal">— click an OBD row to view material-wise stock</span></div><div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Customer</th><th>Materials</th><th>Total Qty</th><th>Warehouse Stock</th><th>Status</th><th>Actions</th></tr></thead><tbody>';
     if(!obds.length)h+='<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:20px">No OBDs</td></tr>';
@@ -4129,11 +4129,11 @@ async function renderOBDUpload(){
     h+='</tbody></table></div></div>';
     setHtml(h);
 }
-// ---------- OBD upload: Excel / Photo — same OBD dobara aaye to purani OBD me merge ----------
-// * OBD No pehle se hai (Pending / Assigned / P&L Assigned) => naye material add, qty badhi ho to badhegi (kam qty ignore).
-// * Agar OBD kisi ko assign hai => naye material ke locations lock hote hain, Picker ko notification milta hai,
-//   aur wo seedha uski Picking list me "UPDATED" ke saath dikhta hai.
-// * OBD complete ho chuki ho to change nahi hota (skip + message).
+// ---------- OBD upload: Excel / Photo — uploading an existing OBD No again merges into the existing OBD ----------
+// * If the OBD No already exists (Pending / Assigned / P&L Assigned) => new materials are added, higher qty is increased (lower qty is ignored).
+// * If the OBD is already assigned => locations are locked for the new material, the Picker gets a notification,
+//   and it shows up directly in their picking list marked "UPDATED".
+// * If the OBD is already completed it is not changed (skipped with a message).
 function obdKey(m){return String(m.ean||'').trim().toUpperCase()||('M:'+String(m.material||'').trim().toUpperCase());}
 function obdSumRows(rows){
     var map={},order=[];
@@ -4164,17 +4164,17 @@ function obdDiff(obdNo,rows){
     return{obdNo:obdNo,exists:true,closed:false,obd:open,mats:mats,adds:adds,ups:ups,same:same,lowers:lowers};
 }
 function obdDiffHTML(d,compact){
-    if(d.closed)return '<div style="color:var(--danger);font-size:12px"><i class="bx bx-block"></i> Ye OBD pehle hi complete ho chuki hai — change nahi hoga.</div>';
-    if(!d.exists)return '<div style="color:var(--success);font-size:12px"><i class="bx bx-plus-circle"></i> Nayi OBD — '+d.mats.length+' material</div>';
+    if(d.closed)return '<div style="color:var(--danger);font-size:12px"><i class="bx bx-block"></i> This OBD is already completed — it will not be changed.</div>';
+    if(!d.exists)return '<div style="color:var(--success);font-size:12px"><i class="bx bx-plus-circle"></i> New OBD — '+d.mats.length+' material(s)</div>';
     var h='<div style="font-size:12px;line-height:1.7">';
     var st=d.obd.status||'Pending';
     h+='<span class="badge badge-accent" style="margin-right:6px">'+esc(st)+'</span>';
-    if(!d.adds.length&&!d.ups.length)h+='<span style="color:var(--text-muted)">Koi naya material / qty change nahi</span>';
-    d.adds.forEach(function(m){h+='<div style="color:var(--success)">+ Naya: <b>'+esc(m.material)+'</b> × '+m.qty+'</div>';});
-    d.ups.forEach(function(u){h+='<div style="color:var(--warning)">↑ Qty badhi: <b>'+esc(u.m.material)+'</b> '+u.from+' → '+u.to+'</div>';});
-    if(!compact||d.same.length)if(d.same.length)h+='<div style="color:var(--text-muted)">= '+d.same.length+' material pehle se same (skip)</div>';
-    d.lowers.forEach(function(u){h+='<div style="color:var(--text-muted)">↓ '+esc(u.m.material)+' qty kam ('+u.from+' → '+u.to+') — ignore</div>';});
-    if((d.adds.length||d.ups.length)&&(st==='Assigned'||st==='P&L Assigned'))h+='<div style="color:var(--accent)"><i class="bx bx-bell"></i> Assigned hai — locations lock honge aur Picker ko update dikhega</div>';
+    if(!d.adds.length&&!d.ups.length)h+='<span style="color:var(--text-muted)">No new material or qty change</span>';
+    d.adds.forEach(function(m){h+='<div style="color:var(--success)">+ New: <b>'+esc(m.material)+'</b> × '+m.qty+'</div>';});
+    d.ups.forEach(function(u){h+='<div style="color:var(--warning)">↑ Qty increased: <b>'+esc(u.m.material)+'</b> '+u.from+' → '+u.to+'</div>';});
+    if(!compact||d.same.length)if(d.same.length)h+='<div style="color:var(--text-muted)">= '+d.same.length+' material(s) already the same (skipped)</div>';
+    d.lowers.forEach(function(u){h+='<div style="color:var(--text-muted)">↓ '+esc(u.m.material)+' qty is lower ('+u.from+' → '+u.to+') — ignored</div>';});
+    if((d.adds.length||d.ups.length)&&(st==='Assigned'||st==='P&L Assigned'))h+='<div style="color:var(--accent)"><i class="bx bx-bell"></i> Already assigned — locations will be locked and the Picker will see the update</div>';
     return h+'</div>';
 }
 async function applyOBDDiff(d,customer){
@@ -4191,22 +4191,22 @@ async function applyOBDDiff(d,customer){
         for(var i=0;i<mats.length;i++){if(obdKey(mats[i])===k){mats[i].qty=(mats[i].qty||0)+diff;break;}}
     });
     d.adds.forEach(function(m){mats.push({material:m.material,description:m.description,ean:m.ean,qty:m.qty,pickedQty:0});});
-    var info=(d.adds.length?d.adds.length+' naya material':'')+(d.adds.length&&d.ups.length?', ':'')+(d.ups.length?d.ups.length+' qty badhi':'');
+    var info=(d.adds.length?d.adds.length+' new material':'')+(d.adds.length&&d.ups.length?', ':'')+(d.ups.length?d.ups.length+' qty increased':'');
     var assigned=(obd.status==='Assigned'||obd.status==='P&L Assigned');
     var patch={materials:mats,updatedAt:nowISO()};
     if(!obd.customer&&customer)patch.customer=customer;
     if(assigned){patch.addedAfterAssign=true;patch.addedInfo=info;patch.addedAt=nowISO();}
     DB.update('obd_data',obd.id,patch);
     if(assigned){
-        await lockLocationsForOBD(obd.id,obd.obdNo);    // naye / badhe material ke locations lock
+        await lockLocationsForOBD(obd.id,obd.obdNo);    // lock locations for new / increased material
         var pa=pwlAssignFor(obd.id),nm='',nav='';
         if(pa){nm=pwlPickerName(pa);nav='pwl-picker';}
         else{
             var na=DB.filter('picking_assignments',function(x){return x.obdId===obd.id&&x.status==='Assigned'&&x.type!=='pickandload';})[0];
             if(na){nm=na.assignedToName;nav='locreq-picker';}
         }
-        if(nm)addNotif('OBD '+obd.obdNo+' update hui ('+info+') — '+nm+', picking list check karo','warning',pa?pa.pickerId:(na&&na.assignedTo),obd.id,nav);
-        if(pa&&pa.splitFlow&&pa.loaderName)addNotif('OBD '+obd.obdNo+' me material add hue ('+info+') — Loader: '+pa.loaderName,'info',pa.loaderId,obd.id,'pwl-loader');
+        if(nm)addNotif('OBD '+obd.obdNo+' was updated ('+info+') — '+nm+', please check your picking list','warning',pa?pa.pickerId:(na&&na.assignedTo),obd.id,nav);
+        if(pa&&pa.splitFlow&&pa.loaderName)addNotif('OBD '+obd.obdNo+' has new material added ('+info+') — Loader: '+pa.loaderName,'info',pa.loaderId,obd.id,'pwl-loader');
     }
     return{updated:true,info:info};
 }
@@ -4217,7 +4217,7 @@ async function obdCommitAll(items,src){
         if(r.created)c++;else if(r.updated)u++;else if(r.skipped){sk++;skNames.push(items[i].d.obdNo);}else un++;
     }
     logAction('Picking','OBD_UPLOAD',(src||'Excel')+': '+c+' new, '+u+' updated, '+un+' unchanged'+(sk?', '+sk+' skipped (complete)':''));
-    var msg=[];if(c)msg.push(c+' nayi OBD');if(u)msg.push(u+' OBD update');if(un)msg.push(un+' unchanged');if(sk)msg.push(sk+' skip (complete: '+skNames.join(', ')+')');
+    var msg=[];if(c)msg.push(c+' new OBD');if(u)msg.push(u+' OBD updated');if(un)msg.push(un+' unchanged');if(sk)msg.push(sk+' skipped (completed: '+skNames.join(', ')+')');
     showToast(msg.join(' · ')||'Nothing to save',(c||u)?'success':'warning');
     renderOBDUpload();
     return{c:c,u:u,un:un,sk:sk};
@@ -4244,12 +4244,12 @@ function processOBDUpload(){
             }
             var items=[];
             for(var key in obdMap)items.push({d:obdDiff(key,obdMap[key].rows),cust:obdMap[key].customer});
-            if(!items.length){showToast('File me koi valid row nahi mili','error');return;}
+            if(!items.length){showToast('No valid rows found in the file','error');return;}
             var hasExisting=items.some(function(x){return x.d.exists||x.d.closed;});
             if(!hasExisting){await obdCommitAll(items,'Excel');return;}
             window._obdPending={items:items,src:'Excel'};
             var nNew=items.filter(function(x){return !x.d.exists&&!x.d.closed;}).length;
-            var h='<div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">'+items.length+' OBD file me hain — <b>'+nNew+'</b> nayi, baaki pehle se maujood hain. Maujood OBD me sirf naya material / badhi hui qty add hogi.</div>';
+            var h='<div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">'+items.length+' OBD(s) in the file — <b>'+nNew+'</b> new, the rest already exist. For existing OBDs only new material / increased qty will be added.</div>';
             h+='<div style="max-height:55vh;overflow-y:auto">';
             items.forEach(function(x){
                 h+='<div class="card" style="margin-bottom:8px;padding:10px"><div style="font-family:var(--font-display);font-size:12px;color:var(--accent);font-weight:700;margin-bottom:4px">'+esc(x.d.obdNo)+'</div>'+obdDiffHTML(x.d,true)+'</div>';
@@ -4265,11 +4265,11 @@ async function confirmOBDUpload(){
     closeModal();await obdCommitAll(p.items,p.src);
 }
 
-// ---- OBD Photo upload (invoice photo jaisa: photo -> AI read -> edit -> save) ----
+// ---- OBD Photo upload (like invoice photo: photo -> AI read -> edit -> save) ----
 function showOBDPhoto(){
     window._obdDrafts=[];
     var h='<div class="form-group"><label>OBD Photo(s) <span class="req">*</span></label>'+photoPickerHTML('obdPhoto')+'</div>';
-    h+='<div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">One photo = One OBD. If the OBD already exists, new materials will be added to it, and the assigned picker will see the updates).</div>';
+    h+='<div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">One photo = one OBD. If the OBD No already exists, new material is added to that OBD (if assigned, the Picker will see the update).</div>';
     h+='<div id="obdPhotoOut"></div>';
     showModal('OBD Photo Upload',h,'lg','<button class="btn btn-glass" onclick="closeModal();renderOBDUpload()">Close</button><button class="btn btn-glass" id="obdReadBtn" onclick="runOBDPhoto()"><i class="bx bx-scan"></i> Read Photo</button>');
 }
@@ -4283,7 +4283,7 @@ async function runOBDPhoto(){
     for(var k=0;k<files.length;k++){
         if(out)out.innerHTML='<div style="padding:12px;color:var(--text-muted)"><i class="bx bx-loader-alt bx-spin"></i> Reading photo '+(k+1)+' / '+files.length+'...</div>'+html;
         try{
-            var o=await invoiceOCR(files[k]);          // same AI reader jo invoice photo me use hota hai
+            var o=await invoiceOCR(files[k]);          // same AI reader used for invoice photos
             o.items=Array.isArray(o.items)?o.items:[];
             await enrichItems(o.items);
             o.obd_no=String(o.obd_no||o.delivery_no||o.invoice_no||'').trim().toUpperCase();
@@ -4340,7 +4340,7 @@ async function saveOBDDraft(i){
     var rows=obdDraftRows(i,dr.o);
     if(!rows.length){showToast('At least one material (Material + Qty) is required','error');return;}
     var d=obdDiff(obdNo,rows);
-    if(d.closed){showToast('Ye OBD pehle hi complete ho chuki hai','error');return;}
+    if(d.closed){showToast('This OBD is already completed','error');return;}
     dr.saved=true;
     var res=await obdCommitAll([{d:d,cust:cust}],'Photo');
     var box=document.getElementById('obdDraft_'+i);
@@ -4538,7 +4538,7 @@ function renderStartPicking(){
 
 function openPickingOBD(obdId){
     var obd=DB.find('obd_data',obdId);if(!obd)return;
-    if(obd.addedAfterAssign)DB.update('obd_data',obdId,{addedAfterAssign:false});   // picker ne updated OBD dekh liya
+    if(obd.addedAfterAssign)DB.update('obd_data',obdId,{addedAfterAssign:false});   // picker has seen the updated OBD
     mergeDuplicateLocks(obdId);
     var _tr=validateOBDLocks(obdId);if(_tr>0){showToast(_tr+' qty of stock was not available at the location — a new location was assigned','warning');}
     mergeDuplicateLocks(obdId);
@@ -5595,9 +5595,9 @@ function exportPickingDonePDF(){
     pdf.save('Picking_Done_'+today()+'.pdf');showToast('PDF downloaded!','success');
 }
 // ==================== PICKING WITH LOADING (Picker + Loader alag) ====================
-// Assign karte waqt 2 user: PICKER (pick karega) aur LOADER (load karega).
-// Picker har material ki row ke saamne "Go →" dabata hai => wo qty Loader ke paas load ke liye aa jaati hai.
-// "Go" records picking_assignments table me type:'pl_go' (status:'Go') se save hote hain (naya table nahi chahiye).
+// While assigning, two users are chosen: PICKER (picks) and LOADER (loads).
+// The Picker presses "Go →" on a material row => that qty becomes available to the Loader for loading.
+// "Go" records are stored in the picking_assignments table as type:'pl_go' (status:'Go') — no new table needed.
 function pwlIsMe(id,name){
     var u=APP.currentUser;if(!u)return false;
     if(id&&id===u.id)return true;
@@ -5605,7 +5605,7 @@ function pwlIsMe(id,name){
 }
 function pwlActiveAssigns(){return DB.filter('picking_assignments',function(a){return a.type==='pickandload'&&a.status==='Assigned';});}
 function pwlAssignFor(oid){var r=null;pwlActiveAssigns().forEach(function(a){if((a.obdIds||[]).indexOf(oid)>-1)r=a;});return r;}
-// purane (split se pehle ke) assignments me ek hi user pick+load dono karta tha — wo waise hi chalte rahenge
+// old (pre-split) assignments had one user doing both pick and load — they keep working as before
 function pwlIsPicker(a){return a.splitFlow?pwlIsMe(a.pickerId,a.pickerName):pwlIsMe(a.assignedTo,a.assignedToName);}
 function pwlIsLoader(a){return a.splitFlow?pwlIsMe(a.loaderId,a.loaderName):pwlIsMe(a.assignedTo,a.assignedToName);}
 function pwlPickerName(a){return a.splitFlow?a.pickerName:a.assignedToName;}
@@ -5613,7 +5613,7 @@ function pwlLoaderName(a){return a.splitFlow?a.loaderName:a.assignedToName;}
 function pwlGoRecs(oid){return DB.filter('picking_assignments',function(g){return g.type==='pl_go'&&g.status==='Go'&&g.obdId===oid;});}
 function pwlCloseGo(obdIds){(Array.isArray(obdIds)?obdIds:[obdIds]).forEach(function(oid){pwlGoRecs(oid).forEach(function(g){DB.update('picking_assignments',g.id,{status:'Closed'});});});}
 function pwlSentQty(a,oid,ean,picked){
-    if(a&&!a.splitFlow)return picked;            // purana flow: jo pick hua wahi load ke liye ready
+    if(a&&!a.splitFlow)return picked;            // legacy flow: whatever is picked is ready for loading
     var s=0;pwlGoRecs(oid).forEach(function(g){if(g.ean===ean)s+=(g.qty||0);});return s;
 }
 function pwlPartials(oid){
@@ -5660,8 +5660,8 @@ function renderPickingWithLoading(){
         if(!obds.length)h+='<div style="color:var(--text-muted);padding:12px;text-align:center">No OBDs pending</div>';
         else{
             h+='<div class="form-row">';
-            h+='<div class="form-group"><label><i class="bx bx-box"></i> Picker — Who will do the picking<span class="req">*</span></label><select id="pwlPickerUser" class="form-input">'+pwlUserOptions()+'</select></div>';
-            h+='<div class="form-group"><label><i class="bx bx-truck"></i> Loader — Who will do the loading<span class="req">*</span></label><select id="pwlLoaderUser" class="form-input">'+pwlUserOptions()+'</select></div>';
+            h+='<div class="form-group"><label><i class="bx bx-box"></i> Picker — who will pick <span class="req">*</span></label><select id="pwlPickerUser" class="form-input">'+pwlUserOptions()+'</select></div>';
+            h+='<div class="form-group"><label><i class="bx bx-truck"></i> Loader — who will load <span class="req">*</span></label><select id="pwlLoaderUser" class="form-input">'+pwlUserOptions()+'</select></div>';
             h+='</div>';
             h+='<div class="chk-list" id="pwlChkList" style="max-height:180px;overflow-y:auto">';
             obds.forEach(function(o){
@@ -5715,7 +5715,7 @@ function renderPickingWithLoading(){
     h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-truck"></i> My Loading ('+myLoad.reduce(function(n,a){return n+(a.obdIds||[]).length;},0)+')</div>';
     if(!myLoad.length)h+='<div style="color:var(--text-muted);padding:16px;text-align:center">No loading assigned to you</div>';
     else{
-        h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Picker</th><th>Picker ne Go kiya</th><th>Loaded</th><th>Baaki</th><th>Action</th></tr></thead><tbody>';
+        h+='<div class="table-wrapper"><table class="data-table"><thead><tr><th>OBD No</th><th>Picker</th><th>Sent by Picker</th><th>Loaded</th><th>Remaining</th><th>Action</th></tr></thead><tbody>';
         myLoad.forEach(function(a){
             (a.obdIds||[]).forEach(function(oid){
                 var obd=DB.find('obd_data',oid);if(!obd)return;
@@ -5723,7 +5723,7 @@ function renderPickingWithLoading(){
                 var left=Math.max(0,st.sent-st.loaded),btn;
                 if(pl)btn='<button class="btn btn-glass btn-sm" style="border-color:var(--warning)" onclick="continuePWL(\''+pl.id+'\')"><i class="bx bx-reload"></i> Continue</button>';
                 else if(st.sent>0)btn='<button class="btn btn-glass btn-sm" onclick="openPWLSetup(\''+oid+'\')"><i class="bx bx-play"></i> Start Loading</button>';
-                else btn='<span style="color:var(--text-muted);font-size:11px"><i class="bx bx-time"></i> Picker ka Go wait</span>';
+                else btn='<span style="color:var(--text-muted);font-size:11px"><i class="bx bx-time"></i> Waiting for Picker Go</span>';
                 var upd=obd.addedAfterAssign?' <span class="badge badge-warning" title="'+esc(obd.addedInfo||'')+'">UPDATED</span>':'';
                 h+='<tr><td style="font-family:var(--font-display);font-size:11px;color:var(--accent)">'+esc(obd.obdNo)+upd+'</td><td style="font-size:11px">'+esc(pwlPickerName(a))+'</td><td style="font-family:var(--font-display)">'+st.sent+'</td><td style="font-family:var(--font-display)">'+st.loaded+'</td><td style="font-family:var(--font-display)">'+left+'</td><td>'+btn+'</td></tr>';
             });
@@ -5764,7 +5764,7 @@ function searchPWLDone(){
 // ===== ASSIGN (Picker + Loader) =====
 async function doPWLAssign(){
     var ps=document.getElementById('pwlPickerUser'),ls=document.getElementById('pwlLoaderUser');
-    if(!ps||!ls||!ps.value||!ls.value){showToast('Picker aur Loader dono select karo','error');return;}
+    if(!ps||!ls||!ps.value||!ls.value){showToast('Select both Picker and Loader','error');return;}
     var pName=ps.options[ps.selectedIndex].getAttribute('data-name'),lName=ls.options[ls.selectedIndex].getAttribute('data-name');
     var checks=document.querySelectorAll('.pwl-chk:checked');if(!checks.length){showToast('Select OBDs','error');return;}
     var obdIds=[],obdNos=[];
@@ -5794,11 +5794,11 @@ function pwlNotifOpen(oid,role){
     if(role==='picker')setTimeout(function(){openPWLPickScreen(oid);},300);
 }
 
-// ===== PICKER SCREEN: har material ki row ke saamne  Pick  aur  Go →  =====
+// ===== PICKER SCREEN: Pick and Go → on every material row =====
 function openPWLPickScreen(obdId){
     var obd=DB.find('obd_data',obdId);if(!obd)return;
     var a=pwlAssignFor(obdId);if(!a){showToast('Assignment not found','error');return;}
-    if(obd.addedAfterAssign)DB.update('obd_data',obdId,{addedAfterAssign:false});   // picker ne dekh liya
+    if(obd.addedAfterAssign)DB.update('obd_data',obdId,{addedAfterAssign:false});   // picker has seen it
     window._pwlData={obdId:obdId,obdNo:obd.obdNo,assignId:a.id,mode:'picker',pickedItems:pwlBuildPicked(obd,a),scannedItems:[]};
     renderPWLPickModal();
 }
@@ -5825,11 +5825,11 @@ function renderPWLPickModal(){
         h+='<td style="font-family:var(--font-display)">'+sent+'</td>';
         h+='<td><div style="display:flex;gap:6px;justify-content:center;white-space:nowrap">';
         h+='<button class="btn btn-glass btn-sm" '+(full?'disabled':'')+' onclick="showPWLPickLocs('+idx+')"><i class="bx bx-box"></i> Pick</button>';
-        h+='<button class="btn btn-sm" style="background:var(--accent);color:#000;font-weight:700;'+(pend>0?'':'opacity:.35;cursor:not-allowed')+'" '+(pend>0?'':'disabled')+' title="Loader ko bhejo" onclick="pwlGo('+idx+')">Go <i class="bx bx-right-arrow-alt" style="font-size:16px;vertical-align:middle"></i>'+(pend>0?' ('+pend+')':'')+'</button>';
+        h+='<button class="btn btn-sm" style="background:var(--accent);color:#000;font-weight:700;'+(pend>0?'':'opacity:.35;cursor:not-allowed')+'" '+(pend>0?'':'disabled')+' title="Send to Loader" onclick="pwlGo('+idx+')">Go <i class="bx bx-right-arrow-alt" style="font-size:16px;vertical-align:middle"></i>'+(pend>0?' ('+pend+')':'')+'</button>';
         h+='</div></td></tr>';
     });
     h+='</tbody></table></div>';
-    h+='<div style="font-size:11px;color:var(--text-muted);margin-top:8px"><i class="bx bx-info-circle"></i> Pick karo, phir <b>Go →</b> dabao — wo qty Loader ke Loading screen par aa jaayegi.</div>';
+    h+='<div style="font-size:11px;color:var(--text-muted);margin-top:8px"><i class="bx bx-info-circle"></i> Pick, then press <b>Go →</b> — that qty will appear on the loading screen of the Loader.</div>';
     var foot='<button class="btn btn-glass" onclick="closeModal();renderPickingWithLoading()"><i class="bx bx-x"></i> Close</button>';
     foot+='<button class="btn btn-glass" style="background:var(--accent);color:#000;font-weight:700" '+(unsent>0?'':'disabled')+' onclick="pwlGoAll()"><i class="bx bx-right-arrow-alt"></i> Go All ('+unsent+')</button>';
     showModal('P&L Pick — '+esc(pd.obdNo),h,'xl',foot);
@@ -5843,7 +5843,7 @@ function pwlSendItems(items){
         sent+=n;names.push(m.material+' x'+n);
     });
     if(sent>0){
-        addNotif('P&L '+pd.obdNo+': '+sent+' qty loading ke liye ready — '+(a?pwlLoaderName(a):'Loader')+', please load ('+APP.currentUser.name+')','info',a?a.loaderId:null,pd.obdId,'pwl-loader');
+        addNotif('P&L '+pd.obdNo+': '+sent+' qty ready for loading — '+(a?pwlLoaderName(a):'Loader')+', please load ('+APP.currentUser.name+')','info',a?a.loaderId:null,pd.obdId,'pwl-loader');
         logAction('P&L','GO',pd.obdNo+' → '+names.join(', '));
     }
     return sent;
@@ -5851,14 +5851,14 @@ function pwlSendItems(items){
 function pwlGo(idx){
     var pd=window._pwlData;if(!pd)return;var m=pd.pickedItems[idx];if(!m)return;
     var n=pwlSendItems([m]);
-    if(!n){showToast('Pehle pick karo','warning');return;}
-    showToast(m.material+' x '+n+' → Loader ko bheja','success');closeModal();renderPWLPickModal();
+    if(!n){showToast('Pick first','warning');return;}
+    showToast(m.material+' x '+n+' → sent to Loader','success');closeModal();renderPWLPickModal();
 }
 function pwlGoAll(){
     var pd=window._pwlData;if(!pd)return;
     var n=pwlSendItems(pd.pickedItems);
-    if(!n){showToast('Koi pending pick nahi','warning');return;}
-    showToast(n+' qty Loader ko bheji','success');closeModal();renderPWLPickModal();
+    if(!n){showToast('Nothing pending to send','warning');return;}
+    showToast(n+' qty sent to Loader','success');closeModal();renderPWLPickModal();
 }
 
 // ===== LOADER: STEP 1 — VEHICLE + SECURITY =====
@@ -5868,7 +5868,7 @@ function openPWLSetup(obdId){
     window._pwlOBDId=obdId;
     var h='<div style="margin-bottom:12px;padding:10px;background:var(--accent-dim);border-radius:8px;border-left:3px solid var(--accent)">';
     h+='<div style="font-weight:700;color:var(--accent);font-family:var(--font-display)">'+esc(obd.obdNo)+'</div>';
-    h+='<div style="font-size:12px;color:var(--text-muted)">Picker ne Go kiya: <b>'+st.sent+'</b> qty | Loaded: <b>'+st.loaded+'</b></div></div>';
+    h+='<div style="font-size:12px;color:var(--text-muted)">Sent by Picker: <b>'+st.sent+'</b> qty | Loaded: <b>'+st.loaded+'</b></div></div>';
     h+='<div class="form-row">';
     h+='<div class="form-group"><label>Vehicle Number <span class="req">*</span></label>'+loadingVehSelect('pwlVehNo','pwlSecNo')+'</div>';
     h+='<div class="form-group"><label>Security / LR No <span class="req">*</span></label><input type="text" id="pwlSecNo" class="form-input" placeholder="SEC-001" style="text-transform:uppercase"></div>';
@@ -5877,7 +5877,7 @@ function openPWLSetup(obdId){
         '<button class="btn btn-glass" onclick="closeModal()">Cancel</button>'+
         '<button class="btn btn-glass" style="background:var(--accent);color:#000;font-weight:600" onclick="openPWLLoadStart()"><i class="bx bx-truck"></i> Next: Load</button>');
 }
-// expected = picker ne jo Go kiya (cumulative); scannedQty = ab tak scan hua
+// expected = qty sent by the picker via Go (cumulative); scannedQty = scanned so far
 function pwlSyncExpected(pd){
     var oid=Array.isArray(pd.obdId)?pd.obdId[0]:pd.obdId;
     var obd=DB.find('obd_data',oid);if(!obd)return;
@@ -5903,12 +5903,12 @@ function openPWLLoadStart(){
     var obdId=window._pwlOBDId,obd=DB.find('obd_data',obdId);if(!obd)return;
     var pd={obdId:obdId,obdNo:obd.obdNo,vehicleNo:vehNo,securityNo:secNo,materials:obd.materials,scannedItems:[],source:'new',mode:'loader'};
     pwlSyncExpected(pd);
-    if(!pd.expected.length){showToast('Picker ne abhi koi material Go nahi kiya','warning');return;}
+    if(!pd.expected.length){showToast('The Picker has not sent any material via Go yet','warning');return;}
     window._pwlData=pd;closeModal();renderPWLLoadingScan();
 }
 function pwlRefreshExpected(){
     var pd=window._pwlData;if(!pd)return;
-    pwlSyncExpected(pd);closeModal();renderPWLLoadingScan();showToast('Picker ke latest Go update ho gaye','success');
+    pwlSyncExpected(pd);closeModal();renderPWLLoadingScan();showToast('Latest Go updates from the Picker loaded','success');
 }
 function continuePWL(partialId){
     var pl=DB.find('loaded_vehicles',partialId);if(!pl){showToast('Record not found','error');return;}
@@ -5979,7 +5979,7 @@ function renderPWLLoadingScan(){
 
     // Picked summary bar
     var totalPicked=0;pd.expected.forEach(function(e){totalPicked+=e.requiredQty;});
-    h+='<div style="padding:8px 12px;background:var(--bg-secondary);border-radius:6px;margin-bottom:10px;font-size:11px;color:var(--text-muted)"><i class="bx bx-info-circle" style="color:var(--accent)"></i> Picker ne <strong style="color:var(--accent)">'+totalPicked+'</strong> qty Go kiya — itni hi scan karke vehicle me load karo <button class="btn btn-glass btn-sm" style="float:right" onclick="pwlRefreshExpected()"><i class="bx bx-refresh"></i> Refresh</button></div>';
+    h+='<div style="padding:8px 12px;background:var(--bg-secondary);border-radius:6px;margin-bottom:10px;font-size:11px;color:var(--text-muted)"><i class="bx bx-info-circle" style="color:var(--accent)"></i> The Picker sent <strong style="color:var(--accent)">'+totalPicked+'</strong> qty — scan and load exactly this quantity into the vehicle <button class="btn btn-glass btn-sm" style="float:right" onclick="pwlRefreshExpected()"><i class="bx bx-refresh"></i> Refresh</button></div>';
 
     h+='<div class="search-box" style="margin-bottom:8px"><i class="bx bx-search"></i><input type="text" id="pwlScanInput" placeholder="Scan EAN or Material..." onkeydown="if(event.key===\'Enter\')doPWLScan()" autofocus></div>';
     h+='<div style="display:flex;gap:6px;margin-bottom:12px">';
@@ -6081,14 +6081,14 @@ function savePWLPartialLoad(){
 // ===== SUBMIT =====
 function submitPWLLoading(){
     var pd=window._pwlData;if(!pd)return;if(!pd.scannedItems.length){showToast('Scan at least one item','error');return;}
-    // picker ke latest Go ke hisaab se expected refresh + guard
+    // refresh expected from the picker's latest Go + guard
     var _oid=Array.isArray(pd.obdId)?pd.obdId[0]:pd.obdId,_pa=pwlAssignFor(_oid);
     pwlSyncExpected(pd);
     if(_pa&&_pa.splitFlow){
         var _unsent=0,_short=0;
         (pd.pickedItems||[]).forEach(function(m){_unsent+=Math.max(0,m.pickedQty-m.sentQty);_short+=Math.max(0,m.requiredQty-m.pickedQty);});
-        if(_unsent>0){showToast('Picker ne '+_unsent+' qty abhi Go nahi kiya — pehle Picker se Go karwao','error');return;}
-        if(_short>0&&!confirm('Picking abhi complete nahi hai ('+_short+' qty baaki). Phir bhi loading complete karein?'))return;
+        if(_unsent>0){showToast('The Picker has not sent '+_unsent+' picked qty via Go yet — ask the Picker to press Go first','error');return;}
+        if(_short>0&&!confirm('Picking is not complete yet ('+_short+' qty remaining). Complete loading anyway?'))return;
     }
     var mismatch=false;pd.expected.forEach(function(e){if(e.scannedQty!==e.requiredQty)mismatch=true;});
     var hasNotInOBD=pd.scannedItems.some(function(s){return !s.inOBD;});

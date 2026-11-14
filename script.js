@@ -9105,20 +9105,68 @@ function verifyInvoiceVsVehicle(ocr,veh){
     else if(ol!==vl)errs.push('LR No mismatch — Invoice: '+ocr.lr_no+' | Entry: '+(veh.lrNo||'-'));
     return{ok:errs.length===0,errs:errs,warn:warn};
 }
+// ---- Description se Material Master match (invoice photo ke liye) ----
+// Description normalize: upper-case, ° / symbols hata ke sirf letters+numbers ke tokens
+function _descTokens(s){
+    return String(s||'').toUpperCase().replace(/[\u00B0\u00BA]/g,' ').replace(/[^A-Z0-9]+/g,' ').trim().split(' ').filter(Boolean);
+}
+function _descDice(a,b){
+    var sa={},sb={},ca=0,cb=0,common=0,i;
+    for(i=0;i<a.length;i++){if(!sa[a[i]]){sa[a[i]]=1;ca++;}}
+    for(i=0;i<b.length;i++){if(!sb[b[i]]){sb[b[i]]=1;cb++;}}
+    for(var k in sa){if(sb[k])common++;}
+    return (ca+cb)?(2*common/(ca+cb)):0;
+}
+function _descNums(t){return t.filter(function(x){return /\d/.test(x);}).sort().join('|');}
+// Return: master row ya null. Size/number tokens (55, 65, 360 ...) exact match hone chahiye, warna galat variant na pakde.
+async function sbFindByDescription(desc){
+    if(!supabaseClient)return null;
+    var toks=_descTokens(desc);if(toks.length<2)return null;
+    var ck='material_master|D|'+toks.join(' ');
+    if(_sbCache[ck])return _sbCache[ck];
+    var sig=toks.filter(function(t,i){return toks.indexOf(t)===i&&t.length>=2;})
+                .sort(function(a,b){return b.length-a.length;});
+    var rows=[];
+    for(var n=Math.min(3,sig.length);n>=1&&!rows.length;n--){
+        var q=supabaseClient.from('material_master').select('data');
+        for(var j=0;j<n;j++)q=q.filter('data->>description','ilike','%'+sig[j]+'%');
+        var res=await q.limit(80);
+        if(!res.error&&res.data&&res.data.length)rows=res.data.map(function(r){return r.data;});
+    }
+    if(!rows.length)return null;
+    var nums=_descNums(toks),scored=[];
+    rows.forEach(function(r){
+        var rt=_descTokens(r.description);
+        if(_descNums(rt)!==nums)return;                 // size/number mismatch = alag product
+        scored.push({row:r,score:_descDice(toks,rt)});
+    });
+    if(!scored.length)return null;
+    scored.sort(function(a,b){return b.score-a.score;});
+    var best=scored[0];
+    if(best.score<0.75)return null;
+    // ambiguity: doosra bhi lagbhag barabar aur alag material ho to guess nahi karte
+    if(scored.length>1&&best.score<1&&(best.score-scored[1].score)<0.08&&scored[1].row.material!==best.row.material)return null;
+    _sbCache[ck]=best.row;_sbCacheN++;
+    return best.row;
+}
 async function enrichItems(items){
     for(var i=0;i<items.length;i++){
         var it=items[i];it.inMaster=false;
-        var key=String(it.ean||'').trim()||String(it.material||'').trim();
-        if(!key)continue;
+        var ean=String(it.ean||'').trim(),mat=String(it.material||'').trim(),desc=String(it.description||'').trim();
+        var row=null;
         try{
-            var f=await sbFindMaterialAny(key);
-            if(f&&f.row){
-                it.inMaster=true;
-                if(!it.material)it.material=f.row.material||'';
-                if(!it.description)it.description=f.row.description||'';
-                if(!it.ean)it.ean=f.row.ean||'';
-            }
-        }catch(e){}
+            // Teeno me se jo bhi mile (EAN / Material / Description) usse master row dhundo
+            if(ean){var f1=await sbFindMaterialAny(ean);if(f1&&f1.row)row=f1.row;}
+            if(!row&&mat){var f2=await sbFindMaterialAny(mat);if(f2&&f2.row)row=f2.row;}
+            if(!row&&desc){row=await sbFindExactCI('material_master','description',desc);}
+            if(!row&&desc){row=await sbFindByDescription(desc);}
+        }catch(e){row=null;}
+        if(row){
+            it.inMaster=true;
+            if(!it.material)it.material=row.material||'';
+            if(!it.description)it.description=row.description||'';
+            if(!it.ean)it.ean=row.ean||'';
+        }
     }
     return items;
 }

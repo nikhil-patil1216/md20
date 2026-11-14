@@ -9149,23 +9149,43 @@ async function sbFindByDescription(desc){
     _sbCache[ck]=best.row;_sbCacheN++;
     return best.row;
 }
+// OCR kabhi kabhi material code ke saath padosi column ka rate chipka deta hai (COMETNTCPA140.532) — wo decimal number hatao
+function cleanOcrMaterial(m){
+    m=String(m||'').trim().replace(/\s+/g,'');
+    return m.replace(/(?<=[A-Za-z])\d+[.,]\d+$/,'').replace(/[.,]+$/,'');
+}
+// Material code prefix se master dhundo — sirf tab jab ek hi material mile (guess nahi)
+async function sbFindByMaterialPrefix(code){
+    if(!supabaseClient||!code||code.length<5)return null;
+    var pat=String(code).replace(/[\\%_]/g,function(c){return '\\'+c;})+'%';
+    var res=await supabaseClient.from('material_master').select('data').filter('data->>material','ilike',pat).limit(6);
+    if(res.error||!res.data||!res.data.length)return null;
+    var seen={},uniq=[];
+    res.data.forEach(function(r){var k=String(r.data.material||'').toUpperCase();if(!seen[k]){seen[k]=1;uniq.push(r.data);}});
+    return uniq.length===1?uniq[0]:null;
+}
 async function enrichItems(items){
     for(var i=0;i<items.length;i++){
         var it=items[i];it.inMaster=false;
-        var ean=String(it.ean||'').trim(),mat=String(it.material||'').trim(),desc=String(it.description||'').trim();
+        var ean=String(it.ean||'').trim(),rawMat=String(it.material||'').trim(),desc=String(it.description||'').trim();
+        var mat=cleanOcrMaterial(rawMat);
         var row=null;
         try{
             // Teeno me se jo bhi mile (EAN / Material / Description) usse master row dhundo
             if(ean){var f1=await sbFindMaterialAny(ean);if(f1&&f1.row)row=f1.row;}
-            if(!row&&mat){var f2=await sbFindMaterialAny(mat);if(f2&&f2.row)row=f2.row;}
+            if(!row&&rawMat){var f2=await sbFindMaterialAny(rawMat);if(f2&&f2.row)row=f2.row;}
+            if(!row&&mat&&mat!==rawMat){var f3=await sbFindMaterialAny(mat);if(f3&&f3.row)row=f3.row;}
             if(!row&&desc){row=await sbFindExactCI('material_master','description',desc);}
             if(!row&&desc){row=await sbFindByDescription(desc);}
+            if(!row&&mat){row=await sbFindByMaterialPrefix(mat);}
         }catch(e){row=null;}
         if(row){
             it.inMaster=true;
-            if(!it.material)it.material=row.material||'';
+            it.material=row.material||mat||rawMat;      // master ka sahi material code
             if(!it.description)it.description=row.description||'';
             if(!it.ean)it.ean=row.ean||'';
+        }else if(mat){
+            it.material=mat;                            // master me nahi mila — kam se kam rate wala number hata do
         }
     }
     return items;

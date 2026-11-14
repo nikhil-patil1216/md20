@@ -9087,7 +9087,12 @@ async function invoiceOCR(file){
     if(!supabaseClient)throw new Error('Supabase not connected');
     var b64=await imgToBase64(file,1600);
     var r=await supabaseClient.functions.invoke('invoice-ocr',{body:{image:b64,mime:'image/jpeg'}});
-    if(r.error)throw r.error;
+    if(r.error){
+        var msg=r.error.message||'error';
+        try{if(r.error.context&&r.error.context.json){var eb=await r.error.context.json();if(eb&&eb.error)msg=eb.error;}}catch(e){}
+        throw new Error(msg);
+    }
+    if(r.data&&r.data.error)throw new Error(r.data.error);
     return r.data||{};
 }
 function verifyInvoiceVsVehicle(ocr,veh){

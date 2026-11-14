@@ -9280,9 +9280,9 @@ function saveInvDraft(i){
         var desc=(document.getElementById('di_d_'+i+'_'+j).value||'').trim();
         var mat=(document.getElementById('di_m_'+i+'_'+j).value||'').trim()||desc||ean;
         var qty=parseInt(document.getElementById('di_q_'+i+'_'+j).value)||0;
-        if(mat&&ean&&qty>0)mats.push({material:mat,description:desc,ean:ean,qty:qty});
+        if(mat&&qty>0)mats.push({material:mat,description:desc,ean:ean,qty:qty});   // EAN blank ho to bhi save (Material + Qty kaafi)
     });
-    if(!mats.length){showToast('Kam se kam ek material (EAN + Qty) chahiye','error');return;}
+    if(!mats.length){showToast('Kam se kam ek material (Material + Qty) chahiye','error');return;}
     var inv=DB.add('invoices',{vehicleId:vehId,invoiceNo:invNo,customer:cust,status:'Pending',viaPhoto:true});
     mats.forEach(function(m){DB.add('invoice_materials',{invoiceId:inv.id,material:m.material,description:m.description,ean:m.ean,qty:m.qty,unloadedQty:0});});
     d.saved=true;

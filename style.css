@@ -185,7 +185,7 @@ input,select,textarea,button{font-family:inherit;font-size:inherit}
     gap: 10px;
 }
 .sidebar-logo-img {
-    height: 32px; /* Image ki height set ki hai taaki text ke barabar ho */
+    height: 32px; /* Image height is set so that it matches the text */
     width: auto;
     object-fit: contain;
     border-radius: 4px;
@@ -1092,7 +1092,7 @@ input.form-input:focus,select.form-input:focus,textarea.form-input:focus{border-
 
 
 /* ============================================================
-   MOBILE APP MODE  —  sirf phone/narrow screen (<=768px) par lagta hai
+   MOBILE APP MODE  —  applies only on phone / narrow screens (<=768px)
    PC / laptop ka design bilkul same rahega
    ============================================================ */
 html{-webkit-tap-highlight-color:transparent}
@@ -1115,7 +1115,7 @@ html{-webkit-tap-highlight-color:transparent}
     #contentArea{padding:12px;padding-bottom:calc(78px + env(safe-area-inset-bottom,0px))}
     .card{padding:14px;border-radius:12px}
 
-    /* Bottom tab bar — native app jaisa */
+    /* Bottom tab bar — like a native app */
     .bottom-nav{height:calc(60px + env(safe-area-inset-bottom,0px));padding:0 4px env(safe-area-inset-bottom,0px);box-shadow:0 -2px 12px rgba(0,0,0,.10)}
     .bnav-item{position:relative;flex:1;min-width:0;padding:7px 4px;font-size:10px}
     .bnav-item i{font-size:23px}
@@ -1128,7 +1128,7 @@ html{-webkit-tap-highlight-color:transparent}
     input.form-input,select.form-input{min-height:44px}
     .table-wrapper{-webkit-overflow-scrolling:touch}
 
-    /* Popups — neeche se upar aane wali sheet (app jaisa) */
+    /* Popups — a sheet that slides up from the bottom (like an app) */
     .modal-overlay{align-items:flex-end;padding:0}
     .modal-container,.modal-container.modal-sm,.modal-container.modal-lg,.modal-container.modal-xl{
         max-width:100%!important;width:100%;max-height:92vh;max-height:92dvh;
@@ -1147,24 +1147,24 @@ html{-webkit-tap-highlight-color:transparent}
 
 
 /* ============================================================
-   FIX: page screen se bahar na jaye, pinch/side-drag band — sirf upar-neeche scroll
+   FIX: page must not overflow the screen, pinch/side-drag disabled — vertical scroll only
    ============================================================ */
 @media(max-width:768px){
     html,body{width:100%;max-width:100%;touch-action:pan-y;overscroll-behavior-x:none}
 
-    /* root cause: flex child content ke saath chauda ho jata tha */
+    /* root cause: flex children used to grow wider with their content */
     #mainApp,#mainContent{min-width:0;max-width:100%;overflow-x:clip}
     #mainContent{width:100%}
     #contentArea{min-width:0;max-width:100%;overflow-x:clip}
     #contentArea *{max-width:100%}
-    #contentArea table{max-width:none}                             /* table andar apne wrapper me scroll karegi */
+    #contentArea table{max-width:none}                             /* the table scrolls inside its own wrapper */
     .card,.kpi-card,.section-header{min-width:0;max-width:100%}
 
-    /* grids screen ki width me hi rahein */
+    /* grids stay within the screen width */
     .kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
     .grid-2,.grid-3,.form-row{grid-template-columns:minmax(0,1fr)}
 
-    /* heading / button rows wrap hon, bahar na jayein */
+    /* heading / button rows wrap and do not overflow */
     .section-header{align-items:stretch;gap:10px}
     .section-header h1,.section-header h2,.section-header h3{white-space:normal;font-size:17px;line-height:1.3;overflow-wrap:break-word}
     .section-header>div,.form-actions,.btn-row,.btn-group,
@@ -1173,12 +1173,12 @@ html{-webkit-tap-highlight-color:transparent}
     h1,h2,h3,h4,p{overflow-wrap:break-word}
     input,select,textarea{max-width:100%}
 
-    /* Header ke andar bhi kuch bahar na nikle */
+    /* Nothing should overflow outside the header either */
     .shell-center{flex:1 1 0;min-width:0}
     .global-search{min-width:0}
 
-    /* Jin jagah side-scroll chahiye (tables, tabs, popup, scanner) wahan allow */
-    .table-wrapper,.sap-table-wrap,.tab-bar,.modal-container,#qr-reader{max-width:100%;overflow-x:auto;touch-action:pan-x pan-y;-webkit-overflow-scrolling:touch}
+    /* Allow side-scroll where it is needed (tables, tabs, popup, scanner, invoice photo table) */
+    .table-wrapper,.sap-table-wrap,.tab-bar,.modal-container,#qr-reader,.inv-scroll{max-width:100%;overflow-x:auto;touch-action:pan-x pan-y;-webkit-overflow-scrolling:touch}
 }
 /* ================= LOGIN PAGE — mountain scene + frosted glass card ================= */
 #loginPage{background:#CFDFFF;display:flex;align-items:center;justify-content:center;overflow:hidden}

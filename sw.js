@@ -1,6 +1,6 @@
 // VIP WMS service worker — app shell cache.
-// Network-first: hamesha latest code/data milta hai, offline ho to cache se app shell khulta hai.
-// Supabase / CDN (cross-origin) requests ko touch nahi karta, to live data pe koi asar nahi.
+// Network-first: you always get the latest code/data; when offline, the app shell opens from the cache.
+// Does not touch Supabase / CDN (cross-origin) requests, so live data is unaffected.
 var CACHE = 'vip-wms-shell-v1';
 var SHELL = ['/', '/index.html', '/style.css', '/script.js', '/manifest.json', '/icon-192.png', '/icon-512.png'];
 

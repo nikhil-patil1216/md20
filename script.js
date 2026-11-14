@@ -1118,7 +1118,7 @@ function renderSection(sec,sub){
     else el.innerHTML='<div class="card"><div class="empty-state"><i class="bx bx-code-block"></i><p>Module coming soon...</p></div></div>';
 }
 
-function setHtml(html){var el=document.getElementById('sec-content');if(el)el.innerHTML=html;}
+function setHtml(html){var el=document.getElementById('sec-content');if(el){el.setAttribute('data-screen',(APP&&(APP.currentSub||APP.currentSection))||'');el.innerHTML=html;}}
 
 // ==================== DASHBOARD ====================
 async function renderDashboard(){
@@ -2171,13 +2171,13 @@ function renderPutaway(){
     h+='<button class="btn btn-glass btn-sm" onclick="lookupPutawayEan()"><i class="bx bx-search"></i></button></div></div>';
     h+='<div id="putawayMatInfo" style="display:none"><div id="paLookupMsg"></div>';
     h+='<div class="form-row" style="margin-top:8px">';
-    h+='<div class="form-group" style="flex:2"><label>Material <span class="req">*</span></label><input type="text" id="paMaterial" class="form-input" placeholder="Auto ya manual"></div>';
-    h+='<div class="form-group" style="flex:2"><label>Description</label><input type="text" id="paDescription" class="form-input" placeholder="Auto ya manual"></div>';
+    h+='<div class="form-group" style="flex:2"><label>Material <span class="req">*</span></label><input type="text" id="paMaterial" class="form-input" placeholder="Auto-filled or manual"></div>';
+    h+='<div class="form-group" style="flex:2"><label>Description</label><input type="text" id="paDescription" class="form-input" placeholder="Auto-filled or manual"></div>';
     h+='<div class="form-group"><label>EAN</label><input type="text" id="paEan" class="form-input" readonly style="background:var(--bg-secondary);font-family:var(--font-display);font-size:11px"></div>';
     h+='</div>';
     h+='<div class="form-row" style="margin-top:10px">';
     h+='<div class="form-group" style="flex:1"><label>Rack <span class="req">*</span></label>';
-    h+='<div style="display:flex;gap:4px"><input type="text" id="paRackScan" class="form-input" placeholder="Scan ya type rack..." style="text-transform:uppercase" onkeydown="if(event.key===\'Enter\'){event.preventDefault();document.getElementById(\'paQty\').focus();}">';
+    h+='<div style="display:flex;gap:4px"><input type="text" id="paRackScan" class="form-input" placeholder="Scan or type rack..." style="text-transform:uppercase" onkeydown="if(event.key===\'Enter\'){event.preventDefault();document.getElementById(\'paQty\').focus();}">';
     h+='<button class="btn btn-glass btn-sm" onclick="openScannerForPutawayRack()"><i class="bx bx-qr"></i></button></div>';
     h+='<select class="form-input" id="paRackSelect" onchange="if(this.value)document.getElementById(\'paRackScan\').value=this.value;" style="margin-top:4px;font-size:12px"><option value="">-- Select --</option>';
     var racks=DB.get('rack_master');
@@ -2193,7 +2193,7 @@ function renderPutaway(){
     h+='</div>';
 
     // === Invoice/GRN Search Card ===
-    h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-file-find"></i> Invoice / GRN se Putaway</div>';
+    h+='<div class="card" style="margin-top:16px"><div class="card-title"><i class="bx bx-file-find"></i> Putaway by Invoice / GRN</div>';
     h+='<div class="search-box" style="max-width:400px"><i class="bx bx-search"></i><input type="text" id="putawayInvNo" placeholder="Type Invoice No..." oninput="filterPutawayInv()"></div>';
     h+='<div id="putawayInvList"></div></div>';
 
@@ -2614,10 +2614,10 @@ async function renderPIV(){
     }
     h+='<button class="btn btn-glass" onclick="showAddPIV()"><i class="bx bx-plus"></i> Add Count</button>';
     h+='</div></div>';
-    h+='<div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap">';
-    h+='<div style="flex:1;min-width:140px;padding:14px;background:var(--accent-dim);border:1px solid var(--accent);border-radius:var(--radius-sm);text-align:center"><div style="font-size:24px;font-weight:800;color:var(--accent)">'+todayPIV+'</div><div style="font-size:10px;color:var(--text-muted);letter-spacing:1px">TODAY ENTRIES</div></div>';
-    h+='<div style="flex:1;min-width:140px;padding:14px;background:rgba(0,255,136,0.06);border:1px solid var(--success);border-radius:var(--radius-sm);text-align:center"><div style="font-size:24px;font-weight:800;color:var(--success)">'+todayQty+'</div><div style="font-size:10px;color:var(--text-muted);letter-spacing:1px">TODAY QTY</div></div>';
-    h+='<div style="flex:1;min-width:140px;padding:14px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);text-align:center"><div style="font-size:24px;font-weight:800;color:var(--text-primary)">'+PIV_SRV.count.toLocaleString()+'</div><div style="font-size:10px;color:var(--text-muted);letter-spacing:1px">TOTAL ENTRIES</div></div>';
+    h+='<div class="kpi-row">';
+    h+='<div class="kpi" style="--k:#0A6ED1"><i class="bx bx-clipboard"></i><div><b>'+todayPIV+'</b><small>Today Entries</small></div></div>';
+    h+='<div class="kpi" style="--k:#107E3E"><i class="bx bx-package"></i><div><b>'+todayQty+'</b><small>Today Qty</small></div></div>';
+    h+='<div class="kpi" style="--k:#556B82"><i class="bx bx-list-ul"></i><div><b>'+PIV_SRV.count.toLocaleString()+'</b><small>Total Records</small></div></div>';
     h+='</div>';
     // Cycle Planner
     if(cyc)h+=renderPivCyclePanel(cyc);

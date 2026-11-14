@@ -9336,3 +9336,30 @@ function saveInvDraft(i){
     var box=document.getElementById('invDraft_'+i);
     if(box)box.innerHTML='<div style="color:var(--success,#2ecc71);padding:8px"><i class="bx bx-check-circle"></i> Saved — '+esc(invNo)+' ('+mats.length+' materials)</div>';
 }
+
+
+// ---- Phone: make every wide table horizontally scrollable (swipe left / right) ----
+// Tables that are not already inside a scroll wrapper get wrapped automatically, including ones rendered later.
+(function(){
+    function wrapTables(){
+        if(window.innerWidth>768)return;
+        var ts=document.querySelectorAll('table:not([data-sw])');
+        for(var i=0;i<ts.length;i++){
+            var t=ts[i];t.setAttribute('data-sw','1');
+            var p=t.parentElement;if(!p)continue;
+            if(p.classList.contains('table-wrapper')||p.classList.contains('sap-table-wrap')||p.classList.contains('auto-scroll-wrap'))continue;
+            var w=document.createElement('div');w.className='auto-scroll-wrap';
+            p.insertBefore(w,t);w.appendChild(t);
+        }
+    }
+    var pending=false;
+    function schedule(){
+        if(pending)return;pending=true;
+        requestAnimationFrame(function(){pending=false;try{wrapTables();}catch(e){}});
+    }
+    function start(){
+        new MutationObserver(schedule).observe(document.body,{childList:true,subtree:true});
+        schedule();
+    }
+    if(document.body)start();else document.addEventListener('DOMContentLoaded',start);
+})();

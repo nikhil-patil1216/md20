@@ -1150,7 +1150,7 @@ html{-webkit-tap-highlight-color:transparent}
    FIX: page must not overflow the screen, pinch/side-drag disabled — vertical scroll only
    ============================================================ */
 @media(max-width:768px){
-    html,body{width:100%;max-width:100%;touch-action:pan-y;overscroll-behavior-x:none}
+    html,body{width:100%;max-width:100%;touch-action:pan-x pan-y;overscroll-behavior-x:none}   /* pan-x allowed so inner tables can scroll sideways; the page itself still cannot (overflow-x is clipped) */
 
     /* root cause: flex children used to grow wider with their content */
     #mainApp,#mainContent{min-width:0;max-width:100%;overflow-x:clip}
@@ -1227,4 +1227,12 @@ html{-webkit-tap-highlight-color:transparent}
     #loginPage .lp-nav a{font-size:11px}
     #loginPage .lp-panel{top:84px;right:16px}
     #loginPage .login-card{padding:28px 24px 20px;margin-top:40px}
+}
+
+/* ============================================================
+   PHONE: every table scrolls sideways (swipe left / right)
+   ============================================================ */
+@media(max-width:768px){
+    .auto-scroll-wrap{overflow-x:auto;max-width:100%;-webkit-overflow-scrolling:touch;touch-action:pan-x pan-y}
+    .table-wrapper>table,.sap-table-wrap>table,.auto-scroll-wrap>table{width:max-content;min-width:100%;max-width:none}
 }
